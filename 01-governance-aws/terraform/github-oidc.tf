@@ -40,16 +40,38 @@ resource "aws_iam_role_policy" "github_actions_terraform" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
-        Action = [
-          "secretsmanager:*",
-          "lambda:*",
-          "iam:*",
-          "s3:GetObject","s3:PutObject","s3:DeleteObject","s3:ListBucket",
-          "dynamodb:GetItem","dynamodb:PutItem","dynamodb:DeleteItem",
-          "config:*",
-          "logs:*"
-        ]
+        Effect   = "Allow"
+        Action   = ["s3:*"]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["dynamodb:*"]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["secretsmanager:*"]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["lambda:*"]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["iam:*"]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["config:*"]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["logs:*"]
         Resource = "*"
       }
     ]
