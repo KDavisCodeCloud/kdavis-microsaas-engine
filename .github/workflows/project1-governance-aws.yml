@@ -1,0 +1,60 @@
+name: P1 - Cloud Governance (AWS)
+
+on:
+  push:
+    branches: [main]
+    paths: ['01-governance-aws/**']
+  pull_request:
+    paths: ['01-governance-aws/**']
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 01-governance-aws/terraform
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC - no access keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-session-name: GitHubActions-P1-Governance
+
+      - name: Verify identity
+        run: aws sts get-caller-identity
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.8"
+
+      - name: Terraform init
+        run: terraform init
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform plan
+        run: terraform plan -no-color
+
+      - name: Terraform apply (main branch only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: terraform apply -auto-approve
+
+      - name: Verify secret rotation enabled
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          aws secretsmanager describe-secret \
+            --secret-id governance-demo/app-secret \
+            --query "RotationEnabled" --output text | grep -q True && \
+            echo "PASS: Rotation is enabled" || \
+            (echo "FAIL: Rotation not enabled" && exit 1)
