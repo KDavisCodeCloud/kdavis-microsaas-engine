@@ -8,6 +8,9 @@ on:
     paths: ['01-governance-aws/**']
   workflow_dispatch:
 
+env:
+  AWS_REGION: us-east-1
+
 permissions:
   id-token: write
   contents: read
@@ -22,10 +25,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (OIDC - no access keys)
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: arn:aws:iam::402916653765:role/role-github-actions-governance
           aws-region: us-east-1
           role-session-name: GitHubActions-P1-Governance
 
