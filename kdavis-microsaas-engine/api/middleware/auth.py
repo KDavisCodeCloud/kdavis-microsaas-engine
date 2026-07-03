@@ -17,6 +17,6 @@ def verify_jwt(request: Request) -> dict:
         )
         return payload
     except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, error_code="token_expired", detail="Token expired")
+        raise HTTPException(status_code=401, detail={"error_code": "token_expired", "message": "Token expired"})
     except jwt.InvalidTokenError as e:
         raise HTTPException(status_code=401, detail=str(e))

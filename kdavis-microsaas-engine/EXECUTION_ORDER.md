@@ -5,168 +5,378 @@
 
 ## Current Sprint Status
 
-**Sprint:** 1 — Infrastructure Complete, Agent Build Pending
+**Sprint:** 2 — Manual Environment Setup + Agent Build Pending
 **Started:** 2026-07-03
 **Last updated:** 2026-07-03
 **Session owner:** Kelvin Davis
 
 ---
 
-## What Was Built Last Session (Sprint 0 → Sprint 1, 2026-07-03)
+## What Was Built (Cumulative — All Claude Sessions)
 
-- [x] CLAUDE.md, README.md, EXECUTION_ORDER.md — scaffold docs
-- [x] `agents/orchestrator/prompt.md` — full orchestrator system prompt
-- [x] `agents/aggregator/prompt.md` — full aggregator quality gate prompt (7 hard gates)
-- [x] Full directory structure created
-- [x] `supabase/migrations/001_core_schema.sql` — all 5 retention tables + RLS
-- [x] `supabase/migrations/002_opportunity_pipeline.sql` — pipeline table + MRR floor DB constraint
-- [x] `supabase/seed/milestone_definitions.sql` — baseline milestone seed
-- [x] `core/supabase_client.py` — Supabase client singleton
-- [x] `core/llm_router.py` — Haiku for scraping, Sonnet for analysis
-- [x] `core/sanitization.py` — DataSanitizationShield with injection detection
-- [x] `core/retention/milestone_detector.py`
-- [x] `core/retention/reengagement_trigger.py`
-- [x] `core/retention/digest_generator.py`
-- [x] `api/main.py` — FastAPI entry point with CORS + middleware
-- [x] `api/middleware/auth.py` — Supabase JWT verification
-- [x] `api/middleware/tenant_context.py` — tenant_id extraction + RLS context
-- [x] `api/routers/events.py` — POST /events (fires milestone detector)
-- [x] `api/routers/milestones.py` — GET /milestones/{tenant_id}
-- [x] `api/routers/digest.py` — POST /digest/preview/{tenant_id}
-- [x] `api/routers/pipeline.py` — GET/POST /pipeline, PATCH status, POST stamp
-- [x] `api/routers/mcp.py` — MCP manifest + events resource stub
-- [x] `n8n/weekly-digest-workflow.json` — Sunday 20:00 MST cron
-- [x] `n8n/reengagement-workflow.json` — Daily 09:00 MST cron
-- [x] `frontend/components/UsageTracker.tsx` — wired into pages, silent failure
-- [x] `frontend/components/MilestoneToast.tsx`
-- [x] `frontend/components/WeeklySnapshot.tsx`
-- [x] `frontend/app/dashboard/page.tsx`
-- [x] `frontend/app/pipeline/page.tsx` — CRM view with confidence sort
-- [x] `frontend/app/research/page.tsx` — agent trigger + session summary display
-- [x] `docs/data-dictionary.md` — all tables documented
-- [x] `docs/architecture-decisions.md` — ADR-001 through ADR-006
-- [x] `requirements.txt`, `.env.example`, `.gitignore`
+### Session 1 (2026-07-03)
+- [x] CLAUDE.md, README.md, EXECUTION_ORDER.md, docs/data-dictionary.md, docs/architecture-decisions.md
+- [x] agents/orchestrator/prompt.md, agents/aggregator/prompt.md
+- [x] supabase/migrations/001_core_schema.sql — 5 retention tables + RLS policies
+- [x] supabase/migrations/002_opportunity_pipeline.sql — pipeline table + MRR floor DB constraint
+- [x] supabase/seed/milestone_definitions.sql
+- [x] core/supabase_client.py, core/llm_router.py, core/sanitization.py
+- [x] core/retention/milestone_detector.py, reengagement_trigger.py, digest_generator.py
+- [x] api/main.py, api/middleware/auth.py, api/middleware/tenant_context.py
+- [x] api/routers/events.py, milestones.py, digest.py, pipeline.py, mcp.py
+- [x] n8n/weekly-digest-workflow.json, n8n/reengagement-workflow.json
+- [x] frontend/components/UsageTracker.tsx, MilestoneToast.tsx, WeeklySnapshot.tsx
+- [x] frontend/app/dashboard/page.tsx, pipeline/page.tsx, research/page.tsx
+- [x] requirements.txt, .env.example, .gitignore
+- [x] GitHub repo created + pushed
+
+### Session 2 (2026-07-03)
+- [x] Fixed auth.py:19 bug (invalid HTTPException kwarg `error_code`)
+- [x] api/routers/reengagement.py — POST /reengagement/evaluate/{tenant_id} (n8n cron target)
+- [x] api/routers/research.py — POST /research/run + GET /research/session/{id} (frontend target)
+- [x] api/main.py — wired reengagement + research routers
 
 ---
 
 ## What Is In Progress
 
-Nothing in progress post-session.
+Nothing. Awaiting manual setup steps below before next Claude session begins.
 
 ---
 
-## What Is Next — Session 2
+## MANUAL SETUP RUNBOOK
+**These steps require Kelvin to run in the terminal. Claude cannot execute them.**
+**Complete all steps in order before next Claude Code session.**
 
-### Step 1 — Supabase Setup (Kelvin runs manually)
-```bash
-# In the microsaas-engine project directory
-supabase init
-supabase link --project-ref [microsaas-prod project ref]
-supabase db push supabase/migrations/001_core_schema.sql
-supabase db push supabase/migrations/002_opportunity_pipeline.sql
-# Verify tables exist
-supabase db diff
-```
+---
 
-### Step 2 — Python Environment
+### STEP 1 — Python Environment
+**Time: ~5 minutes**
+
 ```bash
+cd /mnt/c/Users/Kelvin/projects/kdavis-microsaas-engine
+
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
-# Fill in .env with real keys (Supabase, Anthropic, Resend, Stripe)
 ```
 
-### Step 3 — Next.js Frontend Init
+Verify it worked:
 ```bash
-cd frontend
-npx create-next-app@latest . --typescript --tailwind --app --no-src-dir
-# When prompted, accept all defaults
-cd ..
+python -c "import fastapi, supabase, anthropic, langgraph; print('all imports OK')"
 ```
-The generated `layout.tsx` needs `<UsageTracker eventType="page_view" />` added to the root layout body.
+Expected output: `all imports OK`
 
-### Step 4 — Start API and Test Endpoints
+If any package fails, check your Python version first: `python3 --version` (need 3.11+).
+
+---
+
+### STEP 2 — Environment Variables
+**Time: ~10 minutes (gathering keys)**
+
+```bash
+cp .env.example .env
+```
+
+Open `.env` and fill in every value. Here's where to get each one:
+
+| Variable | Where to get it |
+|----------|----------------|
+| `SUPABASE_URL` | Supabase dashboard → microsaas-prod project → Settings → API → Project URL |
+| `SUPABASE_SERVICE_KEY` | Supabase dashboard → Settings → API → service_role key (secret) |
+| `SUPABASE_JWT_SECRET` | Supabase dashboard → Settings → API → JWT Secret |
+| `ANTHROPIC_API_KEY` | console.anthropic.com → API Keys |
+| `RESEND_API_KEY` | resend.com → API Keys |
+| `STRIPE_SECRET_KEY` | dashboard.stripe.com → Developers → API keys → Secret key (use the microsaas-specific Stripe account) |
+| `STRIPE_WEBHOOK_SECRET` | dashboard.stripe.com → Developers → Webhooks → signing secret (create endpoint first) |
+| `ALLOWED_ORIGINS` | `http://localhost:3000` for now, add prod domain later |
+| `NEXT_PUBLIC_API_URL` | `http://localhost:8000` for local dev |
+
+**Never commit `.env` to git. `.gitignore` already excludes it.**
+
+---
+
+### STEP 3 — Supabase Project Init and Migrations
+**Time: ~15 minutes**
+
+**Prerequisites:** Supabase CLI installed. If not: `npm install -g supabase`
+
+```bash
+# From the project root
+supabase init
+```
+This creates `supabase/config.toml`. Accept all defaults.
+
+```bash
+# Link to your microsaas-prod project
+# Find your project ref in Supabase dashboard URL: app.supabase.com/project/[YOUR-REF]
+supabase link --project-ref YOUR_PROJECT_REF_HERE
+```
+When prompted, enter your database password (from Supabase dashboard → Settings → Database).
+
+```bash
+# Push both migrations
+supabase db push supabase/migrations/001_core_schema.sql
+supabase db push supabase/migrations/002_opportunity_pipeline.sql
+```
+
+Verify all tables exist:
+```bash
+supabase db diff
+```
+
+You should see NO diff (everything is in sync). If you see a diff, the migration didn't apply — check for errors in the push output.
+
+Double-check in Supabase dashboard → Table Editor that these 6 tables exist:
+- `tenants`
+- `usage_events`
+- `milestones`
+- `retention_sequences`
+- `weekly_digest_log`
+- `opportunity_pipeline`
+
+Verify RLS is ON for each table: Table Editor → click each table → Auth policies → should show "RLS enabled."
+
+**Run seed data for milestones:**
+```bash
+# After creating at least one test tenant, run this in Supabase SQL editor:
+# Copy contents of supabase/seed/milestone_definitions.sql and execute
+```
+
+---
+
+### STEP 4 — Start and Test the API
+**Time: ~10 minutes**
+
 ```bash
 source venv/bin/activate
 uvicorn api.main:app --reload --port 8000
-
-# In another terminal:
-curl http://localhost:8000/health
-# Expected: {"status": "ok"}
-
-curl -X POST http://localhost:8000/events \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer [supabase-jwt]" \
-  -d '{"event_type": "test_event", "metadata": {"source": "curl"}}'
 ```
 
-### Step 5 — Import n8n Workflows
-1. Open n8n at http://localhost:5678
-2. Import `n8n/weekly-digest-workflow.json`
-3. Import `n8n/reengagement-workflow.json`
-4. Configure Supabase and Resend credentials in n8n credential manager
-5. Test weekly digest with a real tenant
+In a second terminal, verify the health check:
+```bash
+curl http://localhost:8000/health
+# Expected: {"status":"ok"}
+```
 
-### Step 6 — Research Orchestrator Agent (Thursday build)
-- [ ] `agents/orchestrator/agent.py` — LangGraph graph using orchestrator/prompt.md
-- [ ] `agents/aggregator/agent.py` — quality gate logic from aggregator/prompt.md
-- [ ] Test single vertical (healthcare) before full swarm
-- [ ] Add `POST /research/run` router to FastAPI
-- [ ] Verify READY_TO_BUILD stamps write to opportunity_pipeline
+View all routes at: http://localhost:8000/docs (FastAPI auto-generated docs)
 
-### Verification Checklist (Session 2 Complete When All Pass)
-- [ ] All 6 Supabase tables exist with RLS enabled
-- [ ] POST /events accepts and stores a usage event
-- [ ] GET /milestones/{tenant_id} returns milestone state
-- [ ] Weekly digest n8n workflow runs and sends to test email
-- [ ] Re-engagement workflow fires on simulated 7-day gap
-- [ ] UsageTracker wired into root layout.tsx
-- [ ] GET /health returns 200
-- [ ] git status is clean, all changes committed
+You should see these route groups:
+- `events` — POST /events
+- `milestones` — GET /milestones/{tenant_id}
+- `digest` — POST /digest/preview/{tenant_id}
+- `pipeline` — GET/POST /pipeline, PATCH /pipeline/{id}/status, POST /pipeline/{id}/stamp
+- `mcp` — GET /mcp/manifest, GET /mcp/resources/events
+- `reengagement` — POST /reengagement/evaluate/{tenant_id}
+- `research` — POST /research/run, GET /research/session/{session_id}
+- `GET /health`
 
----
-
-## Blocked Items
-
-None currently. First session has no blockers.
-
-**Prerequisite reminder:** This scaffold is ready to build. The research agent activation (Thursday build night) is sequenced after Stripe billing closes on Cloud Decoded. The scaffold itself — database, API, retention infrastructure, frontend — can be built now in a Saturday sprint.
+Test POST /events (requires a valid Supabase JWT — get one by logging in via Supabase Auth in your test app, or generate one in the Supabase dashboard under Authentication → Users):
+```bash
+curl -X POST http://localhost:8000/events \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_SUPABASE_JWT" \
+  -d '{"event_type": "test_event", "metadata": {"source": "curl"}}'
+# Expected: {"id": "uuid...", "milestones_achieved": [...]}
+```
 
 ---
 
-## Decisions Made This Sprint
+### STEP 5 — Next.js Frontend Init
+**Time: ~10 minutes**
+
+```bash
+cd /mnt/c/Users/Kelvin/projects/kdavis-microsaas-engine/frontend
+npx create-next-app@latest . --typescript --tailwind --app --no-src-dir
+```
+
+When prompted:
+- ESLint: **Yes**
+- Tailwind: **Yes** (already selected)
+- `src/` directory: **No**
+- App Router: **Yes**
+- Customize import alias: **No** (use `@/`)
+
+This generates `layout.tsx`, `page.tsx`, `globals.css`, `next.config.ts`, `package.json`, `tsconfig.json`, `node_modules/`.
+
+**Wire UsageTracker into root layout** — open `frontend/app/layout.tsx` and add:
+
+```tsx
+// At the top of the file, add this import:
+import { UsageTracker } from "@/components/UsageTracker";
+
+// Inside the <body> tag, add this as the first child:
+<UsageTracker eventType="page_view" />
+```
+
+The full body section should look like:
+```tsx
+<body className={inter.className}>
+  <UsageTracker eventType="page_view" />
+  {children}
+</body>
+```
+
+Then start the dev server:
+```bash
+cd frontend
+npm run dev
+# Opens at http://localhost:3000
+```
+
+Verify pages load:
+- http://localhost:3000/dashboard
+- http://localhost:3000/pipeline
+- http://localhost:3000/research
+
+---
+
+### STEP 6 — Import n8n Workflows
+**Time: ~20 minutes**
+
+**Prerequisite:** n8n running at http://localhost:5678. If not installed:
+```bash
+npm install -g n8n
+n8n start
+```
+
+**Import weekly digest workflow:**
+1. Open http://localhost:5678
+2. Click "Workflows" in sidebar → "Add workflow" → "Import from file"
+3. Select `n8n/weekly-digest-workflow.json`
+4. Click "Save"
+
+**Import reengagement workflow:**
+1. Same steps, select `n8n/reengagement-workflow.json`
+2. Click "Save"
+
+**Configure credentials (do this once, both workflows use the same ones):**
+
+For Supabase nodes:
+1. n8n sidebar → Credentials → Add credential → Supabase
+2. Name: `microsaas-supabase`
+3. Host: your Supabase URL (from .env `SUPABASE_URL`)
+4. Service Role Secret: your service role key (from .env `SUPABASE_SERVICE_KEY`)
+
+For HTTP request nodes (Resend email):
+1. Credentials → Add credential → Generic HTTP Header Auth
+2. Name: `resend-auth`
+3. Header Name: `Authorization`
+4. Header Value: `Bearer YOUR_RESEND_API_KEY`
+
+**Set environment variables in n8n** (Settings → Variables):
+| Variable | Value |
+|----------|-------|
+| `API_BASE_URL` | `http://localhost:8000` |
+| `RESEND_API_KEY` | your Resend key |
+| `PRODUCT_DOMAIN` | your product domain or `localhost` for now |
+| `APP_URL` | `http://localhost:3000` |
+
+**Activate both workflows** — toggle "Active" switch on each workflow.
+
+**Test weekly digest manually:**
+1. Open the weekly-digest workflow
+2. Click "Execute Workflow" (top right)
+3. Watch node outputs — should pull tenants, call /digest/preview, send or log skip
+4. Check Supabase `weekly_digest_log` table — should see a row
+
+**Test reengagement manually:**
+1. Open the reengagement workflow
+2. Click "Execute Workflow"
+3. Check Supabase `retention_sequences` table — should see rows for any tenants with no recent usage
+
+---
+
+### STEP 7 — Stripe Webhook (Before Taking Any Payment)
+**Time: ~15 minutes setup, then Claude builds the handler**
+
+This step requires:
+1. A dedicated Stripe account for this product (separate from Cloud Decoded)
+2. A deployed API endpoint (Render or Railway — see deploy step below) OR use Stripe CLI for local testing
+
+**Local testing with Stripe CLI:**
+```bash
+# Install Stripe CLI
+curl -s https://packages.stripe.com/api/stripe-cli-gpg-key.asc | gpg --dearmor | sudo tee /usr/share/keyrings/stripe.gpg > /dev/null
+echo "deb [signed-by=/usr/share/keyrings/stripe.gpg] https://packages.stripe.com/stripe-cli-debian-track stable main" | sudo tee /etc/apt/sources.list.d/stripe.list
+sudo apt update && sudo apt install stripe
+
+stripe login
+stripe listen --forward-to http://localhost:8000/stripe/webhook
+```
+
+The CLI will print a webhook signing secret — add it to `.env` as `STRIPE_WEBHOOK_SECRET`.
+
+**Then tell Claude to build `api/routers/stripe.py`** — Claude will build the subscription lifecycle handler (create tenant on `customer.subscription.created`, update tier on `customer.subscription.updated`, mark churned on `customer.subscription.deleted`).
+
+---
+
+## What Claude Builds Next Session
+
+Priority order — complete in one session:
+
+- [ ] RLS fix: refactor `core/supabase_client.py` to support per-request authenticated Supabase client (service_role for admin ops, user JWT for tenant-scoped queries) — this closes the tenant isolation gap
+- [ ] `api/routers/stripe.py` — POST /stripe/webhook + tenant lifecycle handlers
+- [ ] `frontend/app/layout.tsx` additions — if Next.js is initialized, wire final layout structure
+- [ ] Legal docs: `legal/EULA.md`, `legal/privacy-policy.md`, `legal/dpa-template.md`
+
+**Then Thursday agent build night:**
+- [ ] `agents/orchestrator/agent.py` — LangGraph graph
+- [ ] `agents/aggregator/agent.py` — 7-gate quality filter runner
+- [ ] Wire `_run_orchestrator_stub` in research.py to real orchestrator
+- [ ] Test with single vertical (healthcare) before full swarm
+
+---
+
+## Open Gaps (Tracking)
+
+| Gap | Severity | Status |
+|-----|----------|--------|
+| Python venv not installed | Blocker | Waiting on Step 1 |
+| Supabase migrations not pushed | Blocker | Waiting on Step 3 |
+| Next.js not initialized | Blocker | Waiting on Step 5 |
+| n8n workflows not imported | Blocks retention loops | Waiting on Step 6 |
+| RLS context not set per-request | High — tenant data not isolated at DB level | Claude builds next session |
+| Stripe webhook handler missing | Blocks payment | Claude builds next session + Step 7 |
+| All agent.py files missing | Blocks research swarm | Thursday build cadence |
+| Legal docs missing | Needed before launch | Claude builds next session |
+
+---
+
+## Decisions Made
 
 | Decision | Reason | Date |
 |----------|--------|------|
-| Isolated Supabase project | Exit architecture — product must be independently acquirable | July 2026 |
-| MRR floor as DB constraint | Enforce at infrastructure level, not just application logic | July 2026 |
-| Retention scaffold before feature work | Non-negotiable — churn problem solved at architecture level | July 2026 |
-| Haiku for scraping, Sonnet for analysis | Cost optimization — high-volume tasks use lowest capable model | July 2026 |
+| Isolated Supabase project | Exit architecture — product must be independently acquirable | 2026-07-03 |
+| MRR floor as DB constraint | Enforce at infrastructure level, not just application logic | 2026-07-03 |
+| Retention scaffold before feature work | Non-negotiable — churn problem solved at architecture level | 2026-07-03 |
+| Haiku for scraping, Sonnet for analysis | Cost optimization — high-volume tasks use lowest capable model | 2026-07-03 |
+| research.py ships as stub | Orchestrator agent.py doesn't exist yet — stub returns session_id, wires to real agent on Thursday | 2026-07-03 |
+| service_role for admin/n8n ops | Admin operations (aggregator stamp, n8n workflows) bypass RLS intentionally | 2026-07-03 |
 
 ---
 
 ## Agent Build Cadence (Thursday Nights)
 
-| Week | Agent | Status |
-|------|-------|--------|
-| 1 | Research Orchestrator | Not started |
-| 2 | Healthcare/Medical Desk Intel | Not started |
-| 3 | Legal/Professional Services Intel | Not started |
-| 4 | E-commerce/Retail Intel | Not started |
-| 5 | Real Estate Intel | Not started |
-| 6 | HR/Ops Intel | Not started |
-| 7 | Finance/Accounting Intel | Not started |
-| 8 | Aggregator + Quality Gate | Not started |
+| Week | Agent | Deliverable | Status |
+|------|-------|-------------|--------|
+| 1 | Orchestrator + Aggregator | agent.py for both, /research/run fully wired | Not started |
+| 2 | Healthcare/Medical Desk Intel | prompt.md + agent.py | Not started |
+| 3 | Legal/Professional Services Intel | prompt.md + agent.py | Not started |
+| 4 | E-commerce/Retail Intel | prompt.md + agent.py | Not started |
+| 5 | Real Estate Intel | prompt.md + agent.py | Not started |
+| 6 | HR/Ops Intel | prompt.md + agent.py | Not started |
+| 7 | Finance/Accounting Intel | prompt.md + agent.py | Not started |
+| 8 | Full swarm end-to-end test | All 6 verticals → aggregator → pipeline → READY_TO_BUILD | Not started |
 
 ---
 
 ## End of Session Protocol
 
 Before closing any Claude Code session:
-1. Update "What Was Built Last Session" above
+1. Update "What Was Built" with session date
 2. Update "What Is In Progress"
-3. Update "What Is Next" — remove completed items, add newly discovered tasks
+3. Update "Open Gaps" table
 4. Update agent build cadence status
-5. Add any new decisions to the decisions table
-6. Commit EXECUTION_ORDER.md: `git commit -m "chore: update execution order post-session"`
+5. Add new decisions to decisions table
+6. Commit: `git commit -m "chore: update execution order post-session"`
