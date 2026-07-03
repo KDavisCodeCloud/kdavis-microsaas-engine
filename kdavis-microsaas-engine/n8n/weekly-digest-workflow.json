@@ -1,0 +1,160 @@
+{
+  "name": "Weekly Digest — Sunday 20:00 MST",
+  "nodes": [
+    {
+      "id": "cron-trigger",
+      "name": "Sunday 20:00 MST",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 20 * * 0"
+            }
+          ]
+        }
+      },
+      "position": [200, 300]
+    },
+    {
+      "id": "get-active-tenants",
+      "name": "Get Active Tenants",
+      "type": "n8n-nodes-base.supabase",
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "tenants",
+        "filterType": "string",
+        "filterString": "status=eq.active"
+      },
+      "position": [420, 300]
+    },
+    {
+      "id": "process-each-tenant",
+      "name": "For Each Tenant",
+      "type": "n8n-nodes-base.splitInBatches",
+      "parameters": {
+        "batchSize": 1
+      },
+      "position": [640, 300]
+    },
+    {
+      "id": "preview-digest",
+      "name": "Preview Digest",
+      "type": "n8n-nodes-base.httpRequest",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.API_BASE_URL }}/digest/preview/{{ $json.id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "position": [860, 300]
+    },
+    {
+      "id": "check-has-content",
+      "name": "Has Content?",
+      "type": "n8n-nodes-base.if",
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.statusCode }}",
+              "operation": "notEqual",
+              "value2": "422"
+            }
+          ]
+        }
+      },
+      "position": [1080, 300]
+    },
+    {
+      "id": "send-email",
+      "name": "Send via Resend",
+      "type": "n8n-nodes-base.httpRequest",
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.RESEND_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "from",
+              "value": "digest@{{ $env.PRODUCT_DOMAIN }}"
+            },
+            {
+              "name": "to",
+              "value": "={{ $('Get Active Tenants').item.json.email }}"
+            },
+            {
+              "name": "subject",
+              "value": "={{ $('Preview Digest').item.json.subject }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $('Preview Digest').item.json.body }}"
+            }
+          ]
+        }
+      },
+      "position": [1300, 200]
+    },
+    {
+      "id": "log-sent",
+      "name": "Log Sent",
+      "type": "n8n-nodes-base.supabase",
+      "parameters": {
+        "operation": "create",
+        "tableId": "weekly_digest_log",
+        "fieldsUi": {
+          "fieldValues": [
+            {"fieldId": "tenant_id", "fieldValue": "={{ $('Get Active Tenants').item.json.id }}"},
+            {"fieldId": "value_metrics", "fieldValue": "={{ JSON.stringify($('Preview Digest').item.json.value_metrics) }}"}
+          ]
+        }
+      },
+      "position": [1520, 200]
+    },
+    {
+      "id": "log-skipped",
+      "name": "Log Skipped",
+      "type": "n8n-nodes-base.supabase",
+      "parameters": {
+        "operation": "create",
+        "tableId": "weekly_digest_log",
+        "fieldsUi": {
+          "fieldValues": [
+            {"fieldId": "tenant_id", "fieldValue": "={{ $('Get Active Tenants').item.json.id }}"},
+            {"fieldId": "skipped_reason", "fieldValue": "no_usage"},
+            {"fieldId": "value_metrics", "fieldValue": "{}"}
+          ]
+        }
+      },
+      "position": [1300, 400]
+    }
+  ],
+  "connections": {
+    "Sunday 20:00 MST": {"main": [[{"node": "Get Active Tenants", "type": "main", "index": 0}]]},
+    "Get Active Tenants": {"main": [[{"node": "For Each Tenant", "type": "main", "index": 0}]]},
+    "For Each Tenant": {"main": [[{"node": "Preview Digest", "type": "main", "index": 0}]]},
+    "Preview Digest": {"main": [[{"node": "Has Content?", "type": "main", "index": 0}]]},
+    "Has Content?": {
+      "main": [
+        [{"node": "Send via Resend", "type": "main", "index": 0}],
+        [{"node": "Log Skipped", "type": "main", "index": 0}]
+      ]
+    },
+    "Send via Resend": {"main": [[{"node": "Log Sent", "type": "main", "index": 0}]]}
+  }
+}

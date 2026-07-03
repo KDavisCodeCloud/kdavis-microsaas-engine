@@ -1,0 +1,11 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+supabase==2.7.4
+anthropic==0.36.0
+langchain-anthropic==0.2.4
+langgraph==0.2.28
+python-dotenv==1.0.1
+pydantic==2.9.2
+PyJWT==2.9.0
+resend==2.4.0
+stripe==10.12.0
