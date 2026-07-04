@@ -1,7 +1,7 @@
 -- Migration 002: Opportunity pipeline (research agent output)
 
 CREATE TABLE opportunity_pipeline (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   vertical TEXT NOT NULL,
   pain_point TEXT NOT NULL,
   icp JSONB NOT NULL,

@@ -1,10 +1,8 @@
 -- Migration 001: Core retention schema
 -- Every micro SaaS product built in this engine starts here.
 
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-
 CREATE TABLE tenants (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
   tier TEXT NOT NULL DEFAULT 'starter' CHECK (tier IN ('starter', 'growth', 'scale')),
   stripe_customer_id TEXT UNIQUE,
@@ -15,7 +13,7 @@ CREATE TABLE tenants (
 );
 
 CREATE TABLE usage_events (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE,
   event_type TEXT NOT NULL,
   metadata JSONB DEFAULT '{}',
@@ -24,7 +22,7 @@ CREATE TABLE usage_events (
 CREATE INDEX idx_usage_events_tenant_created ON usage_events(tenant_id, created_at DESC);
 
 CREATE TABLE milestones (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE,
   milestone_key TEXT NOT NULL,
   threshold INTEGER NOT NULL,
@@ -35,7 +33,7 @@ CREATE TABLE milestones (
 );
 
 CREATE TABLE retention_sequences (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE,
   sequence_type TEXT NOT NULL CHECK (sequence_type IN ('reengagement_7d', 'reengagement_21d', 'prebilling')),
   current_step INTEGER DEFAULT 0,
@@ -45,7 +43,7 @@ CREATE TABLE retention_sequences (
 );
 
 CREATE TABLE weekly_digest_log (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE,
   sent_at TIMESTAMPTZ DEFAULT NOW(),
   open_at TIMESTAMPTZ,
