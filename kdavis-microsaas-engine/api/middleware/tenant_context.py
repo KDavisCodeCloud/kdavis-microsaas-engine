@@ -3,8 +3,9 @@ from api.middleware.auth import verify_jwt
 
 
 async def tenant_context_middleware(request: Request, call_next):
-    # Health check bypasses auth
-    if request.url.path == "/health":
+    # Public paths — no auth required
+    PUBLIC_PATHS = {"/health", "/docs", "/openapi.json", "/redoc"}
+    if request.url.path in PUBLIC_PATHS:
         return await call_next(request)
 
     payload = verify_jwt(request)
