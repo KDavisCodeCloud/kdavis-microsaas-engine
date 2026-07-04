@@ -23,9 +23,7 @@ async def run_research(body: ResearchRunRequest, request: Request, background_ta
     """
     Triggers the research orchestrator for the specified verticals.
     Full swarm runs if verticals list is empty.
-
-    Phase 1 (now): validates input, enqueues run, returns session_id.
-    Phase 2 (Week 1 Thursday): wires to agents/orchestrator/agent.py LangGraph execution.
+    Returns session_id immediately — poll /research/session/{id} for results.
     """
     verticals = body.verticals if body.verticals else list(VALID_VERTICALS)
 
@@ -39,14 +37,12 @@ async def run_research(body: ResearchRunRequest, request: Request, background_ta
     import uuid
     session_id = str(uuid.uuid4())
 
-    # Placeholder — replaced with LangGraph orchestrator invocation in Week 1 Thursday build
-    background_tasks.add_task(_run_orchestrator_stub, session_id, verticals)
+    background_tasks.add_task(_run_orchestrator, session_id, verticals)
 
     return {
         "session_id": session_id,
         "status": "queued",
         "verticals": verticals,
-        "message": "Research run queued. Orchestrator agent not yet wired — build agents/orchestrator/agent.py to activate.",
     }
 
 
@@ -65,9 +61,6 @@ async def get_session(session_id: str, request: Request):
     return {"session_id": session_id, "opportunities": results}
 
 
-async def _run_orchestrator_stub(session_id: str, verticals: list[str]) -> None:
-    """
-    Placeholder until agents/orchestrator/agent.py is implemented.
-    Replace this entire function body with: await orchestrator.run(session_id, verticals)
-    """
-    pass
+async def _run_orchestrator(session_id: str, verticals: list[str]) -> None:
+    from agents.orchestrator.agent import run as orchestrator_run
+    await orchestrator_run(session_id, verticals)

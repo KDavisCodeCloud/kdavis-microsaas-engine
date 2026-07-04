@@ -2,7 +2,7 @@
 **Project:** `kdavis-microsaas-engine`
 **Company:** THD Agentic Systems LLC
 **Last updated:** 2026-07-04
-**Status:** Active build — GAPs 1–10 complete, GAPs 4/11/12 next
+**Status:** Active build — infrastructure complete, agent cadence started
 
 ---
 
@@ -17,102 +17,56 @@ A research-validated, retention-first software factory producing 1–2 micro-Saa
 ## Completed — Do Not Redo
 
 - GAP 1 — venv + pip install ✅
-- GAP 2 — .env partially filled (Supabase URL, service key, JWT secret, Stripe test key) ✅
-- GAP 3 — Dedicated MSE Stripe account created, CLI re-authed, sk_test in .env ✅
-- GAP 5 — Node.js installed via nvm ✅
-- GAP 6 — Supabase CLI installed ✅
-- GAP 7 — Supabase project linked + migrations pushed (6 tables, RLS enabled) ✅
+- GAP 2 — .env fully filled (all keys including ANTHROPIC, RESEND, SUPABASE_ANON_KEY) ✅
+- GAP 3 — Dedicated MSE Stripe account created (Micro Saas Decoded, live mode) ✅
+- GAP 4 — Stripe webhook handler built (`api/routers/stripe.py`) ✅
+- GAP 5 — Node.js v22 installed via nvm ✅
+- GAP 6 — Supabase CLI installed + linked to microsaas-prod ✅
+- GAP 7 — Migrations pushed — 6 tables live with RLS (migration 003 applied: auth.uid()) ✅
 - GAP 8 — API smoke test passed (/health 200, POST /events inserts row) ✅
-- GAP 9 — Next.js initialized + UsageTracker wired into root layout ✅
-- GAP 10 — n8n installed + weekly-digest + reengagement workflows imported ✅
+- GAP 9 — Next.js 15 initialized + UsageTracker wired into root layout ✅
+- GAP 10 — n8n 2.28.6 installed, both workflows active, Supabase credential saved ✅
+- GAP 11 — RLS fix: `get_supabase_for_request(jwt)` built, anon key enforces per-tenant isolation ✅
+- GAP 12 — Legal docs: EULA, privacy-policy, DPA template created (AZ/Maricopa pre-filled) ✅
 
 ---
 
-## Manual Steps Required Before Next Claude Code Session
+## Active — Agent Cadence (GAP 13)
 
-Kelvin completes these first — Claude Code cannot proceed without them:
+### Week 1 — 2026-07-04 (NOW)
 
-1. Fill `ANTHROPIC_API_KEY` in `.env` → console.anthropic.com
-2. Fill `RESEND_API_KEY` in `.env` → resend.com
-3. n8n first-run setup at http://localhost:5678 → create owner account
-4. n8n → Credentials → add Supabase credential (`microsaas-supabase`) with URL + service_role key
-5. n8n → update `RESEND_API_KEY` in `n8n/start-n8n.sh` → activate both workflows
+**Orchestrator agent**
+File: `agents/orchestrator/agent.py`
+- LangGraph state machine
+- Receives research run request, dispatches to vertical intel agents in parallel
+- Collects outputs, passes to aggregator
+- Emits `POST /events` on every state change
 
----
+**Aggregator agent**
+File: `agents/aggregator/agent.py`
+- Runs 7 quality gates against orchestrator output
+- Issues `READY_TO_BUILD` stamp only when all 7 pass
+- Writes validated opportunity to `opportunity_pipeline` table
+- Rejects below $4K MRR floor
 
-## Build Order — Remaining
-
-### Session: Next Claude Code Session
-
-**GAP 4 — Stripe webhook handler**
-File: `api/routers/stripe.py`
-Events to handle:
-- `subscription.created` → create tenant row
-- `subscription.updated` → update tier
-- `subscription.deleted` → mark churned
-- `invoice.payment_failed` → log + trigger n8n re-engagement workflow
-- Verify Stripe signature on every request
-- Write results to `tenants` table
-
-**GAP 11 — RLS fix**
-File: `core/supabase_client.py`
-- Refactor to expose `get_supabase_admin()` (service role, bypasses RLS — internal use only)
-- Add `get_supabase_for_request(jwt)` (user-scoped, RLS enforces per tenant)
-- Every API route that touches tenant data must use `get_supabase_for_request`
-
-**GAP 12 — Legal documents**
-Files: `legal/EULA.md`, `legal/privacy-policy.md`, `legal/dpa-template.md`
-- EULA: usage rights, prohibited uses, IP ownership, termination
-- Privacy policy: data collected, retention, deletion, third-party services (Stripe, Supabase, Anthropic)
-- DPA template: for enterprise/B2B deals, GDPR-compatible
+**Wire `/research/run`**
+File: `api/routers/research.py`
+- `POST /research/run` → calls orchestrator → returns session ID
+- `GET /research/session/{id}` → returns current state + result
 
 ---
 
-### Thursday 2026-07-10 — Agent Cadence Night (GAP 13 begins)
+### Weeks 2–7 — Vertical Intel Agents (one per Thursday)
 
-**Week 1: Orchestrator + Aggregator**
-Files: `agents/orchestrator/agent.py`, `agents/aggregator/agent.py`
-- Wire `/research/run` endpoint
-- Orchestrator coordinates vertical intel agents
-- Aggregator runs quality gate before any output is accepted
-- Both emit `POST /events` on every state change → CEO dashboard feed
-
-**Weeks 2–7: Vertical Intel Agents (one per Thursday)**
-- Week 2: Market sizing agent
-- Week 3: Competitor signal agent
-- Week 4: ICP research agent (also runs Compass Decoded ICP research)
-- Week 5: Retention pattern agent
-- Week 6: Pricing signal agent
-- Week 7: Distribution channel agent
-
-**Week 8: Full swarm test**
-- Run all 7 vertical agents under orchestrator
-- Aggregator quality gate validates output
-- End-to-end: research run → product opportunity report → CEO dashboard
-
----
-
-## Architecture Reference
-
-```
-kdavis-microsaas-engine/
-├── api/
-│   ├── main.py               # FastAPI app
-│   ├── routers/
-│   │   ├── events.py         # POST /events ✅
-│   │   ├── stripe.py         # GAP 4 — next session
-│   │   └── research.py       # GAP 13 — Thu 7/10
-├── core/
-│   ├── supabase_client.py    # GAP 11 — next session
-│   └── config.py
-├── agents/
-│   ├── orchestrator/         # GAP 13 — Thu 7/10
-│   └── aggregator/           # GAP 13 — Thu 7/10
-├── frontend/                 # Next.js ✅
-├── n8n/                      # workflows ✅
-├── legal/                    # GAP 12 — next session
-└── .env                      # partially filled — manual steps above
-```
+| Week | Date | Agent |
+|---|---|---|
+| 2 | 2026-07-10 | Market sizing agent |
+| 3 | 2026-07-17 | Competitor signal agent |
+| 4 | 2026-07-24 | ICP research agent |
+| 5 | 2026-07-31 | Retention pattern agent |
+| 6 | 2026-08-07 | Pricing signal agent |
+| 7 | 2026-08-14 | Distribution channel agent |
+| 8 | 2026-08-21 | Full swarm end-to-end test |
 
 ---
 
@@ -121,12 +75,7 @@ kdavis-microsaas-engine/
 - Dedicated Stripe account for MSE — never share with Cloud Decoded or Decoded Holdings
 - Hard $4K MRR floor enforced at DB constraint level on every product
 - 6 retention loops ship before any feature work on any product
-- RLS must be enforced per `tenant_id` on every table — never bypass with service role in API routes
+- RLS enforced via `get_supabase_for_request(jwt)` in all routes — never service role in API routes
 - Every agent emits `POST /events` on state change — CEO dashboard depends on this
 - Model routing: Haiku for high-volume scraping, Sonnet for analysis — do not swap
-
----
-
-## Operating Stack Context
-
-MSE is the primary revenue engine covering the shared operating stack while Cloud Decoded closes its first B2B deal. Target: 6 clients at blended pricing = stack self-funded. Every shipped product needs fast trial-to-paid conversion and retention past month 2.
+- DataSanitizationShield before every LLM call — no exceptions
