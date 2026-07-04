@@ -1,16 +1,24 @@
 {
+  "id": "reengagement-001",
   "name": "Re-engagement Trigger — Daily 09:00 MST",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "pinData": {},
   "nodes": [
     {
       "id": "cron-trigger",
       "name": "Daily 09:00 MST",
       "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
       "parameters": {
         "rule": {
           "interval": [
             {
               "field": "cronExpression",
-              "expression": "0 9 * * *"
+              "expression": "0 16 * * *"
             }
           ]
         }
@@ -21,6 +29,7 @@
       "id": "get-active-tenants",
       "name": "Get Active Tenants",
       "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
       "parameters": {
         "operation": "getAll",
         "tableId": "tenants",
@@ -33,6 +42,7 @@
       "id": "evaluate-each",
       "name": "For Each Tenant",
       "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
       "parameters": {"batchSize": 1},
       "position": [640, 300]
     },
@@ -40,11 +50,13 @@
       "id": "call-reengagement-api",
       "name": "Evaluate Reengagement",
       "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "parameters": {
         "method": "POST",
         "url": "={{ $env.API_BASE_URL }}/reengagement/evaluate/{{ $json.id }}",
         "authentication": "genericCredentialType",
-        "genericAuthType": "httpHeaderAuth"
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
       },
       "position": [860, 300]
     },
@@ -52,15 +64,26 @@
       "id": "has-triggers",
       "name": "Any Triggered?",
       "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
       "parameters": {
         "conditions": {
-          "number": [
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
             {
-              "value1": "={{ $json.triggered.length }}",
-              "operation": "larger",
-              "value2": 0
+              "id": "check-triggered",
+              "leftValue": "={{ $json.triggered.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
             }
-          ]
+          ],
+          "combinator": "and"
         }
       },
       "position": [1080, 300]
@@ -69,6 +92,7 @@
       "id": "send-reengagement-email",
       "name": "Send Re-engagement Email",
       "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "parameters": {
         "method": "POST",
         "url": "https://api.resend.com/emails",
@@ -84,26 +108,8 @@
           ]
         },
         "sendBody": true,
-        "bodyParameters": {
-          "parameters": [
-            {
-              "name": "from",
-              "value": "team@{{ $env.PRODUCT_DOMAIN }}"
-            },
-            {
-              "name": "to",
-              "value": "={{ $('Get Active Tenants').item.json.email }}"
-            },
-            {
-              "name": "subject",
-              "value": "We noticed you haven't logged in recently"
-            },
-            {
-              "name": "text",
-              "value": "Hey — your account is still active. Log in to see where things stand: {{ $env.APP_URL }}"
-            }
-          ]
-        }
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ from: 'team@' + $env.PRODUCT_DOMAIN, to: $('Get Active Tenants').item.json.email, subject: \"We noticed you haven't logged in recently\", text: 'Hey — your account is still active. Log in to see where things stand: ' + $env.APP_URL }) }}"
       },
       "position": [1300, 200]
     }

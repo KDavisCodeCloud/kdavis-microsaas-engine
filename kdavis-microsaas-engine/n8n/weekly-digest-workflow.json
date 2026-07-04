@@ -1,16 +1,24 @@
 {
+  "id": "wkly-digest-001",
   "name": "Weekly Digest — Sunday 20:00 MST",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "pinData": {},
   "nodes": [
     {
       "id": "cron-trigger",
       "name": "Sunday 20:00 MST",
       "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
       "parameters": {
         "rule": {
           "interval": [
             {
               "field": "cronExpression",
-              "expression": "0 20 * * 0"
+              "expression": "0 3 * * 1"
             }
           ]
         }
@@ -21,6 +29,7 @@
       "id": "get-active-tenants",
       "name": "Get Active Tenants",
       "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
       "parameters": {
         "operation": "getAll",
         "tableId": "tenants",
@@ -33,6 +42,7 @@
       "id": "process-each-tenant",
       "name": "For Each Tenant",
       "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
       "parameters": {
         "batchSize": 1
       },
@@ -42,6 +52,7 @@
       "id": "preview-digest",
       "name": "Preview Digest",
       "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "parameters": {
         "method": "POST",
         "url": "={{ $env.API_BASE_URL }}/digest/preview/{{ $json.id }}",
@@ -55,15 +66,26 @@
       "id": "check-has-content",
       "name": "Has Content?",
       "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
       "parameters": {
         "conditions": {
-          "string": [
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
             {
-              "value1": "={{ $json.statusCode }}",
-              "operation": "notEqual",
-              "value2": "422"
+              "id": "check-not-422",
+              "leftValue": "={{ $json.statusCode }}",
+              "rightValue": 422,
+              "operator": {
+                "type": "number",
+                "operation": "notEquals"
+              }
             }
-          ]
+          ],
+          "combinator": "and"
         }
       },
       "position": [1080, 300]
@@ -72,6 +94,7 @@
       "id": "send-email",
       "name": "Send via Resend",
       "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "parameters": {
         "method": "POST",
         "url": "https://api.resend.com/emails",
@@ -87,26 +110,8 @@
           ]
         },
         "sendBody": true,
-        "bodyParameters": {
-          "parameters": [
-            {
-              "name": "from",
-              "value": "digest@{{ $env.PRODUCT_DOMAIN }}"
-            },
-            {
-              "name": "to",
-              "value": "={{ $('Get Active Tenants').item.json.email }}"
-            },
-            {
-              "name": "subject",
-              "value": "={{ $('Preview Digest').item.json.subject }}"
-            },
-            {
-              "name": "text",
-              "value": "={{ $('Preview Digest').item.json.body }}"
-            }
-          ]
-        }
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ from: 'digest@' + $env.PRODUCT_DOMAIN, to: $('Get Active Tenants').item.json.email, subject: $('Preview Digest').item.json.subject, text: $('Preview Digest').item.json.body }) }}"
       },
       "position": [1300, 200]
     },
@@ -114,6 +119,7 @@
       "id": "log-sent",
       "name": "Log Sent",
       "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
       "parameters": {
         "operation": "create",
         "tableId": "weekly_digest_log",
@@ -130,6 +136,7 @@
       "id": "log-skipped",
       "name": "Log Skipped",
       "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
       "parameters": {
         "operation": "create",
         "tableId": "weekly_digest_log",
