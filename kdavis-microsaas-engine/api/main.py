@@ -2,7 +2,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api.middleware.tenant_context import tenant_context_middleware
-from api.routers import events, milestones, digest, pipeline, mcp, reengagement, research
+from api.routers import events, milestones, digest, pipeline, mcp, reengagement, research, stripe
 
 app = FastAPI(title="Micro SaaS Engine API", version="0.1.0")
 
@@ -23,6 +23,7 @@ app.include_router(pipeline.router)
 app.include_router(mcp.router)
 app.include_router(reengagement.router)
 app.include_router(research.router)
+app.include_router(stripe.router)
 
 
 @app.get("/health")

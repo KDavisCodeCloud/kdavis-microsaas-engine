@@ -4,6 +4,7 @@
 
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+nvm use 22
 
 export API_BASE_URL="http://localhost:8000"
 export RESEND_API_KEY="${RESEND_API_KEY:-FILL_IN}"
