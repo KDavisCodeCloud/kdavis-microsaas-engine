@@ -5,7 +5,7 @@
 
 ## Current Sprint Status
 
-**Sprint:** 2 — Manual Environment Setup + Agent Build Pending
+**Sprint:** 3 — Code Gaps + Thursday Agent Build
 **Started:** 2026-07-03
 **Last updated:** 2026-07-03
 **Session owner:** Kelvin Davis
@@ -36,11 +36,24 @@
 - [x] api/routers/research.py — POST /research/run + GET /research/session/{id} (frontend target)
 - [x] api/main.py — wired reengagement + research routers
 
+### Session 3 (2026-07-03) — Infrastructure Sprint
+- [x] All Python packages installed (supabase, langgraph, langchain-anthropic, resend, stripe)
+- [x] .env created — Supabase + Stripe keys filled (ANTHROPIC + RESEND still needed)
+- [x] Stripe dedicated account created: Micro Saas Decoded (acct_1TpLcKLIpoJRr7Tc)
+- [x] Supabase project microsaas-prod created + CLI linked + both migrations pushed
+- [x] All 6 tables live with RLS confirmed (tenants, usage_events, milestones, retention_sequences, weekly_digest_log, opportunity_pipeline)
+- [x] API smoke tested: /health 200, /docs 200, POST /events writes to prod DB (e2e confirmed)
+- [x] Fixed tenant_context.py: /docs and /openapi.json excluded from JWT auth
+- [x] Node.js v22 + v24 installed via nvm
+- [x] Next.js 15 initialized: 4 routes live, UsageTracker wired into root layout
+- [x] n8n 2.28.6 installed + @langchain/core exports patched + both workflows imported
+- [x] Empire dashboard updated (003_update_2026_07_03_session3.sql)
+
 ---
 
 ## What Is In Progress
 
-Nothing. Awaiting manual setup steps below before next Claude session begins.
+Nothing in progress. Next action: run 003_update_2026_07_03_session3.sql in empire-dashboard Supabase, then open next Claude session for code gaps.
 
 ---
 
@@ -332,14 +345,15 @@ Priority order — complete in one session:
 
 | Gap | Severity | Status |
 |-----|----------|--------|
-| Python venv not installed | Blocker | Waiting on Step 1 |
-| Supabase migrations not pushed | Blocker | Waiting on Step 3 |
-| Next.js not initialized | Blocker | Waiting on Step 5 |
-| n8n workflows not imported | Blocks retention loops | Waiting on Step 6 |
-| RLS context not set per-request | High — tenant data not isolated at DB level | Claude builds next session |
-| Stripe webhook handler missing | Blocks payment | Claude builds next session + Step 7 |
+| ANTHROPIC_API_KEY missing from .env | Blocks LLM calls | Kelvin: console.anthropic.com |
+| RESEND_API_KEY missing from .env | Blocks email sending | Kelvin: resend.com |
+| n8n first-run setup not done | Blocks workflow activation | Kelvin: localhost:5678 |
+| n8n Supabase credential not configured | Blocks workflow DB access | Kelvin: n8n UI |
+| n8n workflows not activated | Retention loops not firing | Kelvin: n8n UI after credential setup |
+| RLS context not set per-request | High — service_role bypasses RLS | Claude builds next session |
+| Stripe webhook handler missing | Blocks payment processing | Claude builds next session |
+| Legal docs missing | Required before launch | Claude builds next session |
 | All agent.py files missing | Blocks research swarm | Thursday build cadence |
-| Legal docs missing | Needed before launch | Claude builds next session |
 
 ---
 
