@@ -86,7 +86,7 @@ TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE COMPANY'S TOTAL LIABILITY ARISING OU
 
 ## 11. Governing Law
 
-This Agreement is governed by the laws of the State of [STATE], without regard to conflict of law principles. Any disputes shall be resolved in the courts of [COUNTY], [STATE].
+This Agreement is governed by the laws of the State of Arizona, without regard to conflict of law principles. Any disputes shall be resolved in the courts of Maricopa County, Arizona.
 
 ---
 

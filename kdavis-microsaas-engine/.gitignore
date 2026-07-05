@@ -1,4 +1,8 @@
 .env
+.env.*
+*.tsbuildinfo
+next-env.d.ts
+package-lock.json
 venv/
 __pycache__/
 *.pyc
