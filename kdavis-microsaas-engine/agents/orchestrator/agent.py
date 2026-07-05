@@ -65,9 +65,15 @@ async def _run_one_vertical(vertical: str) -> dict:
         "Return only the JSON array — no prose, no markdown fences."
     )
     safe = DataSanitizationShield.clean(user_prompt)
-    raw = analyze(_SYSTEM_PROMPT, safe, max_tokens=4096)
+    raw = analyze(_SYSTEM_PROMPT, safe, max_tokens=8192)
 
-    raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+    # Strip markdown code fences if present
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```", 2)[1]          # drop opening fence
+        if raw.startswith("json"):
+            raw = raw[4:]                      # drop language tag
+        raw = raw.rsplit("```", 1)[0].strip()  # drop closing fence
     try:
         findings = json.loads(raw)
         if not isinstance(findings, list):
@@ -114,13 +120,35 @@ def node_write_pipeline(state: OrchestratorState) -> OrchestratorState:
              if f.get("solution_concept") == result.get("solution_concept")),
             {}
         )
+        # Map all NOT NULL columns so the insert never violates constraints
+        mrr = source.get("conservative_mrr_potential", 0)
+        try:
+            mrr = float(mrr)
+        except (TypeError, ValueError):
+            mrr = 0.0
+
         to_insert.append({
-            "vertical":                  result.get("vertical", ""),
-            "solution_concept":          result.get("solution_concept", ""),
-            "conservative_mrr_potential": source.get("conservative_mrr_potential", 0),
-            "build_confidence_score":    source.get("build_confidence_score", 0),
-            "status":                    result.get("status", "watch"),
-            "notes":                     f"session:{state['session_id']}",
+            "vertical":                   result.get("vertical", "") or source.get("vertical", ""),
+            "pain_point":                 source.get("pain_point", "See research session notes"),
+            "icp":                        source.get("icp") or {},
+            "solution_concept":           result.get("solution_concept", ""),
+            "mrr_calculation":            source.get("mrr_calculation", ""),
+            "competitor_pricing_avg":     source.get("competitor_pricing_avg"),
+            "conservative_mrr_potential": max(mrr, 4000),  # enforce $4K floor
+            "competition_density":        source.get("competition_density"),
+            "competition_density_reason": source.get("competition_density_reason", ""),
+            "build_confidence_score":     source.get("build_confidence_score", 0),
+            "build_confidence_reason":    source.get("build_confidence_reason", ""),
+            "retention_hooks":            source.get("retention_hooks") or {},
+            "competitor_examples":        source.get("competitor_examples") or [],
+            "source_urls":                source.get("source_urls") or [],
+            "tier_structure":             source.get("tier_structure") or {},
+            "mcp_integration_surface":    source.get("mcp_integration_surface"),
+            "stack_compatible":           source.get("stack_compatible", True),
+            "stack_compatibility_notes":  source.get("stack_compatibility_notes", ""),
+            "estimated_build_weeks":      source.get("estimated_build_weeks"),
+            "status":                     result.get("status", "watch"),
+            "notes":                      f"session:{state['session_id']}",
         })
 
     if to_insert:

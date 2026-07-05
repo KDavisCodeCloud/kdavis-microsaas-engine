@@ -2,13 +2,13 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api.middleware.tenant_context import tenant_context_middleware
-from api.routers import events, milestones, digest, pipeline, mcp, reengagement, research, stripe
+from api.routers import events, milestones, digest, pipeline, mcp, reengagement, research, stripe, ceo
 
 app = FastAPI(title="Micro SaaS Engine API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000").split(","),
+    allow_origins=os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:3001").split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -24,6 +24,7 @@ app.include_router(mcp.router)
 app.include_router(reengagement.router)
 app.include_router(research.router)
 app.include_router(stripe.router)
+app.include_router(ceo.router)
 
 
 @app.get("/health")
