@@ -45,6 +45,19 @@ class CampaignRequest(BaseModel):
     vertical: str = ""
 
 
+class ApolloListRequest(BaseModel):
+    product_id: str
+    campaign_build_id: str
+    research_report: dict
+
+
+class DmSequenceRequest(BaseModel):
+    product_id: str
+    campaign_build_id: str
+    research_report: dict
+    leads: list[dict] | None = None  # omit to auto-fetch from mse_apollo_leads
+
+
 @router.post("/research")
 async def trigger_research(
     body: ResearchRequest,
@@ -77,6 +90,41 @@ async def trigger_campaign(
     return {"status": "queued", "product_id": body.product_id, "research_opp_id": body.research_opp_id}
 
 
+@router.post("/apollo-list")
+async def trigger_apollo_list(
+    body: ApolloListRequest,
+    background_tasks: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+):
+    """Triggers MKT-O1 for an approved product's campaign. Runs in the
+    background; poll audit_log or campaign_builds.apollo_status for completion."""
+    _require_api_key(authorization)
+
+    background_tasks.add_task(
+        _run_apollo_list, body.product_id, body.research_report, body.campaign_build_id,
+    )
+    return {"status": "queued", "product_id": body.product_id, "campaign_build_id": body.campaign_build_id}
+
+
+@router.post("/dm-sequences")
+async def trigger_dm_sequences(
+    body: DmSequenceRequest,
+    background_tasks: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+):
+    """Triggers MKT-O2 for an approved product's campaign. Runs in the
+    background; poll audit_log or campaign_builds.dm_sequence_status for
+    completion. leads is optional — omit it to auto-fetch from
+    mse_apollo_leads by campaign_build_id (the normal case, since MKT-O1
+    is what produces them)."""
+    _require_api_key(authorization)
+
+    background_tasks.add_task(
+        _run_dm_sequences, body.product_id, body.research_report, body.campaign_build_id, body.leads,
+    )
+    return {"status": "queued", "product_id": body.product_id, "campaign_build_id": body.campaign_build_id}
+
+
 def _run_research(product_id: str, niche_keywords: list[str], source_config: dict) -> None:
     from agents.marketing.mkt_r1_research_core import run_research_core
     run_research_core(product_id, niche_keywords, source_config)
@@ -85,3 +133,22 @@ def _run_research(product_id: str, niche_keywords: list[str], source_config: dic
 def _run_campaign(product_id: str, research_opp_id: str, vertical: str) -> None:
     from agents.marketing.mkt_orch_campaign_orchestrator import run_campaign_orchestrator
     run_campaign_orchestrator(product_id, research_opp_id, vertical)
+
+
+def _run_apollo_list(product_id: str, research_report: dict, campaign_build_id: str) -> None:
+    from agents.marketing.mkt_o1_apollo_list_builder import run_o1_apollo_list_builder
+    run_o1_apollo_list_builder(product_id, research_report, campaign_build_id)
+
+
+def _run_dm_sequences(
+    product_id: str, research_report: dict, campaign_build_id: str, leads: list[dict] | None,
+) -> None:
+    from agents.marketing.mkt_o2_cold_dm_writer import run_o2_cold_dm_writer
+
+    if leads is None:
+        from core.supabase_client import get_supabase
+        db = get_supabase()
+        result = db.table("mse_apollo_leads").select("*").eq("campaign_build_id", campaign_build_id).execute()
+        leads = result.data or []
+
+    run_o2_cold_dm_writer(product_id, research_report, leads, campaign_build_id)
