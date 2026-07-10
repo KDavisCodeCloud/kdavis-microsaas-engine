@@ -58,6 +58,12 @@ class DmSequenceRequest(BaseModel):
     leads: list[dict] | None = None  # omit to auto-fetch from mse_apollo_leads
 
 
+class EmailSequenceRequest(BaseModel):
+    product_id: str
+    campaign_build_id: str
+    research_report: dict
+
+
 @router.post("/research")
 async def trigger_research(
     body: ResearchRequest,
@@ -125,6 +131,23 @@ async def trigger_dm_sequences(
     return {"status": "queued", "product_id": body.product_id, "campaign_build_id": body.campaign_build_id}
 
 
+@router.post("/email-sequences")
+async def trigger_email_sequences(
+    body: EmailSequenceRequest,
+    background_tasks: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+):
+    """Triggers MKT-O3 for an approved product's campaign. Runs in the
+    background; poll audit_log or campaign_builds.email_sequence_status
+    for completion."""
+    _require_api_key(authorization)
+
+    background_tasks.add_task(
+        _run_email_sequences, body.product_id, body.research_report, body.campaign_build_id,
+    )
+    return {"status": "queued", "product_id": body.product_id, "campaign_build_id": body.campaign_build_id}
+
+
 def _run_research(product_id: str, niche_keywords: list[str], source_config: dict) -> None:
     from agents.marketing.mkt_r1_research_core import run_research_core
     run_research_core(product_id, niche_keywords, source_config)
@@ -152,3 +175,8 @@ def _run_dm_sequences(
         leads = result.data or []
 
     run_o2_cold_dm_writer(product_id, research_report, leads, campaign_build_id)
+
+
+def _run_email_sequences(product_id: str, research_report: dict, campaign_build_id: str) -> None:
+    from agents.marketing.mkt_o3_email_sequence_loader import run_o3_email_sequence_loader
+    run_o3_email_sequence_loader(product_id, research_report, campaign_build_id)
