@@ -58,6 +58,11 @@ class DmSequenceRequest(BaseModel):
     leads: list[dict] | None = None  # omit to auto-fetch from mse_apollo_leads
 
 
+class SeoContentRequest(BaseModel):
+    product_id: str
+    research_report: dict
+
+
 @router.post("/research")
 async def trigger_research(
     body: ResearchRequest,
@@ -125,6 +130,25 @@ async def trigger_dm_sequences(
     return {"status": "queued", "product_id": body.product_id, "campaign_build_id": body.campaign_build_id}
 
 
+@router.post("/seo-content")
+async def trigger_seo_content(
+    body: SeoContentRequest,
+    background_tasks: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+):
+    """Triggers MKT-S1 for a product's research report. Runs in the
+    background; poll audit_log for completion — this endpoint doesn't
+    persist the produced content itself, it returns it to the caller
+    of run_s1_seo_content_factory (no content-storage table exists yet;
+    not part of this task's scope)."""
+    _require_api_key(authorization)
+
+    background_tasks.add_task(
+        _run_seo_content, body.product_id, body.research_report,
+    )
+    return {"status": "queued", "product_id": body.product_id}
+
+
 def _run_research(product_id: str, niche_keywords: list[str], source_config: dict) -> None:
     from agents.marketing.mkt_r1_research_core import run_research_core
     run_research_core(product_id, niche_keywords, source_config)
@@ -152,3 +176,8 @@ def _run_dm_sequences(
         leads = result.data or []
 
     run_o2_cold_dm_writer(product_id, research_report, leads, campaign_build_id)
+
+
+def _run_seo_content(product_id: str, research_report: dict) -> None:
+    from agents.marketing.mkt_s1_seo_content_factory import run_s1_seo_content_factory
+    run_s1_seo_content_factory(research_report, product_id)
