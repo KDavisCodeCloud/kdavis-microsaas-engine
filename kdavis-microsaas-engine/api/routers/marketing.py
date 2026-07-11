@@ -58,10 +58,9 @@ class DmSequenceRequest(BaseModel):
     leads: list[dict] | None = None  # omit to auto-fetch from mse_apollo_leads
 
 
-class EmailSequenceRequest(BaseModel):
+class LoadSequenceRequest(BaseModel):
+    sequence_id: str
     product_id: str
-    campaign_build_id: str
-    research_report: dict
 
 
 @router.post("/research")
@@ -131,21 +130,21 @@ async def trigger_dm_sequences(
     return {"status": "queued", "product_id": body.product_id, "campaign_build_id": body.campaign_build_id}
 
 
-@router.post("/email-sequences")
-async def trigger_email_sequences(
-    body: EmailSequenceRequest,
+@router.post("/load-sequence")
+async def trigger_load_sequence(
+    body: LoadSequenceRequest,
     background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
 ):
-    """Triggers MKT-O3 for an approved product's campaign. Runs in the
-    background; poll audit_log or campaign_builds.email_sequence_status
-    for completion."""
+    """Triggers MKT-O3 to load an approved mse_dm_sequences row into
+    systeme.io. Runs in the background; poll audit_log or
+    mse_dm_sequences.status for completion. sequence_id must reference a
+    row with hitl_approved_at already set — MKT-O3 refuses to load an
+    unapproved sequence."""
     _require_api_key(authorization)
 
-    background_tasks.add_task(
-        _run_email_sequences, body.product_id, body.research_report, body.campaign_build_id,
-    )
-    return {"status": "queued", "product_id": body.product_id, "campaign_build_id": body.campaign_build_id}
+    background_tasks.add_task(_run_load_sequence, body.sequence_id, body.product_id)
+    return {"status": "queued", "sequence_id": body.sequence_id, "product_id": body.product_id}
 
 
 def _run_research(product_id: str, niche_keywords: list[str], source_config: dict) -> None:
@@ -177,6 +176,6 @@ def _run_dm_sequences(
     run_o2_cold_dm_writer(product_id, research_report, leads, campaign_build_id)
 
 
-def _run_email_sequences(product_id: str, research_report: dict, campaign_build_id: str) -> None:
+def _run_load_sequence(sequence_id: str, product_id: str) -> None:
     from agents.marketing.mkt_o3_email_sequence_loader import run_o3_email_sequence_loader
-    run_o3_email_sequence_loader(product_id, research_report, campaign_build_id)
+    run_o3_email_sequence_loader(sequence_id, product_id)

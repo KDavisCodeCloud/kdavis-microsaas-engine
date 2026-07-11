@@ -1,77 +1,52 @@
 """
 MKT-O3 Email Sequence Loader.
 
-Writes a 3-email nurture drip sequence for a product's campaign using pain
-language, proof signals, and content angles from research_report. Unlike
-MKT-O2 (one personalized DM sequence per lead), email is a single bulk
-sequence for the whole list — personalization is via {{first_name}} /
-{{company}} merge tags, not per-lead generation. select_channels() in
-MKT-ORCH always includes "email", so this agent fires on every campaign.
+Loads an already-approved sequence (written by MKT-O2 into mse_dm_sequences,
+HITL-approved via hitl_approved_at/hitl_approved_by) into systeme.io by
+enrolling the lead's contact into a systeme.io email sequence. This agent
+never writes new copy — it takes touch_1/touch_2 as-is from the approved
+row and hands the *enrollment* off to systeme.io, which then owns actual
+delivery.
 
-Every sequence lands in mse_email_sequences with status='pending_hitl' —
-this agent never sends anything, matching MKT-O2's precedent (and
-digest_generator.py's existing precedent: Python generates content, a
-human-approved sender handles actual delivery via Resend). A human
-approves in the HITL queue; approval unlocks the separate sender, which
-doesn't exist yet.
+Non-negotiable HITL gate (CLAUDE.md "No autonomous outbound — approved
+status required in DB"): raises if the referenced mse_dm_sequences row
+does not have hitl_approved_at set. Never loads an unapproved sequence.
+
+No run() adapter here (unlike MKT-O1/O2) — MKT-ORCH's dynamic dispatch
+fires at campaign-build time with a whole research_report/campaign_build,
+but this agent's trigger is per-sequence, after a human approves one
+specific mse_dm_sequences row. Wiring it into MKT-ORCH's auto-fan-out
+would bypass that HITL gate, so it's invoked only via
+POST /marketing/load-sequence.
+
+NOTE: systeme.io's exact contact-lookup/create and enrollment request
+shapes below (GET/POST /api/contacts, POST /api/contacts/{id}/sequences,
+X-API-Key header) match their documented REST API as of this writing but
+haven't been exercised against a live key — verify against current
+systeme.io docs once SYSTEME_API_KEY is set. Which systeme.io sequence to
+enroll into is configured via SYSTEME_SEQUENCE_ID (one global sequence for
+now — swap to a per-product mapping if/when multiple sequences are needed).
+
+NOTE: mse_dm_sequences.touch_1/touch_2 were written by MKT-O2 as LinkedIn
+DM copy (300/500-char limits, DM framing — see
+mkt_o2_cold_dm_writer.py's _SYSTEM_PROMPT) rather than email copy. This
+agent enrolls the contact into systeme.io's sequence infrastructure; it
+does not push touch_1/touch_2 text into systeme.io itself (systeme.io
+sequences own their own email content once a contact is enrolled). Flagged
+here since "email sequence" vs. "DM sequence" naming is easy to conflate —
+confirm the systeme.io sequence configured via SYSTEME_SEQUENCE_ID is
+actually the intended email content before enrolling live contacts.
 """
 
-import json
+import os
 from typing import Any, Optional
 
-import core.llm_router as llm_router
-from core.sanitization import DataSanitizationShield
+import httpx
+
 from core.supabase_client import get_supabase
 
 AGENT_ID = "mkt-o3"
-
-SEQUENCE_LENGTH = 3
-SUBJECT_MAX_CHARS = 100
-BODY_MAX_CHARS = 1500
-
-_SYSTEM_PROMPT = f"""You are MKT-O3, writing a {SEQUENCE_LENGTH}-email nurture drip sequence for one
-product's marketing campaign. Return ONLY a single JSON object — no prose, no markdown fences —
-matching exactly this schema:
-
-{{
-  "emails": [
-    {{"subject": str, "body": str, "send_offset_days": int}}
-  ]
-}}
-
-emails must contain exactly {SEQUENCE_LENGTH} items, ordered by send sequence.
-subject = max {SUBJECT_MAX_CHARS} chars. body = max {BODY_MAX_CHARS} chars, plain text (no HTML).
-send_offset_days = days after the sequence starts that this email goes out (email 1 is always 0).
-
-Rules, non-negotiable:
-- Frame around "make more money" + a specific dollar amount — never "save time"
-- Name a specific pain from the research below, not a generic problem
-- Email 1 leads with the pain signal. Email 2 leads with a proof signal (real signal from
-  research, not fabricated). Email 3 leads with the specific dollar value prop and a low-friction
-  call to action (one question, not a meeting ask)
-- Use {{{{first_name}}}} and {{{{company}}}} as merge tags where personalization would help — do
-  not invent a specific person's name or company
-- No hype words, no "I noticed you...", no generic flattery"""
-
-
-def _analyze(system: str, user: str, anthropic_client=None, max_tokens: int = 2048) -> str:
-    if anthropic_client is None:
-        return llm_router.analyze(system, user, max_tokens=max_tokens)
-    msg = anthropic_client.messages.create(
-        model=llm_router.SONNET, max_tokens=max_tokens, system=system,
-        messages=[{"role": "user", "content": user}],
-    )
-    return msg.content[0].text
-
-
-def _strip_fences(raw: str) -> str:
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```", 2)[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.rsplit("```", 1)[0].strip()
-    return raw
+SYSTEME_API_BASE = "https://api.systeme.io"
 
 
 def _emit_event(db, event_type: str, metadata: dict) -> None:
@@ -92,100 +67,97 @@ def _write_audit(db, outcome: str, product_id: str, metadata: dict) -> None:
     }).execute()
 
 
-def _generate_sequence(research_report: dict, anthropic_client=None) -> list[dict]:
-    research_context = DataSanitizationShield.clean({
-        "pain_language": research_report.get("pain_language", []),
-        "proof_signals": research_report.get("proof_signals", []),
-        "content_angles": research_report.get("content_angles", []),
-    })
-    user_prompt = f"Research context:\n{json.dumps(research_context, indent=2)}\n\nWrite the {SEQUENCE_LENGTH}-email sequence now."
-    raw = _analyze(_SYSTEM_PROMPT, user_prompt, anthropic_client=anthropic_client)
-    parsed = json.loads(_strip_fences(raw))
-    if not isinstance(parsed, dict) or "emails" not in parsed:
-        raise ValueError(f"MKT-O3 expected {{emails: [...]}}, got: {raw[:200]}")
+def _find_or_create_contact(
+    email: str, first_name: Optional[str], last_name: Optional[str], api_key: str, http_client=None,
+) -> str:
+    client = http_client or httpx
+    headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
 
-    emails = parsed["emails"]
-    if not isinstance(emails, list) or len(emails) != SEQUENCE_LENGTH:
-        raise ValueError(f"MKT-O3 expected exactly {SEQUENCE_LENGTH} emails, got {len(emails) if isinstance(emails, list) else type(emails).__name__}")
+    search = client.get(
+        f"{SYSTEME_API_BASE}/api/contacts",
+        params={"email": email},
+        headers=headers,
+        timeout=30,
+    )
+    search.raise_for_status()
+    existing = search.json().get("items") or []
+    if existing:
+        return str(existing[0]["id"])
 
-    return [
-        {
-            "subject": str(email["subject"])[:SUBJECT_MAX_CHARS],
-            "body": str(email["body"])[:BODY_MAX_CHARS],
-            "send_offset_days": int(email.get("send_offset_days") or 0),
-        }
-        for email in emails
-    ]
+    created = client.post(
+        f"{SYSTEME_API_BASE}/api/contacts",
+        json={"email": email, "fields": {"first_name": first_name, "surname": last_name}},
+        headers=headers,
+        timeout=30,
+    )
+    created.raise_for_status()
+    return str(created.json()["id"])
+
+
+def _enroll_in_sequence(contact_id: str, sequence_id: str, api_key: str, http_client=None) -> None:
+    client = http_client or httpx
+    response = client.post(
+        f"{SYSTEME_API_BASE}/api/contacts/{contact_id}/sequences",
+        json={"sequence_id": sequence_id},
+        headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+        timeout=30,
+    )
+    response.raise_for_status()
 
 
 def run_o3_email_sequence_loader(
+    sequence_id: str,
     product_id: str,
-    research_report: dict,
-    campaign_build_id: str,
     supabase_client: Optional[Any] = None,
-    anthropic_client: Optional[Any] = None,
+    http_client: Optional[Any] = None,
 ) -> dict:
     """
-    Writes a 3-email nurture sequence for the campaign's product. Never
-    sends anything — every row lands with status='pending_hitl'. Raises on
-    any failure — never fails silently. Returns {status, emails_written}.
+    Loads an approved mse_dm_sequences row into systeme.io by enrolling the
+    matching lead's contact into the configured systeme.io sequence.
+
+    Returns {"status": "skipped", "reason": "no_api_key"} without raising
+    if SYSTEME_API_KEY isn't set — matches MKT-O1's graceful-skip precedent
+    for unprovisioned third-party accounts. Raises RuntimeError for any
+    other failure (including an unapproved sequence) — never fails
+    silently.
     """
     db = supabase_client if supabase_client is not None else get_supabase()
+    api_key = os.getenv("SYSTEME_API_KEY")
 
-    _emit_event(db, "email_sequence_load_started", {
-        "product_id": product_id, "campaign_build_id": campaign_build_id,
-    })
+    if not api_key:
+        print("SYSTEME_API_KEY not set — mkt_o3 skipped")
+        _write_audit(db, "lose", product_id, {"sequence_id": sequence_id, "reason": "no_api_key"})
+        return {"status": "skipped", "reason": "no_api_key"}
 
-    rows: list[dict] = []
+    _emit_event(db, "email_sequence_load_started", {"product_id": product_id, "sequence_id": sequence_id})
+
     try:
-        emails = _generate_sequence(research_report, anthropic_client=anthropic_client)
-        rows = [
-            {
-                "product_id": product_id,
-                "campaign_build_id": campaign_build_id,
-                "sequence_order": i + 1,
-                "send_offset_days": email["send_offset_days"],
-                "subject": email["subject"],
-                "body": email["body"],
-            }
-            for i, email in enumerate(emails)
-        ]
+        sequence = db.table("mse_dm_sequences").select("*").eq("id", sequence_id).single().execute().data
+        if not sequence:
+            raise RuntimeError(f"mse_dm_sequences row {sequence_id} not found")
+        if not sequence.get("hitl_approved_at"):
+            raise RuntimeError(f"mse_dm_sequences row {sequence_id} is not HITL-approved — refusing to load")
 
-        insert_result = db.table("mse_email_sequences").insert(rows).execute()
-        if not insert_result.data:
-            raise RuntimeError("Insert into mse_email_sequences returned no data")
+        lead = db.table("mse_apollo_leads").select("*").eq("id", sequence["lead_id"]).single().execute().data
+        if not lead or not lead.get("email"):
+            raise RuntimeError(f"No email on file for lead {sequence.get('lead_id')} — cannot load into systeme.io")
 
-        db.table("campaign_builds").update(
-            {"email_sequence_status": "ready_for_hitl"}
-        ).eq("id", campaign_build_id).execute()
+        sequence_target = os.getenv("SYSTEME_SEQUENCE_ID")
+        if not sequence_target:
+            raise RuntimeError("SYSTEME_SEQUENCE_ID not configured — cannot enroll contact into a sequence")
+
+        contact_id = _find_or_create_contact(
+            lead["email"], lead.get("first_name"), lead.get("last_name"), api_key, http_client=http_client,
+        )
+        _enroll_in_sequence(contact_id, sequence_target, api_key, http_client=http_client)
+
+        db.table("mse_dm_sequences").update({"status": "loaded"}).eq("id", sequence_id).execute()
 
     except Exception as exc:
-        _write_audit(db, "lose", product_id, {
-            "campaign_build_id": campaign_build_id, "error": str(exc), "emails_written": len(rows),
-        })
-        db.table("campaign_builds").update({"email_sequence_status": "failed"}).eq("id", campaign_build_id).execute()
-        raise RuntimeError(f"MKT-O3 email sequence load failed for product {product_id}: {exc}") from exc
+        _write_audit(db, "lose", product_id, {"sequence_id": sequence_id, "error": str(exc)})
+        raise RuntimeError(f"MKT-O3 email sequence load failed for sequence {sequence_id}: {exc}") from exc
 
-    _write_audit(db, "win", product_id, {
-        "campaign_build_id": campaign_build_id, "emails_written": len(rows),
-    })
-    _emit_event(db, "email_sequence_load_completed", {
-        "product_id": product_id, "campaign_build_id": campaign_build_id, "emails_written": len(rows),
-    })
+    _write_audit(db, "win", product_id, {"sequence_id": sequence_id})
+    _emit_event(db, "email_sequence_load_completed", {"product_id": product_id, "sequence_id": sequence_id})
 
-    return {"status": "ready_for_hitl", "emails_written": len(rows)}
-
-
-def run(research_report: dict, campaign_build: dict) -> dict:
-    """
-    Adapter for MKT-ORCH's dynamic dispatch. mkt_orch_campaign_orchestrator.py's
-    _DOWNSTREAM_AGENTS list references module path
-    agents.marketing.mkt_o3_email_sequence_loader — this file's name matches
-    exactly, so auto-fan-out finds it (unlike the current MKT-O2 module path
-    mismatch flagged in mkt_o2_cold_dm_writer.py).
-    """
-    return run_o3_email_sequence_loader(
-        product_id=campaign_build["product_id"],
-        research_report=research_report,
-        campaign_build_id=campaign_build["id"],
-    )
+    return {"status": "loaded", "sequence_id": sequence_id}
