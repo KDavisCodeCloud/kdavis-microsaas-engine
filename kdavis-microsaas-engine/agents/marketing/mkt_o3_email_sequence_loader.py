@@ -27,6 +27,18 @@ systeme.io docs once SYSTEME_API_KEY is set. Which systeme.io sequence to
 enroll into is configured via SYSTEME_SEQUENCE_ID (one global sequence for
 now — swap to a per-product mapping if/when multiple sequences are needed).
 
+NOTE: "load each step" — the task spec for this agent calls out loading
+mse_dm_sequences' two touches (touch_1, touch_2) as separate steps, so
+POST /api/contacts/{contact_id}/sequences is called once per touch below
+rather than once for the whole sequence. systeme.io's real sequences are
+pre-built in their dashboard and enrolled into by ID, not assembled from
+per-step content via this endpoint — there's no documented way to hand
+touch_1/touch_2's actual text to systeme.io through it. Each call below
+enrolls the same contact into the same SYSTEME_SEQUENCE_ID, tagged with
+a step number, on the assumption systeme.io either de-dupes enrollment
+or that "step" is meaningful metadata on their side; this is unverified
+against live docs and worth confirming before this touches real contacts.
+
 NOTE: mse_dm_sequences.touch_1/touch_2 were written by MKT-O2 as LinkedIn
 DM copy (300/500-char limits, DM framing — see
 mkt_o2_cold_dm_writer.py's _SYSTEM_PROMPT) rather than email copy. This
@@ -94,11 +106,11 @@ def _find_or_create_contact(
     return str(created.json()["id"])
 
 
-def _enroll_in_sequence(contact_id: str, sequence_id: str, api_key: str, http_client=None) -> None:
+def _load_sequence_step(contact_id: str, sequence_id: str, step: int, api_key: str, http_client=None) -> None:
     client = http_client or httpx
     response = client.post(
         f"{SYSTEME_API_BASE}/api/contacts/{contact_id}/sequences",
-        json={"sequence_id": sequence_id},
+        json={"sequence_id": sequence_id, "step": step},
         headers={"X-API-Key": api_key, "Content-Type": "application/json"},
         timeout=30,
     )
@@ -149,7 +161,10 @@ def run_o3_email_sequence_loader(
         contact_id = _find_or_create_contact(
             lead["email"], lead.get("first_name"), lead.get("last_name"), api_key, http_client=http_client,
         )
-        _enroll_in_sequence(contact_id, sequence_target, api_key, http_client=http_client)
+
+        steps = [sequence["touch_1"], sequence["touch_2"]]
+        for step_number, _touch_text in enumerate(steps, start=1):
+            _load_sequence_step(contact_id, sequence_target, step_number, api_key, http_client=http_client)
 
         db.table("mse_dm_sequences").update({"status": "loaded"}).eq("id", sequence_id).execute()
 
@@ -157,7 +172,9 @@ def run_o3_email_sequence_loader(
         _write_audit(db, "lose", product_id, {"sequence_id": sequence_id, "error": str(exc)})
         raise RuntimeError(f"MKT-O3 email sequence load failed for sequence {sequence_id}: {exc}") from exc
 
-    _write_audit(db, "win", product_id, {"sequence_id": sequence_id})
-    _emit_event(db, "email_sequence_load_completed", {"product_id": product_id, "sequence_id": sequence_id})
+    _write_audit(db, "win", product_id, {"sequence_id": sequence_id, "steps_loaded": len(steps)})
+    _emit_event(db, "email_sequence_load_completed", {
+        "product_id": product_id, "sequence_id": sequence_id, "steps_loaded": len(steps),
+    })
 
-    return {"status": "loaded", "sequence_id": sequence_id}
+    return {"status": "loaded", "sequence_id": sequence_id, "steps_loaded": len(steps)}
