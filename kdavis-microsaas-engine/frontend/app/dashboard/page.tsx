@@ -5,6 +5,7 @@ import { MetricCard } from "@/components/ui/MetricCard";
 import { SectionCard } from "@/components/ui/SectionCard";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { AgentRosterCard } from "@/components/ui/AgentRosterCard";
+import { ResearchTrigger } from "@/components/ui/ResearchTrigger";
 
 const AGENT_CADENCE = [
   { week: 1, name: "Orchestrator + Aggregator", status: "complete", date: "2026-07-04" },
@@ -44,16 +45,7 @@ export default async function DashboardPage() {
 
           {/* Quick actions */}
           <SectionCard title="Research Swarm">
-            <p className="text-[12px] mb-4" style={{ color: "#aab4bd" }}>
-              Scan all 6 verticals for validated opportunities. Results appear in Pipeline when complete (~2–3 min).
-            </p>
-            <a
-              href="/research"
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-[8px] text-[12.5px] font-semibold transition-colors"
-              style={{ backgroundColor: "#6fce8f", color: "#0b0e13" }}
-            >
-              Go to Research Swarm →
-            </a>
+            <ResearchTrigger />
           </SectionCard>
 
           {/* Agent cadence */}
