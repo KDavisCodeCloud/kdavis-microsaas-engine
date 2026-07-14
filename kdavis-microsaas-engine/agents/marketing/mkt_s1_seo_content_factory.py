@@ -140,11 +140,26 @@ def _article_schema(title: str, meta_description: str, product_id: str) -> dict:
     }
 
 
+def _persist(db, product_id: str, campaign_build_id, result: dict) -> str:
+    row = {
+        "product_id": product_id,
+        "campaign_build_id": campaign_build_id,
+        "title": result["title"],
+        "blog_post": result["blog_post"],
+        "meta_description": result["meta_description"],
+        "schema_json": result["schema_json"],
+        "word_count": result["word_count"],
+    }
+    inserted = db.table("mse_seo_content").insert(row).execute()
+    return inserted.data[0]["id"]
+
+
 def run_s1_seo_content_factory(
     research_report: dict,
     product_id: str,
     supabase_client=None,
     anthropic_client=None,
+    campaign_build_id=None,
 ) -> dict:
     """Builds one SEO support blog post from a product's research report.
     Raises on any failure — never fails silently."""
@@ -194,12 +209,7 @@ def run_s1_seo_content_factory(
         _write_audit(db, "lose", product_id, {"cycle_date": cycle_date, "error": str(exc)})
         raise RuntimeError(f"MKT-S1 SEO content build failed for product {product_id}: {exc}") from exc
 
-    _write_audit(db, "win", product_id, {
-        "cycle_date": cycle_date, "word_count": word_count, "faq_count": len(faq_pairs),
-    })
-    _emit_event(db, "seo_content_completed", {"product_id": product_id, "cycle_date": cycle_date})
-
-    return {
+    result = {
         "product_id": product_id,
         "title": title,
         "blog_post": blog_post,
@@ -207,6 +217,20 @@ def run_s1_seo_content_factory(
         "schema_json": schema_json,
         "word_count": word_count,
     }
+
+    try:
+        content_id = _persist(db, product_id, campaign_build_id, result)
+    except Exception as exc:
+        _write_audit(db, "lose", product_id, {"cycle_date": cycle_date, "error": f"persist failed: {exc}"})
+        raise RuntimeError(f"MKT-S1 succeeded but failed to persist output for product {product_id}: {exc}") from exc
+
+    _write_audit(db, "win", product_id, {
+        "cycle_date": cycle_date, "word_count": word_count, "faq_count": len(faq_pairs), "content_id": content_id,
+    })
+    _emit_event(db, "seo_content_completed", {"product_id": product_id, "cycle_date": cycle_date, "content_id": content_id})
+
+    result["id"] = content_id
+    return result
 
 
 def run(research_report: dict, campaign_build: dict) -> dict:
@@ -218,7 +242,9 @@ def run(research_report: dict, campaign_build: dict) -> dict:
     db = get_supabase()
     product_id = campaign_build["product_id"]
     try:
-        result = run_s1_seo_content_factory(research_report, product_id, supabase_client=db)
+        result = run_s1_seo_content_factory(
+            research_report, product_id, supabase_client=db, campaign_build_id=campaign_build["id"],
+        )
     except Exception:
         db.table("campaign_builds").update({"seo_factory_status": "failed"}).eq("id", campaign_build["id"]).execute()
         raise
