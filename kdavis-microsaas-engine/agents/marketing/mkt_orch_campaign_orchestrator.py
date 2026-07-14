@@ -32,7 +32,7 @@ AGENT_ID = "mkt-orch"
 _DOWNSTREAM_AGENTS: list[tuple[str, str, str, Callable[[list[str]], bool]]] = [
     ("mkt-o1", "agents.marketing.mkt_o1_apollo_list_builder", "apollo_status",
      lambda channels: "linkedin_dm" in channels),
-    ("mkt-o2", "agents.marketing.mkt_o2_cold_dm_sequence_writer", "dm_sequence_status",
+    ("mkt-o2", "agents.marketing.mkt_o2_cold_dm_writer", "dm_sequence_status",
      lambda channels: "linkedin_dm" in channels),
     ("mkt-o3", "agents.marketing.mkt_o3_email_sequence_loader", "email_sequence_status",
      lambda channels: "email" in channels),
