@@ -103,6 +103,12 @@ async def node_dispatch_verticals(state: OrchestratorState) -> OrchestratorState
     return {**state, "raw_findings": raw_findings, "status": "aggregating"}
 
 
+def node_size_market(state: OrchestratorState) -> OrchestratorState:
+    from agents.research.market_sizing_agent import size_findings
+    sized = size_findings(state["raw_findings"], session_id=state["session_id"])
+    return {**state, "raw_findings": sized, "status": "aggregating"}
+
+
 def node_run_aggregator(state: OrchestratorState) -> OrchestratorState:
     from agents.aggregator.agent import run as aggregate
     results = aggregate(state["raw_findings"])
@@ -202,13 +208,15 @@ def _build_graph():
     g = StateGraph(OrchestratorState)
     g.add_node("initialize",         node_initialize)
     g.add_node("dispatch_verticals", node_dispatch_verticals)
+    g.add_node("size_market",        node_size_market)
     g.add_node("run_aggregator",     node_run_aggregator)
     g.add_node("write_pipeline",     node_write_pipeline)
     g.add_node("summarize",          node_summarize)
 
     g.set_entry_point("initialize")
     g.add_edge("initialize",         "dispatch_verticals")
-    g.add_edge("dispatch_verticals", "run_aggregator")
+    g.add_edge("dispatch_verticals", "size_market")
+    g.add_edge("size_market",        "run_aggregator")
     g.add_edge("run_aggregator",     "write_pipeline")
     g.add_edge("write_pipeline",     "summarize")
     g.add_edge("summarize",          END)
