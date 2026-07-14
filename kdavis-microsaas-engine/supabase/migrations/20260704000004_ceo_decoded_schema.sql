@@ -126,6 +126,37 @@ CREATE TABLE IF NOT EXISTS hitl_routing_rules (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- RLS — added before this migration was ever run (2026-07-13). None of the
+-- 10 tables above had it, which is a direct violation of this repo's own
+-- "RLS enforced, no exceptions" rule. HitlApprovalRow.tsx and the rest of
+-- ceo-dashboard query these tables directly from the browser with the
+-- logged-in user's own session (anon key + JWT, not service_role), so
+-- without RLS every row here — team member emails, HITL actions, legal
+-- doc references, everything — would be readable/writable by anyone with
+-- the public anon key. Policy matches the exact admin-role check
+-- api/middleware/internal_auth.py and ceo-dashboard/middleware.ts already
+-- use: user_metadata.role == "admin" on the Supabase Auth JWT. No tenant_id
+-- split — these are internal CEO-dashboard tables, not per-customer product
+-- data, same exemption already established for other internal factory
+-- tables in this repo (opportunity_pipeline, campaign_builds, etc.).
+DO $$
+DECLARE
+  t TEXT;
+BEGIN
+  FOREACH t IN ARRAY ARRAY[
+    'team_members', 'agent_events', 'hitl_queue', 'operating_stack',
+    'build_queue', 'session_log', 'gap_tracker', 'legal_documents',
+    'advisory_threads', 'hitl_routing_rules'
+  ]
+  LOOP
+    EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
+    EXECUTE format(
+      'CREATE POLICY %I ON %I USING ((auth.jwt() -> ''user_metadata'' ->> ''role'') = ''admin'') WITH CHECK ((auth.jwt() -> ''user_metadata'' ->> ''role'') = ''admin'')',
+      t || '_admin_access', t
+    );
+  END LOOP;
+END $$;
+
 -- Enable Realtime on the two tables the dashboard subscribes to
 ALTER PUBLICATION supabase_realtime ADD TABLE agent_events;
 ALTER PUBLICATION supabase_realtime ADD TABLE hitl_queue;
