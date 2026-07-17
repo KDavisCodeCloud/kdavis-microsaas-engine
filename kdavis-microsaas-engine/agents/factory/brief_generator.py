@@ -176,6 +176,12 @@ def generate_build_brief(
         _run(runner, ["git", "commit", "-m", f"Build brief: {opp['solution_concept']}"], repo_root)
         _run(runner, ["git", "push", "-u", "origin", branch], repo_root)
         _run(runner, ["git", "checkout", "main"], repo_root)
+        # The two files are now safely committed on the brief branch. Left
+        # in place, they'd sit as untracked cruft in main's working tree
+        # after the checkout above (git doesn't remove untracked files that
+        # don't conflict with the target branch) — clean them up here.
+        (repo_root / "BUILD_BRIEF_CLAUDE_CODE.md").unlink(missing_ok=True)
+        (repo_root / "BUILD_BRIEF_CLAUDE_DESIGN.md").unlink(missing_ok=True)
 
         insert_result = db.table("mse_build_briefs").insert({
             "opportunity_id": opportunity_id,

@@ -66,8 +66,10 @@ def test_happy_path_writes_branch_and_inserts_brief(monkeypatch, fake_db, tmp_pa
     push_calls = [c["cmd"] for c in runner.calls if c["cmd"][:2] == ["git", "push"]]
     assert push_calls == [["git", "push", "-u", "origin", "brief/freight-audit-copilot"]]
 
-    assert (tmp_path / "BUILD_BRIEF_CLAUDE_CODE.md").exists()
-    assert (tmp_path / "BUILD_BRIEF_CLAUDE_DESIGN.md").exists()
+    # Files are committed to the brief branch, then cleaned up locally so
+    # they don't sit as untracked cruft in main's working tree after checkout.
+    assert not (tmp_path / "BUILD_BRIEF_CLAUDE_CODE.md").exists()
+    assert not (tmp_path / "BUILD_BRIEF_CLAUDE_DESIGN.md").exists()
 
     inserts = [c for c in fake_db.executed if c.table_name == "mse_build_briefs" and c.calls[0][0] == "insert"]
     assert inserts[0]._payload["product_slug"] == "freight-audit-copilot"
