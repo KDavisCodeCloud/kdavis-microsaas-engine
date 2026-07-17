@@ -200,3 +200,13 @@ Responsibilities:
 3. Generates `BUILD_BRIEF_CLAUDE_CODE.md` and `BUILD_BRIEF_CLAUDE_DESIGN.md`
 4. Writes both files to a new GitHub branch: `brief/[product-slug]`
 5. Inserts into `mse_build_briefs` (Realtime publication already enabled — the insert itself is what notifies subscribed dashboards, no separate broadcast step needed)
+
+---
+
+## RULE: VERDICT AGENT v2.0 (2026-07-17, consolidated from an 8-model audit)
+
+The aggregator (`agents/aggregator/agent.py`) is the Verdict gate — full rules in `agents/aggregator/prompt.md`. It is no longer a deterministic Python gate-checker; it genuinely researches every opportunity live via Sonnet + Anthropic's server-side `web_search` tool (`core.llm_router.analyze_with_web_search`, requires `anthropic>=0.40`). Competitor discovery is a HARD GATE before any MRR math runs — the agent must independently verify competitors exist or don't via live search, never assert either from memory. It computes its own MRR floor from real TAM/capture-rate math rather than trusting the upstream vertical agent's self-reported number.
+
+`opportunity_pipeline.human_review_status`/`human_review_comment`/`human_reviewed_by`/`human_reviewed_at` are Kelvin's own approve/reject/comment decision from the dashboard — kept deliberately separate from the agent's own `status`/`verdict_v2_output`. Comparing the two is the tuning signal for future prompt revisions (v2.1+). Do not conflate them into one field.
+
+The $4K MRR floor must never be enforced by inflating a below-floor number up to look like it passed — enforce it only by rejecting. (`node_write_pipeline` did exactly this via `max(mrr, 4000)` until it was found and fixed 2026-07-17 — watch for this pattern recurring anywhere else in the pipeline.)

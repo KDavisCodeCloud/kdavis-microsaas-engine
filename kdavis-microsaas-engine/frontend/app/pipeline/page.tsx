@@ -29,6 +29,10 @@ export default function PipelinePage() {
   const [buildState, setBuildState] = useState<"idle" | "queuing" | "queued" | "error">("idle");
   const [buildError, setBuildError] = useState<string | null>(null);
 
+  const [reviewComment, setReviewComment] = useState<Record<string, string>>({});
+  const [reviewState, setReviewState] = useState<Record<string, "idle" | "submitting" | "error">>({});
+  const [reviewError, setReviewError] = useState<Record<string, string>>({});
+
   const [briefs, setBriefs] = useState<BuildBrief[]>([]);
   const [briefsLoading, setBriefsLoading] = useState(true);
   const [expandedBrief, setExpandedBrief] = useState<string | null>(null);
@@ -37,11 +41,33 @@ export default function PipelinePage() {
   const fetchData = useCallback(async () => {
     const { data } = await supabase
       .from("opportunity_pipeline")
-      .select("id, vertical, pain_point, solution_concept, mrr_calculation, conservative_mrr_potential, build_confidence_score, competition_density, status, retention_hooks, source_urls, created_at")
+      .select("id, vertical, pain_point, solution_concept, mrr_calculation, conservative_mrr_potential, build_confidence_score, competition_density, status, rejection_reason, retention_hooks, source_urls, verdict_v2_output, human_review_status, human_review_comment, human_reviewed_by, human_reviewed_at, created_at")
       .order("build_confidence_score", { ascending: false });
     setOpportunities((data ?? []) as Opportunity[]);
     setLoading(false);
   }, [supabase]);
+
+  async function submitReview(opportunityId: string, decision: "approved" | "rejected") {
+    setReviewState((s) => ({ ...s, [opportunityId]: "submitting" }));
+    setReviewError((e) => ({ ...e, [opportunityId]: "" }));
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error("Not signed in");
+
+      const res = await fetch(`${API_BASE}/pipeline/${opportunityId}/review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ decision, comment: reviewComment[opportunityId] || null }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? `API error ${res.status}`);
+      setReviewState((s) => ({ ...s, [opportunityId]: "idle" }));
+      await fetchData();
+    } catch (e: unknown) {
+      setReviewError((err) => ({ ...err, [opportunityId]: e instanceof Error ? e.message : "Unknown error" }));
+      setReviewState((s) => ({ ...s, [opportunityId]: "error" }));
+    }
+  }
 
   const fetchBriefs = useCallback(async () => {
     const { data } = await supabase
@@ -171,7 +197,61 @@ export default function PipelinePage() {
                           ))}
                         </div>
                       )}
+                      {opp.rejection_reason && (
+                        <div className="rounded-[8px] p-3.5" style={{ backgroundColor: "#e05d5d11", border: "1px solid #e05d5d44" }}>
+                          <p className="text-[10px] font-mono uppercase mb-1" style={{ color: "#e05d5d" }}>Verdict Agent Reasoning</p>
+                          <p className="text-[12px]" style={{ color: "#aab4bd" }}>{opp.rejection_reason}</p>
+                        </div>
+                      )}
+
                       <p className="text-[10px] font-mono" style={{ color: "#3a4250" }}>Added {new Date(opp.created_at).toLocaleDateString("en-US", { timeZone: "America/Phoenix" })}</p>
+
+                      <div className="rounded-[8px] p-3.5 space-y-2.5" style={{ backgroundColor: "#10151b", border: "1px solid #1c222b" }}>
+                        <div className="flex items-center justify-between">
+                          <p className="text-[10px] font-mono uppercase" style={{ color: "#5b6673" }}>Your Review</p>
+                          {opp.human_review_status !== "pending" && (
+                            <StatusBadge status={opp.human_review_status} />
+                          )}
+                        </div>
+                        {opp.human_reviewed_by && (
+                          <p className="text-[10px] font-mono" style={{ color: "#3a4250" }}>
+                            {opp.human_review_status} by {opp.human_reviewed_by}
+                            {opp.human_reviewed_at ? ` on ${new Date(opp.human_reviewed_at).toLocaleDateString("en-US", { timeZone: "America/Phoenix" })}` : ""}
+                          </p>
+                        )}
+                        {opp.human_review_comment && (
+                          <p className="text-[12px]" style={{ color: "#aab4bd" }}>&ldquo;{opp.human_review_comment}&rdquo;</p>
+                        )}
+                        <textarea
+                          value={reviewComment[opp.id] ?? ""}
+                          onChange={(e) => setReviewComment((c) => ({ ...c, [opp.id]: e.target.value }))}
+                          placeholder="Comment for the agent — why approved/rejected, what to look for next time"
+                          rows={2}
+                          className="w-full px-3 py-2 rounded-[6px] text-[12px] outline-none resize-none"
+                          style={{ backgroundColor: "#0b0e13", border: "1px solid #1c222b", color: "#eef2f5" }}
+                        />
+                        {reviewError[opp.id] && (
+                          <p className="text-[11px] font-mono" style={{ color: "#e05d5d" }}>{reviewError[opp.id]}</p>
+                        )}
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => submitReview(opp.id, "approved")}
+                            disabled={reviewState[opp.id] === "submitting"}
+                            className="px-4 py-2 rounded-[8px] text-[12px] font-bold"
+                            style={{ backgroundColor: "#6fce8f", color: "#0b0e13", opacity: reviewState[opp.id] === "submitting" ? 0.5 : 1 }}
+                          >
+                            Approve
+                          </button>
+                          <button
+                            onClick={() => submitReview(opp.id, "rejected")}
+                            disabled={reviewState[opp.id] === "submitting"}
+                            className="px-4 py-2 rounded-[8px] text-[12px] font-bold"
+                            style={{ backgroundColor: "#e05d5d", color: "#0b0e13", opacity: reviewState[opp.id] === "submitting" ? 0.5 : 1 }}
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      </div>
 
                       {opp.status === "READY_TO_BUILD" && (
                         <div className="rounded-[8px] p-3.5" style={{ backgroundColor: "#6fce8f11", border: "1px solid #6fce8f44" }}>

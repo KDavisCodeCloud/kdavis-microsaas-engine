@@ -26,8 +26,14 @@ export interface Opportunity {
   build_confidence_score: number | null;
   competition_density: "red" | "yellow" | "green" | null;
   status: string;
+  rejection_reason: string | null;
   retention_hooks: Record<string, unknown>;
   source_urls: string[];
+  verdict_v2_output: Record<string, unknown> | null;
+  human_review_status: "pending" | "approved" | "rejected";
+  human_review_comment: string | null;
+  human_reviewed_by: string | null;
+  human_reviewed_at: string | null;
   created_at: string;
 }
 

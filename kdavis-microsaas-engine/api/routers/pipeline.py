@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel, field_validator
 from typing import Literal
@@ -88,6 +90,58 @@ async def update_status(opp_id: str, body: StatusUpdate, request: Request):
     result = db.table("opportunity_pipeline").update(update).eq("id", opp_id).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Opportunity not found")
+    return result.data[0]
+
+
+class ReviewRequest(BaseModel):
+    decision: Literal["approved", "rejected"]
+    comment: str | None = None
+
+
+@router.post("/{opp_id}/review")
+async def review_opportunity(opp_id: str, body: ReviewRequest, request: Request):
+    """
+    Kelvin's per-opportunity approve/reject + comment, kept in
+    human_review_status/human_review_comment — deliberately SEPARATE from
+    the agent's own status/verdict_v2_output. Comparing the two is the
+    actual tuning signal for Verdict prompt v2.1+ (where the agent and
+    Kelvin disagree is exactly what needs investigating), so this must
+    never overwrite the agent's own fields. Admin-gated + triggered_by +
+    audit log, matching every other mutating action in this repo — the
+    existing PATCH /{opp_id}/status route predates that convention and
+    is out of scope here.
+    """
+    if getattr(request.state, "role", "") != "admin":
+        raise HTTPException(status_code=403, detail="Opportunity review requires admin role")
+
+    triggered_by = getattr(request.state, "tenant_id", None)
+    if not triggered_by:
+        raise HTTPException(status_code=401, detail="No authenticated user to attribute this review to")
+
+    db = get_supabase()
+    result = db.table("opportunity_pipeline").update({
+        "human_review_status": body.decision,
+        "human_review_comment": body.comment,
+        "human_reviewed_by": triggered_by,
+        "human_reviewed_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", opp_id).execute()
+
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Opportunity not found")
+
+    db.table("audit_log").insert({
+        "agent_id": "human-review",
+        "action": "opportunity_review",
+        "outcome": "win" if body.decision == "approved" else "lose",
+        "product_id": opp_id,
+        "metadata": {"triggered_by": triggered_by, "decision": body.decision, "comment": body.comment},
+    }).execute()
+    db.table("usage_events").insert({
+        "tenant_id": None,
+        "event_type": "opportunity_reviewed",
+        "metadata": {"opportunity_id": opp_id, "decision": body.decision, "triggered_by": triggered_by},
+    }).execute()
+
     return result.data[0]
 
 

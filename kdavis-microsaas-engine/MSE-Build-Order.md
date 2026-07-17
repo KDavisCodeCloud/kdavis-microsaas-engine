@@ -23,6 +23,16 @@ A research-validated, retention-first software factory producing 1–2 micro-Saa
 - Legal docs (EULA, privacy policy, DPA template)
 - Test harness — `tests/conftest.py` fake-Supabase fixtures, 94 tests passing
 
+**Verdict Agent v2.0 (shipped 2026-07-17, consolidated from an 8-model audit)**
+- Replaces the old aggregator, which was a pure deterministic Python gate-checker that never actually called an LLM at all (`prompt.md` was loaded but never used anywhere — confirmed dead code) and just trust-checked whatever `competition_density`/`stack_compatible`/`build_confidence_score` labels the upstream vertical agent self-assigned, with zero independent verification
+- Now genuinely researches every opportunity live via Sonnet + Anthropic's server-side `web_search` tool (`core.llm_router.analyze_with_web_search`) — hard-gates on independently-verified competitor discovery before any MRR math runs, normalizes pricing across per-user/per-firm/annual/free-tier comps, builds TAM from named sources with real funnel logic, and computes its own MRR floor rather than trusting the vertical agent's self-report
+- Required bumping `anthropic` 0.36.0 → 0.116.0 (web_search tool needs ≥0.40)
+- New `opportunity_pipeline` columns: `verdict_v2_output` (full structured reasoning, nothing lost), `human_review_status`/`human_review_comment`/`human_reviewed_by`/`human_reviewed_at` (Kelvin's per-opportunity approve/reject/comment — see below)
+- Fixed two real bugs found while wiring this in: (1) `node_write_pipeline` was silently skipping every rejected opportunity — the dashboard has had a "rejected" filter tab since it was built, but it's always been empty because nothing rejected ever got a row; (2) `"conservative_mrr_potential": max(mrr, 4000)` was artificially inflating a below-floor MRR number to look like it cleared $4,000 — exactly the "floor inflation" failure mode the v2.0 audit exists to eliminate. The floor is now enforced only by rejecting, never by lying about the number.
+- Dashboard: every opportunity card now has Approve/Reject buttons + a comment field (`POST /pipeline/{id}/review`, admin-gated, audit-logged) — deliberately stored SEPARATE from the agent's own verdict, so comparing the two is the actual tuning signal for prompt v2.1+
+- 25 new tests (aggregator gating + regression cases from the audit's own table, `node_write_pipeline` fixes, review route)
+- **Not yet done: running real opportunities through it.** Every test above uses canned LLM responses — the live research quality itself can only be validated/tuned by actually running opportunities through it for real, which costs real money ($10/1,000 searches + tokens) and is the next concrete step, not something to trigger automatically.
+
 **Research → Verdict pipeline**
 - Orchestrator + aggregator agents (LangGraph), 7 quality gates, $4K MRR floor enforced at DB + gate level
 - All 6 vertical intel agents built (`agents/{healthcare,legal,ecommerce,realestate,hr-ops,finance}-intel/`) — confirmed producing real opportunities in a live swarm run
@@ -54,21 +64,24 @@ Ran for real 2026-07-17 against the top-scoring `READY_TO_BUILD` opportunity —
 
 **Manual (Kelvin), next concrete step:** review the generated brief on branch `brief/ninety-nine-comply` (or in the dashboard's new Build Briefs section) and, if approved, trigger the actual build via `POST /factory/build/{opportunity_id}` — which requires providing a Stripe secret key for this product's dedicated account (a hard, deliberate gate: Claude Code does not create Stripe accounts or generate live secret keys — that is Kelvin's action alone, per this pipeline's existing HITL design). Creating the dedicated MSE Stripe account happens at this step, not before.
 
-### 2. LinkedIn + Canva — both need one manual step in an external console today
+### 2. Run 7 more opportunities through Verdict v2.0 to tune it
+Kelvin's plan, stated 2026-07-17: run 7 more products through the new research-backed Verdict agent, using the dashboard's new Approve/Reject/comment buttons to build the tuning signal — Kelvin expects to reject all but 1. This is a real-money action (web search is $10/1,000 searches + Sonnet tokens per opportunity, run live, not simulated) — waiting for an explicit go before firing these off rather than running them automatically.
+
+### 3. LinkedIn + Canva — both need one manual step in an external console today
 **LinkedIn (root cause found, not yet fixed):** the internal (owner) OAuth flow's redirect URI (`https://theclouddecoded.com/api/v1/internal/marketing/connect/callback/linkedin`) was likely never registered on the LinkedIn Developer App — only the customer-facing redirect URI was ever documented anywhere (`.env.example` fixed 2026-07-17 to document both). **Manual (Kelvin), 2 minutes:** developers.linkedin.com → your app → Auth tab → Authorized redirect URLs → add that exact URL (https, no trailing slash) → click "Connect LinkedIn" again and report the result.
 
 **Canva (code built, needs setup before it can run):** OAuth (PKCE) connect/callback flow + Autofill API client shipped 2026-07-17 in `kdavis-agentic-platform` (`core/publishers/canva.py`, `api/routes/internal_marketing.py`, migration `012_internal_canva_connection.sql` — applied live). Cannot be tested until Kelvin does three things, none of which Claude Code can do: (1) create a Canva Developer account + "External Application" at canva.com/developers, get `CANVA_CLIENT_ID`/`CANVA_CLIENT_SECRET`, add both to `.env`; (2) register the redirect URI `{API_BASE_URL}/api/v1/internal/marketing/connect/callback/canva` on that app; (3) build at least one Brand Template by hand in Canva's own editor with named autofill placeholder fields (the Autofill API only fills existing templates, it does not generate designs from scratch) — and confirm the Canva plan tier actually includes Connect/Autofill API access, since that's sometimes gated to paid tiers.
 
-### 3. Cross-dashboard "agent last ran" correlation
+### 4. Cross-dashboard "agent last ran" correlation
 Flagged gap: MSE, CEO, and DecodedSix dashboards don't clearly correlate which agent ran when — DecodedSix's Agents tab was showing "never run" for agents that had in fact run. Needs a real fix, not just DecodedSix-specific — same gap likely exists across all three dashboards since they share the underlying event-emission pattern.
 
-### 4. CEO dashboard cross-repo wiring
+### 5. CEO dashboard cross-repo wiring
 The Build Briefs section shipped on the MSE dashboard this session. The equivalent (brief cards + monitoring health cards once a product goes live) still needs to be wired into the CEO dashboard's R&D department view — that's a separate repo (`kdavis-agentic-platform`), not started.
 
-### 5. Monitoring/Incident/Support agent trio — deferred by design, not a gap
+### 6. Monitoring/Incident/Support agent trio — deferred by design, not a gap
 Do not build `agents/[slug]_monitor.py` / `_incident.py` / `_support.py` until a real product crosses the $4K MRR / 30-day sustained gate. Full prompts and table templates already exist in `docs/monitoring-agent-suite.md` for when that day comes — building them now would have nothing to run against.
 
-### 6. Follow-on: wire search signals into the research swarm
+### 7. Follow-on: wire search signals into the research swarm
 CLAUDE.md's SEARCH SIGNAL REQUIREMENT FOR VERDICT PASS rule specifies `search_signals`/`objection_signals`/`geo_signals` output fields the vertical agents don't produce yet. Not blocking launch of the first product, but should land before the second or third product ships so Verdict's search-demand gate is real rather than aspirational.
 
 ---

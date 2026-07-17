@@ -1,132 +1,134 @@
+"""
+Verdict agent v2.0 — Consolidated from an 8-Model Audit, July 2026.
+
+Replaces the earlier deterministic Python gate-checker. That checker
+loaded prompt.md into a module constant that was never actually passed
+to an LLM call anywhere — confirmed dead code — and just trust-checked
+whatever competition_density/stack_compatible/build_confidence_score
+labels the upstream vertical agent had self-assigned, with no
+independent verification of any kind.
+
+v2.0's entire premise is that competitor discovery must be independently
+verified (HARD GATE before any MRR math runs), which means the agent has
+to actually search the web rather than recall training data — two of
+the audit's named failure modes were exactly "asserted no competitor
+exists without searching" and "stale pricing pulled from memory". This
+now genuinely calls Sonnet with Anthropic's server-side web_search tool
+via core.llm_router.analyze_with_web_search.
+
+Full reasoning rules live in prompt.md (the v2.0 spec verbatim, plus an
+appended OUTPUT CONTRACT). The spec's per-step output format is a mix of
+labeled text blocks, which isn't reliably parseable on its own — the
+contract instructs the model to end with one consolidated JSON object
+covering every step's key fields instead.
+"""
+import json
 from pathlib import Path
+from typing import Callable
 
-_SYSTEM_PROMPT = (Path(__file__).parent / "prompt.md").read_text()
+from core.llm_router import analyze_with_web_search
 
-MRR_FLOOR        = 4000
-SCORE_READY      = 80
-SCORE_VALIDATED  = 60
-SCORE_WATCH      = 40
+AGENT_ID = "aggregator-verdict-v2"
 
-_ALL_GATES = [
-    "gate_1_mrr_floor",
-    "gate_2_mrr_math",
-    "gate_3_stack_compatibility",
-    "gate_4_pain_evidence",
-    "gate_5_retention_hooks",
-    "gate_6_competition_density",
-    "gate_7_confidence_floor",
-]
+SYSTEM_PROMPT = (Path(__file__).parent / "prompt.md").read_text()
 
+MRR_FLOOR = 4000
 
-def run(raw_findings: list[dict]) -> list[dict]:
-    """Evaluate every opportunity card through all 7 gates. Returns stamped results."""
-    return [_evaluate(opp) for opp in raw_findings]
+# v2.0's VERDICT enum maps onto the pipeline's existing status vocabulary
+# (READY_TO_BUILD/validated/rejected) rather than introducing a second,
+# parallel one — brief_generator and the dashboard's filter tabs already
+# key off this vocabulary.
+_VERDICT_TO_STATUS = {
+    "BUILD": "READY_TO_BUILD",
+    "CONDITIONAL": "validated",
+    "DO_NOT_BUILD": "rejected",
+}
 
 
-def _evaluate(opp: dict) -> dict:
-    gates = {}
+def run(raw_findings: list[dict], llm: Callable[..., str] = analyze_with_web_search) -> list[dict]:
+    """Evaluate every opportunity card through the full v2.0 research pipeline."""
+    return [_evaluate(opp, llm) for opp in raw_findings]
 
-    # Gate 1 — MRR floor
-    mrr = opp.get("conservative_mrr_potential", 0)
-    gates["gate_1_mrr_floor"] = "pass" if mrr >= MRR_FLOOR else "fail"
-    if gates["gate_1_mrr_floor"] == "fail":
-        return _reject(opp, gates, f"MRR floor not met. Potential: ${mrr:,.0f}. Minimum: $4,000.")
 
-    # Gate 2 — MRR math validity
-    mrr_calc = (opp.get("mrr_calculation") or "").strip()
-    gates["gate_2_mrr_math"] = "pass" if len(mrr_calc) > 15 else "fail"
-    if gates["gate_2_mrr_math"] == "fail":
-        return _reject(opp, gates, "MRR calculation missing or insufficient. Must show customer count × price math.")
+def _evaluate(opp: dict, llm: Callable[..., str]) -> dict:
+    user_input = json.dumps(opp, default=str)
+    raw_response = llm(SYSTEM_PROMPT, user_input)
+    result = _extract_trailing_json(raw_response)
 
-    # Gate 3 — Stack compatibility
-    stack_ok = opp.get("stack_compatible", False)
-    notes = (opp.get("stack_compatibility_notes") or "").lower()
-    blockers = ["hipaa", "soc 2", "pci", "proprietary api", "third-party licensing"]
-    has_blocker = any(b in notes for b in blockers)
-    gates["gate_3_stack_compatibility"] = "fail" if not stack_ok or has_blocker else "pass"
-    if gates["gate_3_stack_compatibility"] == "fail":
-        reason = opp.get("stack_compatibility_notes") or "stack_compatible is false"
-        return _reject(opp, gates, f"Stack incompatibility: {reason}.")
+    verdict = result.get("verdict", "DO_NOT_BUILD")
+    status = _VERDICT_TO_STATUS.get(verdict, "rejected")
 
-    # Gate 4 — Pain point evidence (minimum 2 specific sources)
-    sources = opp.get("source_evidence") or []
-    gates["gate_4_pain_evidence"] = "pass" if len(sources) >= 2 else "fail"
-    if gates["gate_4_pain_evidence"] == "fail":
-        return _reject(opp, gates, f"Insufficient pain point evidence. {len(sources)} source(s) found, minimum 2 required.")
+    # Hard-enforce the $4K floor at the code level too — CLAUDE.md's floor
+    # rule is non-negotiable, and this is the one number the whole
+    # factory's business model depends on. Never trust the model's own
+    # verdict/mrr_floor_gate_clear alone for it.
+    final_floor = result.get("final_mrr_floor") or 0
+    if status == "READY_TO_BUILD" and final_floor < MRR_FLOOR:
+        status = "rejected"
+        result["blocking_issues"] = (result.get("blocking_issues") or []) + [
+            f"Code-level floor check failed: final_mrr_floor ${final_floor:,.0f} is below "
+            f"the ${MRR_FLOOR:,.0f} floor despite verdict={verdict}."
+        ]
 
-    # Gate 5 — Retention hooks completeness
-    hooks     = opp.get("retention_hooks") or {}
-    required  = ["weekly_value_metric", "adjacent_pain", "natural_integration", "churn_risk_window"]
-    missing   = [f for f in required if not hooks.get(f)]
-    milestones = hooks.get("milestone_sequence") or []
-    if len(milestones) < 3:
-        missing.append("milestone_sequence (minimum 3 entries)")
-    gates["gate_5_retention_hooks"] = "fail" if missing else "pass"
-    if gates["gate_5_retention_hooks"] == "fail":
-        return _reject(opp, gates, f"Retention hooks incomplete. Missing: {', '.join(missing)}.")
-
-    # Gate 6 — Competition density
-    density = (opp.get("competition_density") or "red").lower()
-    score   = opp.get("build_confidence_score", 0)
-    gates["gate_6_competition_density"] = "fail" if density == "red" and score < 80 else "pass"
-    if gates["gate_6_competition_density"] == "fail":
-        return _reject(opp, gates,
-            f"Red competition density without sufficient differentiation "
-            f"(confidence: {score}/100 — minimum 80 required in red markets).")
-
-    # Gate 7 — Build confidence floor
-    if score < SCORE_WATCH:
-        gates["gate_7_confidence_floor"] = "fail"
-        return _reject(opp, gates, f"Build confidence score too low: {score}/100. Minimum to proceed: 40.")
-    elif score < SCORE_VALIDATED:
-        gates["gate_7_confidence_floor"] = "watch"
-        status = "watch"
-    elif score < SCORE_READY:
-        gates["gate_7_confidence_floor"] = "validated"
-        status = "validated"
+    if status == "rejected" and result.get("halt"):
+        rejection_reason = f"Competitor exists: {_summarize_competitors(result)}"
+    elif status == "rejected":
+        rejection_reason = "; ".join(result.get("blocking_issues") or [result.get("next_action") or "Did not clear v2.0 gates."])
     else:
-        gates["gate_7_confidence_floor"] = "ready"
-        status = "READY_TO_BUILD"
+        rejection_reason = None
 
     return {
-        "opportunity_id":      opp.get("opportunity_id", ""),
-        "vertical":            opp.get("vertical", ""),
-        "solution_concept":    opp.get("solution_concept", ""),
-        "gate_results":        gates,
-        "status":              status,
-        "rejection_reason":    None,
-        "aggregator_notes":    _build_notes(opp, status),
-        "recommended_owner":   "Kelvin",
-        "recommended_build_slot": opp.get("recommended_thursday_build_slot", "TBD"),
+        "opportunity_id":    opp.get("opportunity_id"),
+        "vertical":          result.get("vertical") or opp.get("vertical", ""),
+        "solution_concept":  result.get("solution_concept") or opp.get("solution_concept", ""),
+        "status":            status,
+        "rejection_reason":  rejection_reason,
+        "verdict_v2_output": result,
     }
 
 
-def _reject(opp: dict, gates: dict, reason: str) -> dict:
-    for g in _ALL_GATES:
-        gates.setdefault(g, "skipped")
-    return {
-        "opportunity_id":       opp.get("opportunity_id", ""),
-        "vertical":             opp.get("vertical", ""),
-        "solution_concept":     opp.get("solution_concept", ""),
-        "gate_results":         gates,
-        "status":               "rejected",
-        "rejection_reason":     reason,
-        "aggregator_notes":     None,
-        "recommended_owner":    None,
-        "recommended_build_slot": None,
-    }
+def _summarize_competitors(result: dict) -> str:
+    comps = result.get("competitors_found") or []
+    if not comps:
+        return "halted, no competitor detail returned"
+    return "; ".join(f"{c.get('name')} ({c.get('price')}, {c.get('channel')})" for c in comps)
 
 
-def _build_notes(opp: dict, status: str) -> str | None:
-    notes = []
-    score = opp.get("build_confidence_score", 0)
-    mrr   = opp.get("conservative_mrr_potential", 0)
+def _extract_trailing_json(text: str) -> dict:
+    """
+    Finds the LAST top-level balanced {...} span in the response text and
+    parses it. The model narrates its research before the final contract
+    object per the OUTPUT CONTRACT, so the final block is what matters —
+    not the first brace encountered, and NOT simply the last '{' character
+    in the text either: the contract object itself contains nested dicts
+    (comp_set entries, tam_funnel entries), whose own closing braces would
+    otherwise be mistaken for the outer object's end. Scanning depth
+    across the whole string and recording every span where depth returns
+    to zero correctly identifies each *complete* top-level object,
+    nested content included — the last one is the one we want.
 
-    if status == "validated":
-        notes.append(f"Confidence {score}/100 — requires Kelvin manual review before build.")
-    if status == "watch":
-        notes.append(f"Borderline confidence ({score}/100). Monitor for additional signal.")
-    if mrr > 8000:
-        notes.append(f"High MRR potential: ${mrr:,.0f}/mo.")
+    Raises (with the raw text attached) rather than silently returning a
+    default/empty result if nothing parses, so a malformed response
+    surfaces as a loud failure, not a false REJECT.
+    """
+    spans = []
+    depth = 0
+    start = None
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    spans.append((start, i))
 
-    return " ".join(notes) if notes else None
+    for start, end in reversed(spans):
+        try:
+            return json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            continue  # this span wasn't valid JSON on its own — try an earlier one
+
+    raise RuntimeError(f"Verdict agent did not return a parseable JSON object. Raw response (truncated): {text[:2000]}")

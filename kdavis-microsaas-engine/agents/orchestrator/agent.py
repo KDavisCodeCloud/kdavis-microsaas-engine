@@ -119,34 +119,56 @@ def node_write_pipeline(state: OrchestratorState) -> OrchestratorState:
     db = get_supabase()
     to_insert = []
     for result in state["aggregated_results"]:
-        if result.get("status") not in ("READY_TO_BUILD", "validated", "watch"):
-            continue
+        # Every evaluated opportunity gets a row now, including rejected
+        # ones — the dashboard has had a "rejected" filter tab since the
+        # Opportunities page was built, but this filter used to skip
+        # writing rejected rows entirely, so that tab has always been
+        # empty. Visibility into rejections (with the agent's actual
+        # reasoning) is exactly what the human-review tuning loop needs.
         source = next(
             (f for f in state["raw_findings"]
              if f.get("solution_concept") == result.get("solution_concept")),
             {}
         )
-        # Map all NOT NULL columns so the insert never violates constraints
-        mrr = source.get("conservative_mrr_potential", 0)
+        v2 = result.get("verdict_v2_output") or {}
+
+        # v2.0's own independently-researched MRR floor is authoritative
+        # when present — it's backed by real TAM/capture-rate math and
+        # live competitor pricing, not the upstream vertical agent's
+        # unverified self-report. Falls back to the upstream figure only
+        # if the aggregator didn't run (e.g. legacy findings).
+        mrr = v2.get("final_mrr_floor")
+        if mrr is None:
+            mrr = source.get("conservative_mrr_potential", 0)
         try:
             mrr = float(mrr)
         except (TypeError, ValueError):
             mrr = 0.0
+        # No floor clamp here — a sub-$4K number must be visible as what
+        # it actually is. The $4K floor is enforced by REJECTING the
+        # opportunity (in agents/aggregator/agent.py), never by inflating
+        # its reported value. Presenting a clamped-up number as if it
+        # cleared the floor is exactly the "floor inflation" failure mode
+        # Verdict v2.0 was written to eliminate.
+
+        competitor_examples = source.get("competitor_examples") or []
+        if v2.get("competitors_found"):
+            competitor_examples = [c.get("name") for c in v2["competitors_found"] if c.get("name")] or competitor_examples
 
         to_insert.append({
             "vertical":                   result.get("vertical", "") or source.get("vertical", ""),
-            "pain_point":                 source.get("pain_point", "See research session notes"),
+            "pain_point":                 v2.get("pain_stakes") or source.get("pain_point", "See research session notes"),
             "icp":                        source.get("icp") or {},
             "solution_concept":           result.get("solution_concept", ""),
             "mrr_calculation":            source.get("mrr_calculation", ""),
-            "competitor_pricing_avg":     source.get("competitor_pricing_avg"),
-            "conservative_mrr_potential": max(mrr, 4000),  # enforce $4K floor
+            "competitor_pricing_avg":     v2.get("adjusted_avg_price") if v2.get("adjusted_avg_price") is not None else source.get("competitor_pricing_avg"),
+            "conservative_mrr_potential": mrr,
             "competition_density":        source.get("competition_density"),
             "competition_density_reason": source.get("competition_density_reason", ""),
             "build_confidence_score":     source.get("build_confidence_score", 0),
             "build_confidence_reason":    source.get("build_confidence_reason", ""),
             "retention_hooks":            source.get("retention_hooks") or {},
-            "competitor_examples":        source.get("competitor_examples") or [],
+            "competitor_examples":        competitor_examples,
             "source_urls":                source.get("source_urls") or [],
             "tier_structure":             source.get("tier_structure") or {},
             "mcp_integration_surface":    source.get("mcp_integration_surface"),
@@ -154,6 +176,8 @@ def node_write_pipeline(state: OrchestratorState) -> OrchestratorState:
             "stack_compatibility_notes":  source.get("stack_compatibility_notes", ""),
             "estimated_build_weeks":      source.get("estimated_build_weeks"),
             "status":                     result.get("status", "watch"),
+            "rejection_reason":           result.get("rejection_reason"),
+            "verdict_v2_output":          v2 or None,
             "notes":                      f"session:{state['session_id']}",
         })
 
