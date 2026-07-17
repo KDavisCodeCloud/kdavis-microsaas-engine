@@ -2,6 +2,13 @@ import pytest
 
 import agents.factory.brief_generator as brief_generator
 from agents.factory.brief_generator import _get_industry_palette, generate_build_brief
+from core.naming import NAME_SYSTEM_PROMPT
+
+
+def _fake_llm(system, user):
+    if system == NAME_SYSTEM_PROMPT:
+        return "Freight Audit Copilot"
+    return f"# brief for {system[:10]}"
 
 
 class FakeResult:
@@ -54,7 +61,7 @@ def test_happy_path_writes_branch_and_inserts_brief(monkeypatch, fake_db, tmp_pa
 
     result = generate_build_brief(
         "opp-1", "kelvin", tmp_path, supabase_client=fake_db,
-        llm_analyze=lambda system, user: f"# brief for {system[:10]}",
+        llm_analyze=_fake_llm,
         runner=runner,
     )
 

@@ -163,3 +163,16 @@ def test_frontend_package_json_is_valid_and_pins_node_22(fake_db, tmp_path):
 ])
 def test_slugify(name, expected):
     assert _slugify(name) == expected
+
+
+def test_slugify_caps_length_at_a_word_boundary():
+    # solution_concept is a full descriptive sentence in real data, not a
+    # short name — an uncapped slug crashed a real run with "File name too
+    # long" on the git branch ref. Regression coverage for the cap.
+    long_name = (
+        "A contractor payment compliance tool that automatically collects "
+        "W-9s via a branded portal, tracks cumulative payments per contractor"
+    )
+    slug = _slugify(long_name)
+    assert len(slug) <= 60
+    assert not slug.endswith("-")

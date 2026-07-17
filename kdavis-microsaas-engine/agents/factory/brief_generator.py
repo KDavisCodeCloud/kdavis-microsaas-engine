@@ -44,6 +44,7 @@ from typing import Any, Callable, Optional
 
 from core.supabase_client import get_supabase
 from core.llm_router import analyze
+from core.naming import derive_product_name
 
 AGENT_ID = "factory-brief-generator"
 FALLBACK_VERTICAL = "open"
@@ -118,9 +119,10 @@ Roboto/Arial), landing page structure, and the SXO requirements from CLAUDE.md's
 LAYER rule (above-fold CTA, no dead ends, mobile-first). Write in markdown."""
 
 
-def _build_llm_input(opp: dict, palette: dict) -> str:
+def _build_llm_input(opp: dict, palette: dict, product_name: str) -> str:
     return json.dumps({
-        "product_name": opp.get("solution_concept"),
+        "product_name": product_name,
+        "solution_concept": opp.get("solution_concept"),
         "vertical": opp.get("vertical"),
         "pain_point": opp.get("pain_point"),
         "mrr_calculation": opp.get("mrr_calculation"),
@@ -162,8 +164,13 @@ def generate_build_brief(
             raise RuntimeError(f"opportunity_pipeline row for {opportunity_id} not found")
 
         palette = _get_industry_palette(db, opp.get("vertical"))
-        product_slug = _slugify(opp["solution_concept"])
-        llm_input = _build_llm_input(opp, palette)
+        # solution_concept is a full descriptive sentence, not a short name
+        # (no dedicated name field exists in the schema) — slugifying it
+        # directly crashed a real 2026-07-17 run with "File name too long"
+        # on the git branch ref. Derive a short name first.
+        product_name = derive_product_name(opp["solution_concept"], llm_analyze=llm_analyze)
+        product_slug = _slugify(product_name)
+        llm_input = _build_llm_input(opp, palette, product_name)
 
         code_brief_md = llm_analyze(CODE_BRIEF_SYSTEM_PROMPT, llm_input)
         design_brief_md = llm_analyze(DESIGN_BRIEF_SYSTEM_PROMPT, llm_input)
@@ -173,7 +180,7 @@ def generate_build_brief(
         (repo_root / "BUILD_BRIEF_CLAUDE_CODE.md").write_text(code_brief_md)
         (repo_root / "BUILD_BRIEF_CLAUDE_DESIGN.md").write_text(design_brief_md)
         _run(runner, ["git", "add", "BUILD_BRIEF_CLAUDE_CODE.md", "BUILD_BRIEF_CLAUDE_DESIGN.md"], repo_root)
-        _run(runner, ["git", "commit", "-m", f"Build brief: {opp['solution_concept']}"], repo_root)
+        _run(runner, ["git", "commit", "-m", f"Build brief: {product_name}"], repo_root)
         _run(runner, ["git", "push", "-u", "origin", branch], repo_root)
         _run(runner, ["git", "checkout", "main"], repo_root)
         # The two files are now safely committed on the brief branch. Left
@@ -185,7 +192,7 @@ def generate_build_brief(
 
         insert_result = db.table("mse_build_briefs").insert({
             "opportunity_id": opportunity_id,
-            "product_name": opp["solution_concept"],
+            "product_name": product_name,
             "product_slug": product_slug,
             "verdict_score": opp.get("build_confidence_score"),
             "vertical": palette["vertical"],

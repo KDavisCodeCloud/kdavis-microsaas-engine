@@ -61,6 +61,13 @@ _INIT_DIRS = ["api", "api/middleware", "api/routers", "core", "core/retention", 
 
 def _slugify(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    if len(slug) > 60:
+        # opportunity_pipeline.solution_concept is a full descriptive
+        # sentence, not a short name (no dedicated name field exists in
+        # the schema) — an un-capped slug crashed a real 2026-07-17 run
+        # with "File name too long" on the git branch/ref. Cut at a
+        # word boundary rather than mid-word.
+        slug = slug[:60].rsplit("-", 1)[0]
     return slug or "product"
 
 
