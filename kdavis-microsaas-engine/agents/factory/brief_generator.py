@@ -36,7 +36,9 @@ every other agent action in this repo, so brief generation always has a
 named human in the audit trail even though it isn't itself a spend
 decision.
 """
+import base64
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -72,6 +74,12 @@ def _write_audit(db, outcome: str, product_id: str, metadata: dict) -> None:
 
 def _slugify(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    if len(slug) > 60:
+        # Defense in depth even though the name normally comes from
+        # derive_product_name — an LLM can still ignore instructions and
+        # return something long (observed for real 2026-07-17: a response
+        # with reasoning text left in it, ~80 chars once slugified).
+        slug = slug[:60].rsplit("-", 1)[0]
     return slug or "product"
 
 
@@ -80,6 +88,31 @@ def _run(runner: Runner, cmd: list[str], cwd: Path) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"Command failed ({' '.join(cmd)}): {result.stderr or result.stdout}")
     return result.stdout
+
+
+def _push_branch(runner: Runner, branch: str, repo_root: Path) -> None:
+    """
+    No other code path in this repo ever pushes to git from a running
+    process — build_pipeline/scaffold_generator deploy via the railway/
+    vercel CLIs, never git push. An interactive session has ambient `gh`/
+    git credentials; the deployed FastAPI process (Railway) does not,
+    and a real run 2026-07-17 confirmed a bare `git push` fails there
+    with "could not read Username". Uses GITHUB_TOKEN via an inline
+    Authorization header (never a global git config rewrite, so the
+    token never touches .git/config) when set; falls back to a plain
+    push for interactive use where ambient credentials already work.
+    """
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if token:
+        auth = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        cmd = [
+            "git", "-c", "credential.helper=",
+            "-c", f"http.extraHeader=Authorization: Basic {auth}",
+            "push", "-u", "origin", branch,
+        ]
+    else:
+        cmd = ["git", "push", "-u", "origin", branch]
+    _run(runner, cmd, repo_root)
 
 
 def _get_industry_palette(db, vertical: Optional[str]) -> dict:
@@ -181,7 +214,7 @@ def generate_build_brief(
         (repo_root / "BUILD_BRIEF_CLAUDE_DESIGN.md").write_text(design_brief_md)
         _run(runner, ["git", "add", "BUILD_BRIEF_CLAUDE_CODE.md", "BUILD_BRIEF_CLAUDE_DESIGN.md"], repo_root)
         _run(runner, ["git", "commit", "-m", f"Build brief: {product_name}"], repo_root)
-        _run(runner, ["git", "push", "-u", "origin", branch], repo_root)
+        _push_branch(runner, branch, repo_root)
         _run(runner, ["git", "checkout", "main"], repo_root)
         # The two files are now safely committed on the brief branch. Left
         # in place, they'd sit as untracked cruft in main's working tree

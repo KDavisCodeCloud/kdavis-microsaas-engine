@@ -174,3 +174,31 @@ def test_palette_raises_if_no_fallback_row_exists():
 
     with pytest.raises(RuntimeError, match="No industry_color_map row"):
         _get_industry_palette(db, "Some Unseeded Vertical Name")
+
+
+def test_push_uses_plain_git_when_no_github_token(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    runner = FakeRunner()
+
+    brief_generator._push_branch(runner, "brief/x", brief_generator.Path("."))
+
+    assert runner.calls[0]["cmd"] == ["git", "push", "-u", "origin", "brief/x"]
+
+
+def test_push_uses_inline_auth_header_when_github_token_set(monkeypatch):
+    # No other code path in this repo ever pushes to git from a running
+    # process — Railway's deployed FastAPI has no ambient `gh`/git
+    # credentials, confirmed by a real "could not read Username" failure
+    # 2026-07-17. GITHUB_TOKEN must be used via an inline header, never a
+    # global git config rewrite (that would leak the token into
+    # .git/config on disk).
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token-123")
+    runner = FakeRunner()
+
+    brief_generator._push_branch(runner, "brief/x", brief_generator.Path("."))
+
+    cmd = runner.calls[0]["cmd"]
+    assert cmd[0] == "git"
+    assert "credential.helper=" in cmd
+    assert any("Authorization: Basic" in c for c in cmd)
+    assert cmd[-4:] == ["push", "-u", "origin", "brief/x"]
