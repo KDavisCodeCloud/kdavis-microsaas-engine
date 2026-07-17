@@ -4,6 +4,20 @@ from api.middleware.auth import verify_jwt
 
 
 async def tenant_context_middleware(request: Request, call_next):
+    # CORS preflight requests never carry an Authorization header (that's
+    # the whole point of a preflight) — rejecting them here with 401 means
+    # CORSMiddleware (registered before this one, so it sits *inside* this
+    # middleware in the stack) never gets a chance to answer the preflight
+    # with the right Access-Control-Allow-* headers. The browser then
+    # reports the real request as a generic network failure ("Failed to
+    # fetch"), not a clean 401 — confirmed live 2026-07-17 via Railway logs
+    # showing "OPTIONS /pipeline/{id}/review" returning 401. This silently
+    # broke every authenticated POST/PATCH/DELETE endpoint called from a
+    # browser, not just this one — nothing surfaced it until this was the
+    # first time the reject button was actually clicked in a live browser.
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
     # Public paths — no auth required
     PUBLIC_PATHS = {
         "/health", "/docs", "/openapi.json", "/redoc", "/webhooks/stripe", "/ceo/health",
