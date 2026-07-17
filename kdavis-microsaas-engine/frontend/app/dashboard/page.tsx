@@ -96,7 +96,7 @@ export default async function DashboardPage() {
                   <span className="text-[12px] font-semibold shrink-0 truncate-text" style={{ maxWidth: "120px", color: "#eef2f5" }}>{e.agent_name}</span>
                   <span className="text-[12px] flex-1 truncate-text min-w-0" style={{ color: "#aab4bd" }}>{e.action}</span>
                   <span className="text-[11px] font-mono shrink-0" style={{ color: "#5b6673" }}>
-                    {new Date(e.created_at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}
+                    {new Date(e.created_at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/Phoenix" })}
                   </span>
                 </div>
               ))

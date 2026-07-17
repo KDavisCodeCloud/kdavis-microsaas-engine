@@ -149,6 +149,20 @@ async def trigger_seo_content(
     return {"status": "queued", "product_id": body.product_id}
 
 
+@router.post("/send-sequences")
+async def trigger_sequence_send(
+    background_tasks: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+):
+    """Triggers MKT-O5 to send touch_1 for newly-approved sequences and
+    touch_2 for anything due. Meant to be called on a schedule (n8n cron,
+    e.g. hourly) — not per-campaign like the other trigger endpoints."""
+    _require_api_key(authorization)
+
+    background_tasks.add_task(_run_send_sequences)
+    return {"status": "queued"}
+
+
 def _run_research(product_id: str, niche_keywords: list[str], source_config: dict) -> None:
     from agents.marketing.mkt_r1_research_core import run_research_core
     run_research_core(product_id, niche_keywords, source_config)
@@ -181,3 +195,8 @@ def _run_dm_sequences(
 def _run_seo_content(product_id: str, research_report: dict) -> None:
     from agents.marketing.mkt_s1_seo_content_factory import run_s1_seo_content_factory
     run_s1_seo_content_factory(research_report, product_id)
+
+
+def _run_send_sequences() -> None:
+    from agents.marketing.mkt_o5_sequence_sender import run_sequence_sender
+    run_sequence_sender()

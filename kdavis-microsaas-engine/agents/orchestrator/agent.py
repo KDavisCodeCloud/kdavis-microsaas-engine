@@ -196,6 +196,17 @@ def node_summarize(state: OrchestratorState) -> OrchestratorState:
         "top_opportunity":          top.get("solution_concept") if top else None,
         "recommended_first_build":  top.get("solution_concept") if top else None,
     }
+
+    # Persisted completion signal — this used to only live in the in-memory
+    # graph state, which a background task's caller never sees. Without
+    # this, /research/session/{id} had no way to know the run finished at
+    # all (research.py falls back to a fixed time estimate otherwise).
+    get_supabase().table("usage_events").insert({
+        "tenant_id": None,
+        "event_type": "research_session_complete",
+        "metadata": summary,
+    }).execute()
+
     return {**state, "session_summary": summary, "status": "done"}
 
 

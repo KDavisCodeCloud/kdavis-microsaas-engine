@@ -130,7 +130,7 @@ export default function PipelinePage() {
                           ))}
                         </div>
                       )}
-                      <p className="text-[10px] font-mono" style={{ color: "#3a4250" }}>Added {new Date(opp.created_at).toLocaleDateString()}</p>
+                      <p className="text-[10px] font-mono" style={{ color: "#3a4250" }}>Added {new Date(opp.created_at).toLocaleDateString("en-US", { timeZone: "America/Phoenix" })}</p>
                     </div>
                   )}
                 </div>

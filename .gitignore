@@ -5,3 +5,5 @@
 tfplan
 *.zip
 .terraform.lock.hcl
+.vercel
+.env*

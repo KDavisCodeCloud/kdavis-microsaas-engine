@@ -48,7 +48,10 @@ async def run_research(body: ResearchRunRequest, request: Request, background_ta
 
 @router.get("/session/{session_id}")
 async def get_session(session_id: str, request: Request):
-    """Poll for results of a research run by session_id."""
+    """Poll for results of a research run by session_id. session_summary is
+    only present once node_summarize's completion event has landed in
+    usage_events — its absence means the swarm is still running, not that
+    the run failed."""
     db = get_supabase()
     results = (
         db.table("opportunity_pipeline")
@@ -58,7 +61,22 @@ async def get_session(session_id: str, request: Request):
         .execute()
         .data
     )
-    return {"session_id": session_id, "opportunities": results}
+
+    completion = (
+        db.table("usage_events")
+        .select("metadata")
+        .eq("event_type", "research_session_complete")
+        .eq("metadata->>session_id", session_id)
+        .maybe_single()
+        .execute()
+        .data
+    )
+
+    return {
+        "session_id": session_id,
+        "opportunities": results,
+        "session_summary": completion["metadata"] if completion else None,
+    }
 
 
 async def _run_orchestrator(session_id: str, verticals: list[str]) -> None:

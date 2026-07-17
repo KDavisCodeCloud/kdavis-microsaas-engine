@@ -1,0 +1,52 @@
+{
+  "id": "outreach-sender-001",
+  "name": "Outreach Sequence Sender — Hourly",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "pinData": {},
+  "nodes": [
+    {
+      "id": "cron-trigger",
+      "name": "Every Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 * * * *"
+            }
+          ]
+        }
+      },
+      "position": [200, 300]
+    },
+    {
+      "id": "send-sequences",
+      "name": "Trigger MKT-O5 Send",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.API_BASE_URL }}/marketing/send-sequences",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.MARKETING_API_KEY }}"
+            }
+          ]
+        }
+      },
+      "position": [420, 300]
+    }
+  ],
+  "connections": {
+    "Every Hour": {"main": [[{"node": "Trigger MKT-O5 Send", "type": "main", "index": 0}]]}
+  }
+}

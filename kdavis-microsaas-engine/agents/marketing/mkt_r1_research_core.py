@@ -33,6 +33,8 @@ Output schema (research_report.json / mse_research_reports.report_json):
 """
 
 import json
+import os
+import tempfile
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -42,7 +44,11 @@ from core.sanitization import DataSanitizationShield
 from core.supabase_client import get_supabase
 
 AGENT_ID = "mkt-r1"
-OUTPUT_ROOT = Path("/mse/marketing/outputs")
+# Debug-only local cache of each report — mse_research_reports (Supabase) is the
+# real source of truth downstream agents read from; nothing reads this back.
+# Defaults to the OS temp dir since /mse doesn't exist on Railway or most dev
+# machines; override via env var if a persistent path is ever needed.
+OUTPUT_ROOT = Path(os.environ.get("RESEARCH_OUTPUT_DIR", tempfile.gettempdir())) / "mse-marketing-outputs"
 
 _REQUIRED_LIST_FIELDS = [
     "trending_topics", "pain_language", "competitor_moves",

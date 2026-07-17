@@ -1,12 +1,14 @@
 "use client";
 
 import { useState } from "react";
+import { createClient } from "@/lib/supabase/client";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 type TriggerState = "idle" | "running" | "queued" | "error";
 
 export function ResearchTrigger() {
+  const supabase = createClient();
   const [state, setState] = useState<TriggerState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -16,9 +18,12 @@ export function ResearchTrigger() {
     setError(null);
     setSessionId(null);
     try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error("Not signed in");
+
       const res = await fetch(`${API_BASE}/research/run`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "Bearer internal" },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
         body: JSON.stringify({ verticals: [] }),
       });
       const data = await res.json();

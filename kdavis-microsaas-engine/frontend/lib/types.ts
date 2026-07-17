@@ -52,6 +52,33 @@ export interface RetentionSequence {
   metadata: Record<string, unknown>;
 }
 
+export interface ApolloLead {
+  id: string;
+  first_name: string | null;
+  last_name: string | null;
+  email: string | null;
+  company: string | null;
+  title: string | null;
+  linkedin_url: string | null;
+  status: string;
+  linkedin_contacted_at: string | null;
+  created_at: string;
+}
+
+export interface DmSequence {
+  id: string;
+  lead_id: string;
+  product_id: string;
+  campaign_build_id: string;
+  touch_1: string;
+  touch_2: string;
+  status: string;
+  hitl_approved_by: string | null;
+  hitl_approved_at: string | null;
+  created_at: string;
+  mse_apollo_leads: ApolloLead | null;
+}
+
 export const MSE_VERTICALS = [
   "Healthcare / Medical Front Desk",
   "Legal / Professional Services",
@@ -65,6 +92,7 @@ export const NAV_ITEMS = [
   { id: "overview",  label: "Overview",       path: "/dashboard" },
   { id: "swarm",     label: "Research Swarm", path: "/research" },
   { id: "pipeline",  label: "Pipeline",       path: "/pipeline" },
+  { id: "outreach",  label: "Outreach",       path: "/outreach" },
   { id: "agents",    label: "Agents",         path: "/agents" },
   { id: "retention", label: "Retention",      path: "/retention" },
 ] as const;

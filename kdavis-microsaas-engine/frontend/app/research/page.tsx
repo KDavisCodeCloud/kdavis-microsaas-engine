@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { createClient } from "@/lib/supabase/client";
 import { DashboardShell } from "@/components/shell/DashboardShell";
 import { TopBar } from "@/components/shell/TopBar";
 import { SectionCard } from "@/components/ui/SectionCard";
@@ -12,14 +13,43 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 type RunState = "idle" | "running" | "polling" | "complete" | "error";
 
+type SessionOpportunity = {
+  id: string;
+  vertical: string;
+  solution_concept: string;
+  conservative_mrr_potential: number;
+  build_confidence_score: number | null;
+  status: string;
+};
+
+function summarizeOpportunities(verticalsRequested: string[], opportunities: SessionOpportunity[]): SessionSummary {
+  const byStatus = (s: string) => opportunities.filter((o) => o.status === s).length;
+  const top = [...opportunities].sort((a, b) => (b.build_confidence_score ?? 0) - (a.build_confidence_score ?? 0))[0];
+  const readyToBuild = opportunities.filter((o) => o.status === "READY_TO_BUILD");
+  const firstBuild = [...readyToBuild].sort((a, b) => (b.build_confidence_score ?? 0) - (a.build_confidence_score ?? 0))[0];
+  return {
+    session_id: "",
+    verticals_scanned: verticalsRequested.length,
+    ready_to_build: readyToBuild.length,
+    validated_pending_review: byStatus("validated"),
+    watch_list: byStatus("watch"),
+    rejected: byStatus("rejected"),
+    top_opportunity: top?.solution_concept ?? null,
+    recommended_first_build: firstBuild?.solution_concept ?? null,
+  };
+}
+
 export default function ResearchPage() {
+  const supabase = createClient();
   const [selected, setSelected] = useState<string[]>([]);
   const [state, setState] = useState<RunState>("idle");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [summary, setSummary] = useState<SessionSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  const [runVerticals, setRunVerticals] = useState<string[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const elapsedRef = useRef(0);
 
   function toggleVertical(v: string) {
     setSelected((prev) => prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]);
@@ -28,18 +58,39 @@ export default function ResearchPage() {
   function selectAll() { setSelected([...MSE_VERTICALS]); }
   function selectNone() { setSelected([]); }
 
-  // Poll session when we have an ID
+  // Poll session when we have an ID. /research/session/{id} returns
+  // {session_id, opportunities, session_summary}. session_summary is only
+  // present once the orchestrator's completion event lands in usage_events
+  // — until then it's null and we show a live-updating preview derived
+  // from opportunities instead. A fixed time ceiling is a fallback safety
+  // net in case that completion event is ever missed for some reason,
+  // not the primary "is it done" signal anymore.
+  const POLL_TIMEOUT_SECONDS = 210;
   useEffect(() => {
     if (!sessionId || state !== "polling") return;
     const poll = setInterval(async () => {
       try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session) return;
+
         const res = await fetch(`${API_BASE}/research/session/${sessionId}`, {
-          headers: { Authorization: "Bearer internal" },
+          headers: { Authorization: `Bearer ${session.access_token}` },
         });
         if (res.ok) {
           const data = await res.json();
-          if (data.session_summary && Object.keys(data.session_summary).length > 0) {
+          const opportunities = (data.opportunities ?? []) as SessionOpportunity[];
+
+          if (data.session_summary) {
             setSummary(data.session_summary as SessionSummary);
+            setState("complete");
+            clearInterval(poll);
+            if (timerRef.current) clearInterval(timerRef.current);
+            return;
+          }
+
+          setSummary(summarizeOpportunities(runVerticals, opportunities));
+
+          if (elapsedRef.current >= POLL_TIMEOUT_SECONDS) {
             setState("complete");
             clearInterval(poll);
             if (timerRef.current) clearInterval(timerRef.current);
@@ -48,15 +99,15 @@ export default function ResearchPage() {
       } catch { /* keep polling */ }
     }, 5000);
     return () => clearInterval(poll);
-  }, [sessionId, state]);
+  }, [sessionId, state, runVerticals, supabase]);
 
   // Elapsed timer
   useEffect(() => {
     if (state === "running" || state === "polling") {
-      timerRef.current = setInterval(() => setElapsed((e) => e + 1), 1000);
+      timerRef.current = setInterval(() => setElapsed((e) => { elapsedRef.current = e + 1; return e + 1; }), 1000);
     } else {
       if (timerRef.current) clearInterval(timerRef.current);
-      if (state === "idle") setElapsed(0);
+      if (state === "idle") { setElapsed(0); elapsedRef.current = 0; }
     }
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [state]);
@@ -66,25 +117,28 @@ export default function ResearchPage() {
     setError(null);
     setSummary(null);
     setElapsed(0);
+    elapsedRef.current = 0;
     const verticals = selected.length > 0 ? selected : [...MSE_VERTICALS];
+    setRunVerticals(verticals);
 
     try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error("Not signed in");
+
       const res = await fetch(`${API_BASE}/research/run`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "Bearer internal" },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
         body: JSON.stringify({ verticals }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail ?? "Run failed");
 
-      // /research/run returns immediately with session_id; poll for results
+      // /research/run always returns a session_id and queues the swarm in
+      // the background — there's no synchronous mode, results only ever
+      // arrive via polling /research/session/{id}.
       if (data.session_id) {
         setSessionId(data.session_id);
         setState("polling");
-      } else if (data.session_summary) {
-        // If the endpoint returned a summary directly (synchronous mode)
-        setSummary(data.session_summary as SessionSummary);
-        setState("complete");
       }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Unknown error");
