@@ -31,6 +31,23 @@ export interface Opportunity {
   created_at: string;
 }
 
+export interface BuildBrief {
+  id: string;
+  opportunity_id: string | null;
+  product_name: string;
+  product_slug: string;
+  verdict_score: number | null;
+  vertical: string;
+  claude_code_brief: { markdown?: string } | null;
+  claude_design_brief: { markdown?: string } | null;
+  repo_branch: string | null;
+  status: string;
+  activated_monitoring: boolean;
+  mrr_at_activation: number | null;
+  mrr_sustained_days: number | null;
+  created_at: string;
+}
+
 export interface AgentEvent {
   id: string;
   agent_name: string;
@@ -91,7 +108,7 @@ export const MSE_VERTICALS = [
 export const NAV_ITEMS = [
   { id: "overview",  label: "Overview",       path: "/dashboard" },
   { id: "swarm",     label: "Research Swarm", path: "/research" },
-  { id: "pipeline",  label: "Pipeline",       path: "/pipeline" },
+  { id: "pipeline",  label: "Opportunities",  path: "/pipeline" },
   { id: "outreach",  label: "Outreach",       path: "/outreach" },
   { id: "agents",    label: "Agents",         path: "/agents" },
   { id: "retention", label: "Retention",      path: "/retention" },

@@ -15,6 +15,7 @@ from pydantic import BaseModel
 router = APIRouter(prefix="/factory", tags=["factory"])
 
 SCAFFOLD_OUTPUT_ROOT = Path("/tmp/mse-products")
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 class BuildRequest(BaseModel):
@@ -42,3 +43,23 @@ def _run_build(opportunity_id: str, stripe_api_key: str, triggered_by: str, org_
     run_build_pipeline(
         opportunity_id, SCAFFOLD_OUTPUT_ROOT, stripe_api_key, triggered_by, org_id=org_id,
     )
+
+
+@router.post("/generate-brief/{opportunity_id}")
+async def trigger_generate_brief(
+    opportunity_id: str, request: Request, background_tasks: BackgroundTasks,
+):
+    if getattr(request.state, "role", "") != "admin":
+        raise HTTPException(status_code=403, detail="Brief generation requires admin role")
+
+    triggered_by = getattr(request.state, "tenant_id", None)
+    if not triggered_by:
+        raise HTTPException(status_code=401, detail="No authenticated user to attribute this brief to")
+
+    background_tasks.add_task(_run_generate_brief, opportunity_id, triggered_by)
+    return {"status": "queued", "opportunity_id": opportunity_id}
+
+
+def _run_generate_brief(opportunity_id: str, triggered_by: str) -> None:
+    from agents.factory.brief_generator import generate_build_brief
+    generate_build_brief(opportunity_id, triggered_by, REPO_ROOT)
