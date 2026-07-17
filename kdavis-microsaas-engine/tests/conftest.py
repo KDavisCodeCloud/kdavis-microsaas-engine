@@ -82,7 +82,16 @@ class FakeQuery:
         self.store.executed.append(self)
         result_data = self.store.responses.get(self.table_name, [])
         if getattr(self, "_single", False):
-            result_data = result_data[0] if result_data else None
+            # Real supabase-py's .maybe_single().execute() returns bare
+            # None (not a Response object with .data=None) when zero rows
+            # match — confirmed against a real live crash 2026-07-17
+            # (AttributeError: 'NoneType' object has no attribute 'data').
+            # Matching that exactly here so tests actually catch code that
+            # forgets to guard against it, instead of masking the bug the
+            # way the old always-return-an-object version did.
+            if not result_data:
+                return None
+            return type("Result", (), {"data": result_data[0]})()
         return type("Result", (), {"data": result_data})()
 
 

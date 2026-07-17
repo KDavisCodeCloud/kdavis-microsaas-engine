@@ -104,3 +104,73 @@ def test_subscription_deleted_marks_tenant_churned(monkeypatch, fake_db):
     assert resp.status_code == 200
     tenant_updates = [c for c in fake_db.executed if c.table_name == "tenants"]
     assert any(c._payload.get("status") == "churned" for c in tenant_updates)
+
+
+def test_subscription_deleted_when_tenant_lookup_finds_nothing_does_not_crash(monkeypatch, fake_db):
+    """Regression test for a real bug found 2026-07-17: maybe_single().execute()
+    returns bare None (not a Response with .data=None) when zero rows match —
+    a subscription with no matching tenant row crashed this whole handler
+    with a 500 before the fix, instead of just skipping the suppression step."""
+    fake_db.responses["tenants"] = []  # no matching tenant at all
+
+    monkeypatch.setattr(stripe_router, "get_supabase", lambda: fake_db)
+
+    subscription = {"id": "sub_unknown", "customer": "cus_unknown"}
+    payload = _event("customer.subscription.deleted", subscription)
+    body, header = _sign(payload)
+
+    resp = client.post(
+        "/webhooks/stripe",
+        content=body,
+        headers={"stripe-signature": header},
+    )
+
+    assert resp.status_code == 200
+
+
+def test_payment_failed_when_tenant_not_found_does_not_crash(monkeypatch, fake_db):
+    fake_db.responses["tenants"] = []
+
+    monkeypatch.setattr(stripe_router, "get_supabase", lambda: fake_db)
+
+    invoice = {"id": "in_1", "customer": "cus_unknown", "subscription": "sub_1", "amount_due": 2900}
+    payload = _event("invoice.payment_failed", invoice)
+    body, header = _sign(payload)
+
+    resp = client.post(
+        "/webhooks/stripe",
+        content=body,
+        headers={"stripe-signature": header},
+    )
+
+    assert resp.status_code == 200
+    event_writes = [c for c in fake_db.executed if c.table_name == "usage_events"]
+    assert len(event_writes) == 0  # nothing to log against — no tenant found
+
+
+def test_payment_failed_logs_event_and_activates_sequence(monkeypatch, fake_db):
+    fake_db.responses["tenants"] = [{"id": "user-123"}]
+    fake_db.responses["retention_sequences"] = []  # no existing active prebilling sequence
+
+    monkeypatch.setattr(stripe_router, "get_supabase", lambda: fake_db)
+
+    invoice = {"id": "in_1", "customer": "cus_1", "subscription": "sub_1", "amount_due": 2900}
+    payload = _event("invoice.payment_failed", invoice)
+    body, header = _sign(payload)
+
+    resp = client.post(
+        "/webhooks/stripe",
+        content=body,
+        headers={"stripe-signature": header},
+    )
+
+    assert resp.status_code == 200
+    event_writes = [c for c in fake_db.executed if c.table_name == "usage_events"]
+    assert len(event_writes) == 1
+    assert event_writes[0]._payload["event_type"] == "payment_failed"
+
+    sequence_writes = [
+        c for c in fake_db.executed
+        if c.table_name == "retention_sequences" and c._payload and c._payload.get("sequence_type") == "prebilling"
+    ]
+    assert len(sequence_writes) == 1

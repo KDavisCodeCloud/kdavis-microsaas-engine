@@ -62,15 +62,21 @@ async def get_session(session_id: str, request: Request):
         .data
     )
 
-    completion = (
+    # .maybe_single().execute() returns None (not a Response with .data=None)
+    # when zero rows match, in this supabase-py version — found the hard way
+    # 2026-07-17 when a real live run crashed every single poll with
+    # AttributeError: 'NoneType' object has no attribute 'data'. Unit tests
+    # against the fake client didn't catch this since the fake always
+    # returns a Result object, never bare None.
+    completion_result = (
         db.table("usage_events")
         .select("metadata")
         .eq("event_type", "research_session_complete")
         .eq("metadata->>session_id", session_id)
         .maybe_single()
         .execute()
-        .data
     )
+    completion = completion_result.data if completion_result is not None else None
 
     return {
         "session_id": session_id,
@@ -81,4 +87,17 @@ async def get_session(session_id: str, request: Request):
 
 async def _run_orchestrator(session_id: str, verticals: list[str]) -> None:
     from agents.orchestrator.agent import run as orchestrator_run
-    await orchestrator_run(session_id, verticals)
+    try:
+        await orchestrator_run(session_id, verticals)
+    except Exception as exc:
+        # Never fail silently — a background task's exception otherwise
+        # only ever reaches stderr, leaving no trace anywhere queryable.
+        # Found the hard way 2026-07-17: a live run left nothing but
+        # "research_session_started" in usage_events with no way to tell
+        # from the DB alone whether it was still running or had died.
+        get_supabase().table("usage_events").insert({
+            "tenant_id": None,
+            "event_type": "research_session_failed",
+            "metadata": {"session_id": session_id, "error": str(exc)},
+        }).execute()
+        raise

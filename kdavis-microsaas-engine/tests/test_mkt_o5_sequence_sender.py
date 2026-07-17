@@ -70,6 +70,22 @@ def test_touch_1_skips_lead_with_no_email_but_continues(fake_db):
     assert "No email on file" in audits[0]._payload["metadata"]["error"]
 
 
+def test_touch_1_skips_lead_that_no_longer_exists(fake_db):
+    """Regression test for a real bug found 2026-07-17: maybe_single().execute()
+    returns bare None (not a Response with .data=None) when zero rows match
+    — a deleted/missing lead_id crashed this with an unhandled AttributeError
+    instead of being caught by the existing "no email on file" handling."""
+    _seed_sequence(fake_db, status="approved_hitl")
+    fake_db.responses["mse_apollo_leads"] = []  # lead_id doesn't exist at all
+    fake_resend = FakeResend()
+
+    result = run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
+
+    assert result == {"sent": 0, "failed": ["seq-1"]}
+    audits = [c for c in fake_db.executed if c.table_name == "audit_log"]
+    assert audits[0]._payload["outcome"] == "lose"
+
+
 def test_touch_2_query_filters_on_status_and_cadence_cutoff(fake_db):
     """The FakeQuery doesn't actually filter its canned response based on
     .eq()/.lte() calls (that's Postgres's job against the real DB) — this

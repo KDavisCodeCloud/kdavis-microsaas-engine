@@ -70,7 +70,11 @@ def _write(path: Path, content: str) -> None:
 
 
 def _load_opportunity(db, product_id: str) -> dict:
-    row = db.table("opportunity_pipeline").select("*").eq("id", product_id).maybe_single().execute().data
+    # maybe_single().execute() returns bare None (not a Response with
+    # .data=None) when zero rows match — a nonexistent product_id is
+    # exactly that case, guard against it explicitly.
+    result = db.table("opportunity_pipeline").select("*").eq("id", product_id).maybe_single().execute()
+    row = result.data if result is not None else None
     if not row:
         raise ValueError(f"No opportunity_pipeline row found for id={product_id}")
     if row["status"] != "READY_TO_BUILD":

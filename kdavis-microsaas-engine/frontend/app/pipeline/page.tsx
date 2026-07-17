@@ -10,6 +10,7 @@ import { ProgressBar } from "@/components/ui/ProgressBar";
 import type { Opportunity } from "@/lib/types";
 
 const STATUS_FILTER_OPTIONS = ["all", "READY_TO_BUILD", "validated", "watch", "rejected"];
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 const DENSITY_COLOR: Record<string, string> = {
   green: "#6fce8f",
@@ -23,6 +24,10 @@ export default function PipelinePage() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState("all");
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [buildFormFor, setBuildFormFor] = useState<string | null>(null);
+  const [stripeKey, setStripeKey] = useState("");
+  const [buildState, setBuildState] = useState<"idle" | "queuing" | "queued" | "error">("idle");
+  const [buildError, setBuildError] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     const { data } = await supabase
@@ -38,6 +43,28 @@ export default function PipelinePage() {
   const visible = opportunities.filter((o) => filter === "all" || o.status === filter);
   const ready = opportunities.filter((o) => o.status === "READY_TO_BUILD").length;
   const validated = opportunities.filter((o) => o.status === "validated").length;
+
+  async function submitBuild(opportunityId: string) {
+    setBuildState("queuing");
+    setBuildError(null);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error("Not signed in");
+
+      const res = await fetch(`${API_BASE}/factory/build/${opportunityId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ stripe_api_key: stripeKey }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? `API error ${res.status}`);
+      setBuildState("queued");
+      setStripeKey("");
+    } catch (e: unknown) {
+      setBuildError(e instanceof Error ? e.message : "Unknown error");
+      setBuildState("error");
+    }
+  }
 
   return (
     <DashboardShell>
@@ -131,6 +158,61 @@ export default function PipelinePage() {
                         </div>
                       )}
                       <p className="text-[10px] font-mono" style={{ color: "#3a4250" }}>Added {new Date(opp.created_at).toLocaleDateString("en-US", { timeZone: "America/Phoenix" })}</p>
+
+                      {opp.status === "READY_TO_BUILD" && (
+                        <div className="rounded-[8px] p-3.5" style={{ backgroundColor: "#6fce8f11", border: "1px solid #6fce8f44" }}>
+                          {buildFormFor !== opp.id ? (
+                            <button
+                              onClick={() => { setBuildFormFor(opp.id); setBuildState("idle"); setBuildError(null); }}
+                              className="px-4 py-2 rounded-[8px] text-[12px] font-bold"
+                              style={{ backgroundColor: "#6fce8f", color: "#0b0e13" }}
+                            >
+                              Build This Product →
+                            </button>
+                          ) : buildState === "queued" ? (
+                            <p className="text-[12px] font-semibold" style={{ color: "#6fce8f" }}>
+                              Build queued. Status will move to &ldquo;building&rdquo; then &ldquo;launched&rdquo; — this takes several minutes (Supabase provisioning alone can take up to 5). Refresh to check.
+                            </p>
+                          ) : (
+                            <div className="space-y-2.5">
+                              <p className="text-[11px] font-mono uppercase" style={{ color: "#5b6673" }}>
+                                Stripe secret key for this product&apos;s dedicated account
+                              </p>
+                              <input
+                                type="password"
+                                value={stripeKey}
+                                onChange={(e) => setStripeKey(e.target.value)}
+                                placeholder="sk_live_..."
+                                className="w-full px-3 py-2 rounded-[6px] text-[12px] font-mono outline-none"
+                                style={{ backgroundColor: "#10151b", border: "1px solid #1c222b", color: "#eef2f5" }}
+                              />
+                              {buildError && (
+                                <p className="text-[11px] font-mono" style={{ color: "#e05d5d" }}>{buildError}</p>
+                              )}
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => submitBuild(opp.id)}
+                                  disabled={!stripeKey || buildState === "queuing"}
+                                  className="px-4 py-2 rounded-[8px] text-[12px] font-bold"
+                                  style={{
+                                    backgroundColor: !stripeKey || buildState === "queuing" ? "#2a3340" : "#6fce8f",
+                                    color: !stripeKey || buildState === "queuing" ? "#5b6673" : "#0b0e13",
+                                  }}
+                                >
+                                  {buildState === "queuing" ? "Queuing…" : "Confirm & Build"}
+                                </button>
+                                <button
+                                  onClick={() => { setBuildFormFor(null); setStripeKey(""); }}
+                                  className="px-4 py-2 rounded-[8px] text-[12px] font-semibold"
+                                  style={{ backgroundColor: "transparent", border: "1px solid #1c222b", color: "#8b96a3" }}
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

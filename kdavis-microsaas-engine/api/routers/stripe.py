@@ -93,29 +93,33 @@ def _handle_subscription_deleted(db, subscription):
         "status": "churned",
     }).eq("stripe_subscription_id", subscription_id).execute()
 
-    # Suppress any active re-engagement sequences so churned users don't get drip emails
-    tenant = db.table("tenants").select("id").eq(
+    # Suppress any active re-engagement sequences so churned users don't get drip emails.
+    # maybe_single().execute() returns bare None (not a Response with
+    # .data=None) when zero rows match — a subscription_id with no matching
+    # tenant is an entirely normal case here, not an error; guard against it
+    # explicitly rather than crashing the whole webhook.
+    tenant_result = db.table("tenants").select("id").eq(
         "stripe_subscription_id", subscription_id
     ).maybe_single().execute()
 
-    if tenant.data:
+    if tenant_result is not None and tenant_result.data:
         db.table("retention_sequences").update({
             "status": "suppressed",
-        }).eq("tenant_id", tenant.data["id"]).eq("status", "active").execute()
+        }).eq("tenant_id", tenant_result.data["id"]).eq("status", "active").execute()
 
 
 def _handle_payment_failed(db, invoice):
     customer_id = invoice["customer"]
     subscription_id = invoice.get("subscription")
 
-    tenant = db.table("tenants").select("id").eq(
+    tenant_result = db.table("tenants").select("id").eq(
         "stripe_customer_id", customer_id
     ).maybe_single().execute()
 
-    if not tenant.data:
+    if tenant_result is None or not tenant_result.data:
         return
 
-    tenant_id = tenant.data["id"]
+    tenant_id = tenant_result.data["id"]
 
     # Log the failure event
     db.table("usage_events").insert({
@@ -129,11 +133,11 @@ def _handle_payment_failed(db, invoice):
     }).execute()
 
     # Activate pre-billing re-engagement sequence if not already running
-    existing = db.table("retention_sequences").select("id").eq(
+    existing_result = db.table("retention_sequences").select("id").eq(
         "tenant_id", tenant_id
     ).eq("sequence_type", "prebilling").eq("status", "active").maybe_single().execute()
 
-    if not existing.data:
+    if existing_result is None or not existing_result.data:
         db.table("retention_sequences").insert({
             "tenant_id": tenant_id,
             "sequence_type": "prebilling",

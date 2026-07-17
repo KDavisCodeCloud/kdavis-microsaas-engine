@@ -64,8 +64,11 @@ def _send_email(resend_client, to_email: str, subject: str, body: str) -> None:
 
 
 def _get_lead(db, lead_id: str) -> Optional[dict]:
+    # maybe_single().execute() returns bare None (not a Response with
+    # .data=None) when zero rows match — a deleted/bad lead_id is exactly
+    # that case.
     result = db.table("mse_apollo_leads").select("email,first_name").eq("id", lead_id).maybe_single().execute()
-    return result.data
+    return result.data if result is not None else None
 
 
 def run_send_touch_1(supabase_client: Optional[Any] = None, resend_client: Optional[Any] = None) -> dict:

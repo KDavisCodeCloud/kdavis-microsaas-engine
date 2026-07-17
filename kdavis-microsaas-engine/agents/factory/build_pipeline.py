@@ -81,7 +81,10 @@ def run_build_pipeline(
         migration_sql = (repo_path / "supabase" / "migrations" / "001_core_schema.sql").read_text()
         supabase_result = provision_supabase_project(product_slug, org_id, migration_sql, db_password)
 
-        opp = db.table("opportunity_pipeline").select("solution_concept,tier_structure").eq("id", product_id).maybe_single().execute().data
+        # maybe_single().execute() returns bare None (not a Response with
+        # .data=None) when zero rows match.
+        opp_result = db.table("opportunity_pipeline").select("solution_concept,tier_structure").eq("id", product_id).maybe_single().execute()
+        opp = opp_result.data if opp_result is not None else None
         if not opp:
             raise RuntimeError(f"opportunity_pipeline row for {product_id} disappeared mid-build")
 

@@ -155,7 +155,17 @@ export default function OutreachPage() {
             )}
           </SectionCard>
 
-          <SectionCard title="LinkedIn Manual Outreach — never automated, human-sent only">
+          <SectionCard title="LinkedIn Manual Outreach">
+            <div
+              className="rounded-[8px] p-3.5 mb-4 flex items-start gap-2.5"
+              style={{ backgroundColor: "#e8963f22", border: "2px solid #e8963f" }}
+            >
+              <span style={{ fontSize: "18px", lineHeight: 1 }}>⚠️</span>
+              <p className="text-[13px] font-bold uppercase tracking-wide" style={{ color: "#e8963f" }}>
+                Manual outreach only — never automated. Open each profile below and send
+                the cold DM yourself. Do not build or run any tool that sends these automatically.
+              </p>
+            </div>
             {loading ? (
               <p className="text-[11px] font-mono" style={{ color: "#5b6673" }}>Loading…</p>
             ) : leads.length === 0 ? (
@@ -170,9 +180,17 @@ export default function OutreachPage() {
                   style={{ borderTop: i > 0 ? "1px solid #1c222b" : "none" }}
                 >
                   <div className="min-w-0">
-                    <p className="text-[12.5px] font-semibold truncate-text" style={{ color: "#eef2f5" }}>
-                      {lead.first_name ?? "Unknown"} {lead.last_name ?? ""}
-                    </p>
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <span
+                        className="px-1.5 py-0.5 rounded-[4px] text-[9.5px] font-bold uppercase tracking-wide shrink-0"
+                        style={{ backgroundColor: "#e8963f", color: "#0b0e13" }}
+                      >
+                        Manual send
+                      </span>
+                      <p className="text-[12.5px] font-semibold truncate-text" style={{ color: "#eef2f5" }}>
+                        {lead.first_name ?? "Unknown"} {lead.last_name ?? ""}
+                      </p>
+                    </div>
                     <p className="text-[11px] font-mono truncate-text" style={{ color: "#5b6673" }}>
                       {[lead.title, lead.company].filter(Boolean).join(" · ") || "—"}
                     </p>
