@@ -12,6 +12,12 @@ import type { Opportunity, BuildBrief } from "@/lib/types";
 const STATUS_FILTER_OPTIONS = ["all", "READY_TO_BUILD", "validated", "watch", "rejected"];
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
+function filterLabel(f: string): string {
+  if (f === "all") return "All";
+  if (f === "READY_TO_BUILD") return "Build Queue";
+  return f.replace(/_/g, " ");
+}
+
 const DENSITY_COLOR: Record<string, string> = {
   green: "#6fce8f",
   yellow: "#e8963f",
@@ -48,6 +54,14 @@ export default function PipelinePage() {
   }, [supabase]);
 
   async function submitReview(opportunityId: string, decision: "approved" | "rejected") {
+    if (decision === "rejected" && !window.confirm(
+      "Reject this opportunity? It will be permanently removed from the Opportunities list " +
+      "(the agent's research and your comment are kept in an archive for tuning, but it will " +
+      "no longer show up here)."
+    )) {
+      return;
+    }
+
     setReviewState((s) => ({ ...s, [opportunityId]: "submitting" }));
     setReviewError((e) => ({ ...e, [opportunityId]: "" }));
     try {
@@ -62,6 +76,9 @@ export default function PipelinePage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail ?? `API error ${res.status}`);
       setReviewState((s) => ({ ...s, [opportunityId]: "idle" }));
+      if (decision === "rejected") {
+        setExpanded((cur) => (cur === opportunityId ? null : cur));
+      }
       await fetchData();
     } catch (e: unknown) {
       setReviewError((err) => ({ ...err, [opportunityId]: e instanceof Error ? e.message : "Unknown error" }));
@@ -129,7 +146,7 @@ export default function PipelinePage() {
                   color: filter === f ? "#5eead4" : "#8b96a3",
                 }}
               >
-                {f === "all" ? "All" : f.replace(/_/g, " ")}
+                {filterLabel(f)}
                 {f !== "all" && (
                   <span className="ml-1.5" style={{ color: "#5b6673" }}>
                     ({opportunities.filter((o) => o.status === f).length})
@@ -140,7 +157,7 @@ export default function PipelinePage() {
           </div>
 
           {/* Opportunity list */}
-          <SectionCard title={`${filter === "all" ? "All" : filter.replace(/_/g, " ")} Opportunities`}>
+          <SectionCard title={`${filterLabel(filter)} Opportunities`}>
             {loading ? (
               <p className="text-[11px] font-mono" style={{ color: "#5b6673" }}>Loading opportunities…</p>
             ) : visible.length === 0 ? (
@@ -240,7 +257,7 @@ export default function PipelinePage() {
                             className="px-4 py-2 rounded-[8px] text-[12px] font-bold"
                             style={{ backgroundColor: "#6fce8f", color: "#0b0e13", opacity: reviewState[opp.id] === "submitting" ? 0.5 : 1 }}
                           >
-                            Approve
+                            Approve → Build Queue
                           </button>
                           <button
                             onClick={() => submitReview(opp.id, "rejected")}
@@ -248,7 +265,7 @@ export default function PipelinePage() {
                             className="px-4 py-2 rounded-[8px] text-[12px] font-bold"
                             style={{ backgroundColor: "#e05d5d", color: "#0b0e13", opacity: reviewState[opp.id] === "submitting" ? 0.5 : 1 }}
                           >
-                            Reject
+                            Reject &amp; Delete
                           </button>
                         </div>
                       </div>

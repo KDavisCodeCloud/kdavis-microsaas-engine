@@ -101,15 +101,27 @@ class ReviewRequest(BaseModel):
 @router.post("/{opp_id}/review")
 async def review_opportunity(opp_id: str, body: ReviewRequest, request: Request):
     """
-    Kelvin's per-opportunity approve/reject + comment, kept in
-    human_review_status/human_review_comment — deliberately SEPARATE from
-    the agent's own status/verdict_v2_output. Comparing the two is the
-    actual tuning signal for Verdict prompt v2.1+ (where the agent and
-    Kelvin disagree is exactly what needs investigating), so this must
-    never overwrite the agent's own fields. Admin-gated + triggered_by +
-    audit log, matching every other mutating action in this repo — the
-    existing PATCH /{opp_id}/status route predates that convention and
-    is out of scope here.
+    Kelvin's per-opportunity approve/reject + comment.
+
+    Reject: archives the full row (including verdict_v2_output — the
+    agent's complete research reasoning — and Kelvin's own comment) into
+    opportunity_pipeline_rejections, then DELETES it from
+    opportunity_pipeline. Deleting is deliberate (2026-07-17 request) —
+    rejected opportunities should not keep cluttering the dashboard.
+    Archiving first, rather than a bare delete, is what preserves the
+    tuning signal (agent verdict vs. Kelvin's decision) the human-review
+    loop exists to produce — that would otherwise be destroyed the moment
+    the row is gone.
+
+    Approve: sets status to READY_TO_BUILD (the human decision overrides
+    whatever the agent itself landed on — e.g. a CONDITIONAL/"validated"
+    marginal pass can still be pushed into the real build queue by a
+    human approval) and records human_review_status separately from the
+    agent's own status/verdict_v2_output, so the two remain comparable.
+
+    Admin-gated + triggered_by + audit log, matching every other mutating
+    action in this repo — the existing PATCH /{opp_id}/status route
+    predates that convention and is out of scope here.
     """
     if getattr(request.state, "role", "") != "admin":
         raise HTTPException(status_code=403, detail="Opportunity review requires admin role")
@@ -119,8 +131,39 @@ async def review_opportunity(opp_id: str, body: ReviewRequest, request: Request)
         raise HTTPException(status_code=401, detail="No authenticated user to attribute this review to")
 
     db = get_supabase()
+
+    if body.decision == "rejected":
+        existing = db.table("opportunity_pipeline").select("*").eq("id", opp_id).maybe_single().execute()
+        row = existing.data if existing is not None else None
+        if not row:
+            raise HTTPException(status_code=404, detail="Opportunity not found")
+
+        db.table("opportunity_pipeline_rejections").insert({
+            "original_opportunity": row,
+            "rejected_by": triggered_by,
+            "rejection_comment": body.comment,
+        }).execute()
+        db.table("opportunity_pipeline").delete().eq("id", opp_id).execute()
+
+        db.table("audit_log").insert({
+            "agent_id": "human-review",
+            "action": "opportunity_review",
+            "outcome": "lose",
+            "product_id": opp_id,
+            "metadata": {"triggered_by": triggered_by, "decision": "rejected", "comment": body.comment},
+        }).execute()
+        db.table("usage_events").insert({
+            "tenant_id": None,
+            "event_type": "opportunity_reviewed",
+            "metadata": {"opportunity_id": opp_id, "decision": "rejected", "triggered_by": triggered_by},
+        }).execute()
+
+        return {"deleted": True, "opportunity_id": opp_id}
+
+    # decision == "approved"
     result = db.table("opportunity_pipeline").update({
-        "human_review_status": body.decision,
+        "status": "READY_TO_BUILD",
+        "human_review_status": "approved",
         "human_review_comment": body.comment,
         "human_reviewed_by": triggered_by,
         "human_reviewed_at": datetime.now(timezone.utc).isoformat(),
@@ -132,14 +175,14 @@ async def review_opportunity(opp_id: str, body: ReviewRequest, request: Request)
     db.table("audit_log").insert({
         "agent_id": "human-review",
         "action": "opportunity_review",
-        "outcome": "win" if body.decision == "approved" else "lose",
+        "outcome": "win",
         "product_id": opp_id,
-        "metadata": {"triggered_by": triggered_by, "decision": body.decision, "comment": body.comment},
+        "metadata": {"triggered_by": triggered_by, "decision": "approved", "comment": body.comment},
     }).execute()
     db.table("usage_events").insert({
         "tenant_id": None,
         "event_type": "opportunity_reviewed",
-        "metadata": {"opportunity_id": opp_id, "decision": body.decision, "triggered_by": triggered_by},
+        "metadata": {"opportunity_id": opp_id, "decision": "approved", "triggered_by": triggered_by},
     }).execute()
 
     return result.data[0]

@@ -50,6 +50,10 @@ class FakeQuery:
         self._payload = payload
         return self
 
+    def delete(self):
+        self.calls.append(("delete",))
+        return self
+
     def select(self, *args, **kwargs):
         self.calls.append(("select", args, kwargs))
         return self
