@@ -19,6 +19,7 @@ const STATUS_MAP: Record<string, { text: string; bg: string; label?: string }> =
   planning:       { text: "#e8963f", bg: "#e8963f22" },
   flagged:        { text: "#e8963f", bg: "#e8963f22" },
   watch:          { text: "#e8963f", bg: "#e8963f22" },
+  needs_correction: { text: "#e8963f", bg: "#e8963f22", label: "NEEDS CORRECTION" },
   yellow:         { text: "#e8963f", bg: "#e8963f22" },
   error:          { text: "#e05d5d", bg: "#e05d5d22" },
   rejected:       { text: "#e05d5d", bg: "#e05d5d22" },

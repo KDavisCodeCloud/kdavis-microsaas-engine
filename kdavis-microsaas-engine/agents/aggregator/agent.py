@@ -37,11 +37,17 @@ MRR_FLOOR = 4000
 # v2.0's VERDICT enum maps onto the pipeline's existing status vocabulary
 # (READY_TO_BUILD/validated/rejected) rather than introducing a second,
 # parallel one — brief_generator and the dashboard's filter tabs already
-# key off this vocabulary.
+# key off this vocabulary. RESUBMIT (added 2026-07-18) maps to its own
+# 'needs_correction' status rather than 'rejected' — the dashboard's
+# Reject & Delete button archives-then-deletes 'rejected' rows, which
+# would destroy a genuinely fixable opportunity (price inconsistency,
+# capture rate misapplied, missing GTM channel) instead of surfacing the
+# correction needed.
 _VERDICT_TO_STATUS = {
     "BUILD": "READY_TO_BUILD",
     "CONDITIONAL": "validated",
     "DO_NOT_BUILD": "rejected",
+    "RESUBMIT": "needs_correction",
 }
 
 
@@ -74,6 +80,8 @@ def _evaluate(opp: dict, llm: Callable[..., str]) -> dict:
         rejection_reason = f"Competitor exists: {_summarize_competitors(result)}"
     elif status == "rejected":
         rejection_reason = "; ".join(result.get("blocking_issues") or [result.get("next_action") or "Did not clear v2.0 gates."])
+    elif status == "needs_correction":
+        rejection_reason = _summarize_resubmit(result)
     else:
         rejection_reason = None
 
@@ -92,6 +100,12 @@ def _summarize_competitors(result: dict) -> str:
     if not comps:
         return "halted, no competitor detail returned"
     return "; ".join(f"{c.get('name')} ({c.get('price')}, {c.get('channel')})" for c in comps)
+
+
+def _summarize_resubmit(result: dict) -> str:
+    reason = result.get("resubmit_reason") or "Fixable error found — see verdict_v2_output."
+    correction = result.get("correction_required")
+    return f"Needs correction: {reason}" + (f" — {correction}" if correction else "")
 
 
 def _extract_trailing_json(text: str) -> dict:

@@ -1,7 +1,9 @@
 import time
 
 import jwt
+import pytest
 from fastapi.testclient import TestClient
+from postgrest.exceptions import APIError
 
 from api.main import app
 import api.routers.pipeline as pipeline_router
@@ -78,7 +80,10 @@ def test_reject_404s_when_opportunity_not_found(monkeypatch, fake_db):
 
 def test_approve_pushes_into_the_build_queue_and_records_win(monkeypatch, fake_db):
     monkeypatch.setattr(pipeline_router, "get_supabase", lambda: fake_db)
-    fake_db.responses["opportunity_pipeline"] = [{"id": "opp-1", "status": "READY_TO_BUILD", "human_review_status": "approved"}]
+    fake_db.responses["opportunity_pipeline"] = [{
+        "id": "opp-1", "status": "READY_TO_BUILD", "human_review_status": "approved",
+        "conservative_mrr_potential": 5000,
+    }]
 
     resp = client.post(
         "/pipeline/opp-1/review", json={"decision": "approved", "comment": "This is the one"}, headers=_auth_header(sub="kelvin"),
@@ -109,3 +114,108 @@ def test_approve_404s_when_opportunity_not_found(monkeypatch, fake_db):
     )
 
     assert resp.status_code == 404
+
+
+def test_approve_blocked_with_clear_message_when_mrr_never_computed(monkeypatch, fake_db):
+    # Real bug 2026-07-18: approving an opportunity rejected via a
+    # competitor-exists halt (MRR math never ran, conservative_mrr_potential
+    # sits at 0) used to hit the DB's mrr_floor_check CHECK constraint and
+    # crash as a raw, unhandled postgrest.exceptions.APIError -- which
+    # bypasses CORS entirely regardless of middleware order, showing up in
+    # the browser as "Failed to fetch" instead of a real error. Must now be
+    # caught before ever reaching the DB, with a specific explanation.
+    monkeypatch.setattr(pipeline_router, "get_supabase", lambda: fake_db)
+    fake_db.responses["opportunity_pipeline"] = [{
+        "id": "opp-1", "status": "rejected", "conservative_mrr_potential": 0,
+    }]
+
+    resp = client.post(
+        "/pipeline/opp-1/review", json={"decision": "approved"}, headers=_auth_header(sub="kelvin"),
+    )
+
+    assert resp.status_code == 422
+    assert "MRR floor" in resp.json()["detail"]
+    assert "$0" in resp.json()["detail"]
+
+    # Must never have attempted the update at all -- the pre-check is what
+    # replaces the raw DB crash.
+    updates = [c for c in fake_db.executed if c.table_name == "opportunity_pipeline" and c.calls[0][0] == "update"]
+    assert not updates
+
+
+class _RaisingQuery:
+    """Minimal fake that raises APIError on .execute(), regardless of
+    which chained filter methods were called first -- used to prove a real
+    DB-level failure is caught and converted to a clean HTTPException
+    rather than propagating as a raw crash (which bypasses CORS)."""
+
+    def __init__(self, error: APIError):
+        self._error = error
+
+    def select(self, *a, **k):
+        return self
+
+    def update(self, *a, **k):
+        return self
+
+    def insert(self, *a, **k):
+        return self
+
+    def delete(self, *a, **k):
+        return self
+
+    def eq(self, *a, **k):
+        return self
+
+    def maybe_single(self):
+        return self
+
+    def execute(self):
+        raise self._error
+
+
+class _PassingQuery:
+    def __init__(self, row):
+        self._row = row
+
+    def select(self, *a, **k):
+        return self
+
+    def eq(self, *a, **k):
+        return self
+
+    def maybe_single(self):
+        return self
+
+    def execute(self):
+        return type("Result", (), {"data": self._row})()
+
+
+def test_approve_db_failure_becomes_clean_502_not_a_raw_crash(monkeypatch):
+    """
+    The existence-check select and the later update both hit
+    "opportunity_pipeline" -- to simulate a failure on specifically the
+    update (not the initial read), .table() dispatches by call order: the
+    first call (the select) succeeds with a real, approvable row; every
+    call after that (the update) raises, standing in for a real DB-level
+    failure. Confirms it surfaces as a clean 502 with a readable message,
+    not a raw crash that bypasses CORS.
+    """
+    calls = {"n": 0}
+
+    def table_dispatch(name):
+        assert name == "opportunity_pipeline"
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _PassingQuery({"id": "opp-1", "conservative_mrr_potential": 5000})
+        return _RaisingQuery(APIError({"message": "simulated database outage", "code": "XXYYY"}))
+
+    db = type("DB", (), {"table": staticmethod(table_dispatch)})()
+    monkeypatch.setattr(pipeline_router, "get_supabase", lambda: db)
+
+    resp = client.post(
+        "/pipeline/opp-1/review", json={"decision": "approved"}, headers=_auth_header(sub="kelvin"),
+    )
+
+    assert resp.status_code == 502
+    assert "simulated database outage" in resp.json()["detail"]

@@ -9,7 +9,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ProgressBar } from "@/components/ui/ProgressBar";
 import type { Opportunity, BuildBrief } from "@/lib/types";
 
-const STATUS_FILTER_OPTIONS = ["all", "READY_TO_BUILD", "validated", "watch", "rejected"];
+const STATUS_FILTER_OPTIONS = ["all", "READY_TO_BUILD", "validated", "needs_correction", "watch", "rejected"];
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 function filterLabel(f: string): string {

@@ -201,6 +201,8 @@ def node_summarize(state: OrchestratorState) -> OrchestratorState:
     validated = [r for r in results if r.get("status") == "validated"]
     watch     = [r for r in results if r.get("status") == "watch"]
     rejected  = [r for r in results if r.get("status") == "rejected"]
+    # RESUBMIT (added 2026-07-18) — a fixable error, not a dead opportunity.
+    needs_correction = [r for r in results if r.get("status") == "needs_correction"]
 
     # Score each passing result to find top opportunity
     def _score(r):
@@ -217,6 +219,7 @@ def node_summarize(state: OrchestratorState) -> OrchestratorState:
         "validated_pending_review": len(validated),
         "watch_list":               len(watch),
         "rejected":                 len(rejected),
+        "needs_correction":         len(needs_correction),
         "top_opportunity":          top.get("solution_concept") if top else None,
         "recommended_first_build":  top.get("solution_concept") if top else None,
     }

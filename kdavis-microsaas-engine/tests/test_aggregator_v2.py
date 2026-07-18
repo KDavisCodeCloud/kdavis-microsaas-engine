@@ -96,6 +96,38 @@ def test_do_not_build_maps_to_rejected_with_reason():
     assert "MRR floor not cleared" in result["rejection_reason"]
 
 
+def test_resubmit_maps_to_needs_correction_not_rejected():
+    # Real bug found 2026-07-17: a live run's real estate opportunity had
+    # no competitor but a capture-rate math error (applied to the 34,000-firm
+    # TAM instead of the ~5,000-firm reachable segment) -- that's a fixable
+    # error, not a dead opportunity, so it must not land in 'rejected'
+    # (which the dashboard's Reject & Delete button archives-then-deletes).
+    llm = lambda system, user: _canned(_base_payload(
+        verdict="RESUBMIT",
+        halt=False,
+        competitor_check="CLEAR",
+        final_mrr_floor=600,
+        resubmit_reason="Capture rate applied to 34,000-firm TAM instead of reachable segment",
+        correction_required="Recompute capture rate against the ~5,040-firm reachable segment",
+        resubmit_conditions="Reconciled price across MRR math and tier_structure, corrected capture-rate base, named GTM channel",
+    ))
+    result = run([{"opportunity_id": "opp-1"}], llm=llm)[0]
+    assert result["status"] == "needs_correction"
+    assert result["status"] != "rejected"
+    assert "Capture rate applied to 34,000-firm TAM" in result["rejection_reason"]
+    assert "Recompute capture rate" in result["rejection_reason"]
+    assert result["verdict_v2_output"]["resubmit_conditions"] == (
+        "Reconciled price across MRR math and tier_structure, corrected capture-rate base, named GTM channel"
+    )
+
+
+def test_resubmit_with_no_reason_still_gets_a_readable_message():
+    llm = lambda system, user: _canned(_base_payload(verdict="RESUBMIT", final_mrr_floor=1000, resubmit_reason=None, correction_required=None))
+    result = run([{"opportunity_id": "opp-1"}], llm=llm)[0]
+    assert result["status"] == "needs_correction"
+    assert result["rejection_reason"]  # never blank/None -- always something readable
+
+
 def test_code_level_floor_check_overrides_a_build_verdict_below_4000():
     # Guards against the model saying BUILD with gate_clear=true but a
     # final_mrr_floor that doesn't actually clear $4,000 — the one number

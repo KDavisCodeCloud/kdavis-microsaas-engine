@@ -243,17 +243,75 @@ RECOMMENDATION: Require 30-day validation signal (waitlist, LOI, or paid beta) b
 
 ---
 
+## PRE-SUBMISSION CONSISTENCY CHECK (added 2026-07-18)
+
+Before finalizing MRR math in Step 6, run this self-check on your own numbers.
+This system has no separate "dispatch" agent that hands you pre-computed math —
+you compute the TAM funnel, capture rate, and MRR floor yourself in Steps 5-6, so
+you audit your own submission against these three rules before finalizing, not
+someone else's:
+
+1. **Price consistency:** confirm the price used in MRR floor math (Step 6's
+   `PRICE`) exactly matches the price listed in `tier_structure` for the
+   opportunity. If they differ, reconcile before finalizing — do not submit
+   a verdict built on two different prices for the same product.
+2. **Capture rate applied to the reachable segment, not the total addressable
+   segment:** show the reachable-segment calculation explicitly (this is
+   already required by Step 5 — this check exists specifically to catch
+   Step 6 accidentally applying `CAPTURE_RATE` to `TAM_TOTAL` instead of
+   `REACHABLE_SEGMENT`, a real error found in a live run 2026-07-17 where a
+   0.5% capture rate was applied to a 34,000-firm addressable market instead
+   of the ~5,000-firm reachable segment).
+3. **GTM channel specificity:** confirm a distribution mechanism is named —
+   a specific channel, partnership, marketplace, or referral network — not
+   just "organic SEO" standing alone as the entire GTM plan.
+
+If ANY of these three fail AND `COMPETITOR_CHECK` is `CLEAR` (no competitor
+halt), do not issue `DO_NOT_BUILD` — issue `RESUBMIT` instead (see Step 7).
+These are fixable math/documentation errors, not evidence the opportunity
+itself is bad.
+
+---
+
 ## STEP 7 — FINAL VERDICT
 
 ```
-VERDICT: BUILD | CONDITIONAL | DO_NOT_BUILD
+VERDICT: BUILD | CONDITIONAL | DO_NOT_BUILD | RESUBMIT
 
 BUILD: All gates cleared, MRR floor exceeds $4,000 with margin, no direct competitor
 CONDITIONAL: MRR floor clears but marginal, OR competitor exists with differentiation thesis approved
-DO_NOT_BUILD: COMPETITOR_EXISTS halt not resolved, OR MRR floor below $4,000, OR maintenance cost wipes floor
+DO_NOT_BUILD: COMPETITOR_EXISTS halt not resolved, OR MRR floor below $4,000 for a genuine market reason
+  (real capture-rate ceiling, real pricing pressure — not a math error), OR maintenance cost wipes floor
+RESUBMIT: COMPETITOR_CHECK is CLEAR (no halt), but the submission failed the Pre-Submission Consistency
+  Check on one or more FIXABLE errors — see below. Do not use DO_NOT_BUILD for these.
 
 BLOCKING_ISSUES: [list any unresolved flags]
 NEXT_ACTION: [specific action required before build can begin]
+```
+
+### RESUBMIT — when a fixable error blocks an otherwise-clear opportunity
+
+Use `RESUBMIT` instead of `DO_NOT_BUILD` when `COMPETITOR_CHECK: CLEAR` (no
+`COMPETITOR_EXISTS` halt) but the submission failed on one or more of:
+
+- Price inconsistency between MRR math and tier structure
+- Capture rate applied to the total addressable segment instead of the reachable segment
+- Missing or unvalidated GTM channel (only "organic SEO" named, no specific mechanism)
+- MRR floor below the $4,000 gate due to correctable math (wrong price, wrong capture-rate
+  base, wrong reachable-segment size) — NOT because the real market genuinely can't clear it
+
+If the MRR floor miss reflects real market reality (the reachable segment is genuinely small,
+the realistic price genuinely can't support $4K, etc.) rather than a math error, that is
+`DO_NOT_BUILD`, not `RESUBMIT` — `RESUBMIT` is only for errors a resubmission could actually fix.
+
+When issuing `RESUBMIT`, include:
+```
+RESUBMIT_REASON: [the specific error — name which of the four above]
+CORRECTION_REQUIRED: [the exact fix needed — e.g. "Recompute capture rate against the
+  5,040-firm reachable segment (Step 5), not the 34,000-firm total addressable market"]
+RESUBMIT_CONDITIONS: [what a clean resubmission must include to be re-evaluated —
+  e.g. "Reconciled $89/mo price in both MRR math and tier_structure, capture rate applied
+  to reachable segment, and a named GTM channel with a specific distribution mechanism"]
 ```
 
 ---
@@ -351,8 +409,11 @@ fields are numbers (not strings), all `_pct` fields are numbers 0-100.
   "mrr_floor_gate_clear": false,
   "marginal_pass": false,
   "marginal_risk_note": "string or null",
-  "verdict": "BUILD | CONDITIONAL | DO_NOT_BUILD",
+  "verdict": "BUILD | CONDITIONAL | DO_NOT_BUILD | RESUBMIT",
   "blocking_issues": ["string"],
-  "next_action": "string"
+  "next_action": "string",
+  "resubmit_reason": "string or null — only when verdict is RESUBMIT",
+  "correction_required": "string or null — only when verdict is RESUBMIT",
+  "resubmit_conditions": "string or null — only when verdict is RESUBMIT"
 }
 ```

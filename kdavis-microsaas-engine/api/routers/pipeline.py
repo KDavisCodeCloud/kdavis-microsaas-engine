@@ -1,9 +1,12 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request, HTTPException
+from postgrest.exceptions import APIError
 from pydantic import BaseModel, field_validator
 from typing import Literal
 from core.supabase_client import get_supabase
+
+MRR_FLOOR = 4000
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
@@ -119,6 +122,23 @@ async def review_opportunity(opp_id: str, body: ReviewRequest, request: Request)
     human approval) and records human_review_status separately from the
     agent's own status/verdict_v2_output, so the two remain comparable.
 
+    Real bug found 2026-07-18: approving an opportunity that was rejected
+    via a COMPETITOR_EXISTS halt (MRR math never ran, so
+    conservative_mrr_potential sits at 0) violated the DB's own
+    mrr_floor_check CHECK constraint — correct behavior (the $4K floor
+    must never be overridden), but this route let the resulting
+    postgrest.exceptions.APIError propagate raw instead of catching it.
+    An unhandled exception here bypasses CORSMiddleware entirely
+    regardless of middleware order (Starlette's ServerErrorMiddleware is
+    the true outermost layer and sends its fallback response via the raw
+    ASGI send, never through CORS's header-injecting wrapper — confirmed
+    by reading Starlette's own source), so the browser reported this as
+    "Failed to fetch" instead of a real error. Fixed with an explicit
+    pre-check (a clear, specific message beats a constraint-violation
+    string) plus try/except around every DB call, so any other DB-level
+    failure also surfaces as a clean HTTPException instead of a raw
+    crash — matching this repo's "no silent failures" rule.
+
     Admin-gated + triggered_by + audit log, matching every other mutating
     action in this repo — the existing PATCH /{opp_id}/status route
     predates that convention and is out of scope here.
@@ -132,18 +152,24 @@ async def review_opportunity(opp_id: str, body: ReviewRequest, request: Request)
 
     db = get_supabase()
 
-    if body.decision == "rejected":
+    try:
         existing = db.table("opportunity_pipeline").select("*").eq("id", opp_id).maybe_single().execute()
-        row = existing.data if existing is not None else None
-        if not row:
-            raise HTTPException(status_code=404, detail="Opportunity not found")
+    except APIError as exc:
+        raise HTTPException(status_code=502, detail=f"Database error reading opportunity: {exc.message}") from exc
+    row = existing.data if existing is not None else None
+    if not row:
+        raise HTTPException(status_code=404, detail="Opportunity not found")
 
-        db.table("opportunity_pipeline_rejections").insert({
-            "original_opportunity": row,
-            "rejected_by": triggered_by,
-            "rejection_comment": body.comment,
-        }).execute()
-        db.table("opportunity_pipeline").delete().eq("id", opp_id).execute()
+    if body.decision == "rejected":
+        try:
+            db.table("opportunity_pipeline_rejections").insert({
+                "original_opportunity": row,
+                "rejected_by": triggered_by,
+                "rejection_comment": body.comment,
+            }).execute()
+            db.table("opportunity_pipeline").delete().eq("id", opp_id).execute()
+        except APIError as exc:
+            raise HTTPException(status_code=502, detail=f"Database error rejecting opportunity: {exc.message}") from exc
 
         db.table("audit_log").insert({
             "agent_id": "human-review",
@@ -161,13 +187,29 @@ async def review_opportunity(opp_id: str, body: ReviewRequest, request: Request)
         return {"deleted": True, "opportunity_id": opp_id}
 
     # decision == "approved"
-    result = db.table("opportunity_pipeline").update({
-        "status": "READY_TO_BUILD",
-        "human_review_status": "approved",
-        "human_review_comment": body.comment,
-        "human_reviewed_by": triggered_by,
-        "human_reviewed_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", opp_id).execute()
+    mrr = float(row.get("conservative_mrr_potential") or 0)
+    if mrr < MRR_FLOOR:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Cannot approve into the build queue: MRR floor is ${mrr:,.0f}, below the "
+                f"${MRR_FLOOR:,.0f} gate. This usually means Verdict rejected it before MRR math "
+                f"ran (e.g. a competitor-exists halt), not on a marginal number — the database "
+                f"enforces the $4K floor and approval can't override that. Check this opportunity's "
+                f"verdict_v2_output to see why MRR was never computed."
+            ),
+        )
+
+    try:
+        result = db.table("opportunity_pipeline").update({
+            "status": "READY_TO_BUILD",
+            "human_review_status": "approved",
+            "human_review_comment": body.comment,
+            "human_reviewed_by": triggered_by,
+            "human_reviewed_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", opp_id).execute()
+    except APIError as exc:
+        raise HTTPException(status_code=502, detail=f"Database error approving opportunity: {exc.message}") from exc
 
     if not result.data:
         raise HTTPException(status_code=404, detail="Opportunity not found")
