@@ -75,3 +75,32 @@ def test_ready_to_build_opportunity_stores_verdict_v2_output(monkeypatch, fake_d
     assert payload["conservative_mrr_potential"] == 5500.0
     assert payload["verdict_v2_output"] == v2_output
     assert payload["status"] == "READY_TO_BUILD"
+
+
+def test_v3_nested_scenarios_floor_is_read_correctly(monkeypatch, fake_db):
+    # Real bug found wiring v3.0 in: v3.0 nests the MRR figure under
+    # scenarios.floor.final_mrr_floor (three required scenarios replace
+    # v2.0's single top-level final_mrr_floor) -- this line still read the
+    # old top-level key, which is always None on a v3.0 result, silently
+    # falling through to the unverified upstream vertical-agent figure on
+    # every single v3.0 opportunity until this was caught and fixed.
+    monkeypatch.setattr(orchestrator, "get_supabase", lambda: fake_db)
+    v3_output = {
+        "verdict": "BUILD",
+        "tam_source": "NAR property manager count",
+        "scenarios": {"floor": {"final_mrr_floor": 4700, "gate_clear": True}},
+    }
+
+    orchestrator.node_write_pipeline(_state([{
+        "vertical": "Real Estate / Property Management",
+        "solution_concept": "V3 Nested Thing",
+        "status": "READY_TO_BUILD",
+        "rejection_reason": None,
+        "verdict_v2_output": v3_output,
+    }], raw_findings=[{"solution_concept": "V3 Nested Thing", "conservative_mrr_potential": 99999}]))
+
+    inserts = [c for c in fake_db.executed if c.table_name == "opportunity_pipeline" and c.calls[0][0] == "insert"]
+    payload = inserts[0]._payload[0]
+    # Must use the agent's real nested figure (4700), never the unrelated
+    # upstream self-report (99999) that a silent fallback would have used.
+    assert payload["conservative_mrr_potential"] == 4700.0

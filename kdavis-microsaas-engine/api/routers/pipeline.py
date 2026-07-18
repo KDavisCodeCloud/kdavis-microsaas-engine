@@ -188,15 +188,20 @@ async def review_opportunity(opp_id: str, body: ReviewRequest, request: Request)
 
     # decision == "approved"
     mrr = float(row.get("conservative_mrr_potential") or 0)
-    if mrr < MRR_FLOOR:
+    # v3.0: the floor is price-adjusted per opportunity (migration 016),
+    # not a flat $4,000 — read the row's own stored floor, falling back
+    # to the pre-v3.0 flat MRR_FLOOR for any row written before that
+    # column existed.
+    adjusted_floor = float(row.get("price_adjusted_floor") or MRR_FLOOR)
+    if mrr < adjusted_floor:
         raise HTTPException(
             status_code=422,
             detail=(
                 f"Cannot approve into the build queue: MRR floor is ${mrr:,.0f}, below the "
-                f"${MRR_FLOOR:,.0f} gate. This usually means Verdict rejected it before MRR math "
-                f"ran (e.g. a competitor-exists halt), not on a marginal number — the database "
-                f"enforces the $4K floor and approval can't override that. Check this opportunity's "
-                f"verdict_v2_output to see why MRR was never computed."
+                f"${adjusted_floor:,.0f} price-adjusted gate. This usually means Verdict rejected "
+                f"it before MRR math ran (e.g. a saturated-competitor halt), not on a marginal "
+                f"number — the database enforces this floor and approval can't override that. "
+                f"Check this opportunity's verdict_v2_output to see why MRR was never computed."
             ),
         )
 

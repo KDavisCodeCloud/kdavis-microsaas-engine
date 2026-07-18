@@ -137,6 +137,38 @@ def test_approve_blocked_with_clear_message_when_mrr_never_computed(monkeypatch,
     assert "MRR floor" in resp.json()["detail"]
     assert "$0" in resp.json()["detail"]
 
+
+def test_approve_uses_the_row_own_price_adjusted_floor_not_a_flat_4000(monkeypatch, fake_db):
+    # v3.0: a $25/mo product only needs to clear $3,500, not the old flat
+    # $4,000 -- an opportunity at $3,600 MRR must be approvable even
+    # though it would have been blocked under the pre-v3.0 flat floor.
+    monkeypatch.setattr(pipeline_router, "get_supabase", lambda: fake_db)
+    fake_db.responses["opportunity_pipeline"] = [{
+        "id": "opp-1", "status": "validated", "conservative_mrr_potential": 3600, "price_adjusted_floor": 3500,
+    }]
+
+    resp = client.post(
+        "/pipeline/opp-1/review", json={"decision": "approved"}, headers=_auth_header(sub="kelvin"),
+    )
+
+    assert resp.status_code == 200
+
+
+def test_approve_blocked_against_a_higher_price_adjusted_floor(monkeypatch, fake_db):
+    # A $120/mo product needs $5,000, not $4,000 -- $4,200 must still be
+    # blocked even though it would have cleared the old flat floor.
+    monkeypatch.setattr(pipeline_router, "get_supabase", lambda: fake_db)
+    fake_db.responses["opportunity_pipeline"] = [{
+        "id": "opp-1", "status": "validated", "conservative_mrr_potential": 4200, "price_adjusted_floor": 5000,
+    }]
+
+    resp = client.post(
+        "/pipeline/opp-1/review", json={"decision": "approved"}, headers=_auth_header(sub="kelvin"),
+    )
+
+    assert resp.status_code == 422
+    assert "$5,000" in resp.json()["detail"]
+
     # Must never have attempted the update at all -- the pre-check is what
     # replaces the raw DB crash.
     updates = [c for c in fake_db.executed if c.table_name == "opportunity_pipeline" and c.calls[0][0] == "update"]

@@ -132,12 +132,20 @@ def node_write_pipeline(state: OrchestratorState) -> OrchestratorState:
         )
         v2 = result.get("verdict_v2_output") or {}
 
-        # v2.0's own independently-researched MRR floor is authoritative
-        # when present — it's backed by real TAM/capture-rate math and
-        # live competitor pricing, not the upstream vertical agent's
-        # unverified self-report. Falls back to the upstream figure only
-        # if the aggregator didn't run (e.g. legacy findings).
-        mrr = v2.get("final_mrr_floor")
+        # The Verdict agent's own independently-researched MRR floor is
+        # authoritative when present — it's backed by real TAM/capture-rate
+        # math and live competitor pricing, not the upstream vertical
+        # agent's unverified self-report. v3.0 nests this under
+        # scenarios.floor.final_mrr_floor (three required scenarios,
+        # replacing v2.0's single top-level final_mrr_floor) — checked
+        # here after v3.0 shipped and this line was found still reading
+        # the old top-level key, which would have silently fallen through
+        # to the unverified upstream figure on every v3.0 result. Falls
+        # back to the upstream figure only if the aggregator didn't run
+        # at all (e.g. legacy findings).
+        mrr = (v2.get("scenarios") or {}).get("floor", {}).get("final_mrr_floor")
+        if mrr is None:
+            mrr = v2.get("final_mrr_floor")  # legacy v2.0 top-level shape
         if mrr is None:
             mrr = source.get("conservative_mrr_potential", 0)
         try:
@@ -178,6 +186,13 @@ def node_write_pipeline(state: OrchestratorState) -> OrchestratorState:
             "status":                     result.get("status", "watch"),
             "rejection_reason":           result.get("rejection_reason"),
             "verdict_v2_output":          v2 or None,
+            # v3.0's price-adjusted floor (agents/aggregator/agent.py's
+            # _price_adjusted_floor, computed independently of the
+            # model's own claim and stored back onto the result) — the
+            # mrr_floor_check DB constraint (migration 016) compares
+            # conservative_mrr_potential against this per-row, replacing
+            # the old flat $4,000 check.
+            "price_adjusted_floor":       v2.get("price_adjusted_floor", 4000),
             "notes":                      f"session:{state['session_id']}",
         })
 
