@@ -28,7 +28,7 @@ def analyze(system: str, user: str, max_tokens: int = 4096) -> str:
     return msg.content[0].text
 
 
-def analyze_with_web_search(system: str, user: str, max_uses: int = 15, max_tokens: int = 8192) -> str:
+def analyze_with_web_search(system: str, user: str, max_uses: int = 15, max_tokens: int = 16000) -> str:
     """
     Analysis backed by live web search — Sonnet + Anthropic's server-side
     web_search tool (Anthropic runs the search itself; nothing to execute
