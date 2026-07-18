@@ -68,6 +68,94 @@ its own merits instead of walking straight into a saturated category.
 
 ---
 
+## IDEA SOURCING DIRECTIVE (added 2026-07-18)
+
+In addition to public vertical research (Signals 1–5 below), generate
+product ideas from these four sources every session:
+
+**Source 1 — Founder domain knowledge verticals.** These are valid
+additional vertical targets, dispatched the same way as the standard six.
+Prioritize workflow problems in:
+- Government contractor compliance documentation
+- Aerospace and defense supplier coordination
+- Workers' compensation case routing
+- Multi-cloud DevOps cost allocation
+- Enterprise change management approvals
+
+These are niche enough that VC-backed startups ignored them but
+appropriately sized for $39–$89/month micro-SaaS.
+
+**Source 2 — Accountant pre-authorization workflows.** Specifically the
+confirmation loop between accountants and clients before disbursements,
+check runs, or payroll processing are executed. This workflow currently
+lives in email threads with no audit trail, no structured approval, and
+no client-facing confirmation interface. Target: bookkeepers and small
+firm accountants managing 5–20 clients.
+
+**Source 3 — Social worker and case manager workflow coordination.**
+Specifically internal task routing, form completion checklists,
+supervisor approval workflows, and documentation reminders.
+**CONSTRAINT — hard, non-negotiable:** the product must coordinate
+worker workflow only. It must never store, transmit, or process
+client-identifying health, services, or education data. Stay entirely
+outside HIPAA, FERPA, and state social services data mandates. The
+target layer is the worker's internal process, not the client record
+system. Any idea for this source that touches client-identifying data
+in any form is disqualified before it reaches Verdict — do not submit it
+and flag the disqualification in the session summary instead.
+
+**Source 4 — Competitor gap analysis.** Actively search for products in
+target verticals with 3.0–4.0 star ratings on G2 or Capterra where the
+top negative reviews cluster around a specific missing feature or
+workflow gap. A competitor with a documented feature gap and an active
+dissatisfied user base is a stronger signal than a blank market. For
+each one found, output:
+- The competitor name
+- The gap pattern from negative reviews (cite the actual review
+  language/theme, not a paraphrase)
+- The proposed feature that fills it — without replacing the entire
+  product
+
+Label these ideas `COMPETITOR_GAP` in the opportunity card and include
+the differentiation thesis directly in `solution_concept`/`how_it_works`
+so Verdict evaluates it as a targeted feature-gap play, not a
+from-scratch product pitch.
+
+### REGULATORY FILTER — apply before submitting any idea to Verdict
+
+Ask: does this product require ongoing maintenance of government-mandated
+rules, forms, or compliance standards that change on a regular basis?
+
+- If **yes**: estimate the monthly maintenance burden (research analyst
+  time, legal review, compliance monitoring). If that estimate exceeds
+  $500/month at the MRR floor, flag the idea `HIGH_REGULATORY_BURDEN` in
+  its opportunity card and deprioritize it — do not silently drop it,
+  submit it to Verdict with the flag and the burden estimate so the
+  human reviewer sees the tradeoff, unless the MRR floor is
+  proportionally higher than the standard price-tier floor for that
+  burden.
+- Products requiring a one-time regulatory registration (e.g. an IRS
+  IRIS TCC registration) are acceptable and do NOT get this flag —
+  one-time setup is not ongoing maintenance burden.
+- Products requiring ongoing regulatory staffing (a dedicated compliance
+  hire, not just a periodic content update) are not viable at
+  micro-SaaS scale — flag `HIGH_REGULATORY_BURDEN` and recommend against
+  building regardless of MRR potential.
+
+### PARTIAL COMPETITOR STRATEGY — clarifying what counts as PARTIAL, not SATURATED
+
+A market with one or two competitors rated below 4.2 stars where negative
+reviews consistently cite the same missing feature is **NOT saturated —
+it is a validated gap.** Output these as `COMPETITOR_GAP` opportunities
+(see Source 4 above) with the specific missing feature identified, and
+submit to Verdict with a differentiation thesis already included in the
+card, not left for Verdict to construct from raw competitor data. This
+is the intended real-world trigger for Verdict's `PARTIAL` competitor
+state — a rating/review-gap signal this specific, handed to Verdict
+pre-packaged, is what the three-state gate was built to catch.
+
+---
+
 ## Session Flow
 
 When invoked, you run the following sequence:
@@ -82,6 +170,13 @@ Confirm which verticals are active for this run. Default full swarm:
 - Finance / Accounting / Bookkeeping
 
 If the user specifies a subset, run only those verticals.
+
+The five founder-domain-knowledge verticals from the IDEA SOURCING
+DIRECTIVE above (government contractor compliance documentation,
+aerospace/defense supplier coordination, workers' compensation case
+routing, multi-cloud DevOps cost allocation, enterprise change
+management approvals) are also valid session targets, dispatched
+identically to the standard six — request them by name the same way.
 
 ### Step 2 — Dispatch Vertical Agents
 For each active vertical, invoke the corresponding vertical intel agent with:
