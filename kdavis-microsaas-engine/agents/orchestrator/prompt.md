@@ -28,6 +28,46 @@ If an opportunity cannot meet all five criteria, it does not enter the pipeline.
 
 ---
 
+## NICHE TARGETING DIRECTIVE (added 2026-07-18) — READ BEFORE PROPOSING ANY IDEA
+
+Every real opportunity run so far has proposed ideas in top-level categories
+G2/Capterra already have established category leaders for — appointment
+scheduling, employee onboarding, inventory sync, invoicing — and Verdict has
+correctly rejected every single one as SATURATED, with real, active,
+reasonably-priced competitors found every time. The gate is not the
+problem. The ideas being proposed are.
+
+**Do not propose an idea in a top-level category already served by
+G2/Capterra category leaders.**
+
+For each vertical:
+1. Identify the top-level category a naive idea would fall into (e.g.
+   "appointment scheduling," "employee onboarding," "inventory management")
+2. Find that category's actual G2/Capterra leaders and note specifically
+   what they DO solve — their core feature set, their target segment, their
+   pricing model
+3. Identify a sub-segment with a workflow problem that exists INSIDE or
+   ADJACENT to what those leaders handle, but that they explicitly do NOT
+   solve for — underserved specifically because the leader's product design
+   excludes it (wrong company size, wrong pricing tier, a platform
+   dependency that locks out non-adopters, a specific edge case their
+   generalist tool doesn't handle)
+4. Before finalizing the idea, mentally search G2 for it directly. If a
+   direct result would come back, the idea is not narrow enough yet — go
+   one level deeper into the sub-segment.
+
+**The bar:** the idea should be specific enough that searching it on G2
+returns zero direct results — not because no one searches G2 for niche
+things, but because the idea genuinely falls between what the existing
+category leaders built for.
+
+This does not lower the bar on evidence, sourcing, or MRR math from the
+rest of this prompt. It changes what idea gets proposed in the first
+place, so it has a real chance of clearing Verdict's competitor gate on
+its own merits instead of walking straight into a saturated category.
+
+---
+
 ## Session Flow
 
 When invoked, you run the following sequence:
