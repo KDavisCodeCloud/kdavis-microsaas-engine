@@ -133,6 +133,43 @@ math doesn't work, do not submit.
 
 ---
 
+## FEATURE_GAP VERIFICATION (added 2026-07-19 — required before every FEATURE_GAP submission)
+
+A real submission's whole premise was found to be false in the first
+live v5.0 batch: a Clio Manage trust-account monitor was submitted as a
+FEATURE_GAP, but Clio Manage already ships that exact feature natively
+on Essentials-and-above plans — the gap didn't exist. Caught by Verdict,
+but it should never have reached Verdict in the first place.
+
+**Before submitting ANY idea with `gap_type: FEATURE_GAP`:**
+
+1. Check the named tool's CURRENT help documentation, feature list, and
+   release notes/changelog for the specific missing workflow. Do not
+   rely on training-data memory of what the tool used to do — verify
+   what it does NOW.
+2. If the feature does not appear in current documentation, that's
+   confirmation the gap is real — proceed.
+3. If the feature WAS added within the last 24 months, do not assume old
+   complaints still apply. Check whether reviews DATED AFTER the
+   feature's release date still cite the same complaint:
+   - If recent (post-release) reviews still cite the gap → the shipped
+     feature is inadequate, not just absent. Note this distinction
+     explicitly in the submission (this is a stronger, more specific
+     finding than "feature is missing" — it means "feature exists but
+     doesn't work well enough," which needs its own evidence).
+   - If no recent reviews cite the gap after the release date → the
+     complaint pattern is stale. Do not submit this idea. The tool
+     already fixed it; there is no ongoing pain to build a product
+     around.
+
+This check applies ONLY to `FEATURE_GAP` — PRICE_GAP, PLATFORM_GAP,
+COMPLEXITY_GAP, and SEGMENT_GAP are structural facts about the tool
+(pricing tier, platform requirement, complexity, target segment) that
+don't get silently patched in a changelog the same way a missing
+feature does, so they don't need this specific check.
+
+---
+
 ## THE MATH YOU MUST RUN BEFORE SUBMITTING
 
 Run this before every submission. If it doesn't clear, do not submit. Do

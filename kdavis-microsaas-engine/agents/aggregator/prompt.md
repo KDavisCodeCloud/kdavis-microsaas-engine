@@ -109,6 +109,15 @@ FEATURE_GAP:
   Missing feature: [one sentence, specific]
   Reviews citing this gap: N
   Evidence: [G2/Capterra/Reddit — paraphrase pattern]
+  CURRENT_DOCS_CHECKED: true — [confirm via the tool's CURRENT help docs,
+    feature list, and release notes/changelog that the feature does NOT
+    exist today; do not rely on Dispatch's claim or training-data memory]
+  IF_FEATURE_ADDED_WITHIN_24_MONTHS: [date added, if applicable] — check
+    whether reviews DATED AFTER that release still cite the same gap.
+    If no post-release reviews cite it, the complaint is stale — this
+    disqualifies FEATURE_GAP regardless of what Dispatch submitted;
+    treat as DO_NOT_BUILD (Step 2 fails, gap not confirmed) rather than
+    silently substituting a different gap type.
 
 COMPLEXITY_GAP:
   ICP skill level: [description]
