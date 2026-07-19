@@ -121,8 +121,28 @@ STAKES: [quantified — hours/week, $/month, risk type]
 EVIDENCE: [named source]
 ```
 
-If PAIN_VALID is false, or fewer than 3 industries are named → halt,
-return PAIN_INVALID with reasoning. Do not proceed.
+**Halt routing (v4.0 fix — was ambiguous in earlier drafts):** a Step 1
+failure is a Dispatch-side submission quality problem, not a market
+verdict — it is always fixable by resubmitting with a better-defined
+ICP, added evidence, or a genuinely broader ICP definition. Both failure
+conditions below route to the same place: skip Steps 2–6 entirely and go
+directly to the Step 7 OUTPUT CONTRACT with `"verdict": "RESUBMIT"`.
+There is no separate `PAIN_INVALID` value in the final JSON — it is
+never a legal value of the `verdict` field.
+
+- **Stakes not quantifiable, or no named evidence source** →
+  `resubmit_reason: "Pain point not validated — [missing stakes
+  quantification | no named evidence source]"`
+- **Fewer than 3 industries named** →
+  `resubmit_reason: "Fewer than 3 industries listed — ICP is not yet
+  defined broadly enough to qualify as a cross-industry product"`
+
+In both cases populate `correction_required` and `resubmit_conditions`
+with the specific fix needed (e.g. "broaden ICP from 'law firm office
+managers' to 'office managers at 5-20 person professional services
+firms — law, accounting, consulting, architecture, engineering'"), the
+same as any other RESUBMIT in Step 7. Do not proceed to Step 2 in either
+case.
 
 ---
 
@@ -520,7 +540,7 @@ Dispatch
 
 Verdict
   → Step 1: Pain valid + cross-industry confirmed?
-      NO → PAIN_INVALID (halt)
+      NO → RESUBMIT (halt, skip to Step 7's OUTPUT CONTRACT directly)
       YES → Step 2
 
   → Step 2: Competitor state?
