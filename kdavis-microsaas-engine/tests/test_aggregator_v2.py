@@ -206,6 +206,35 @@ def test_code_level_floor_uses_the_higher_price_adjusted_floor_for_premium_produ
     assert "$5,000" in result["rejection_reason"]
 
 
+def test_code_level_floor_check_also_covers_conditional_not_just_build():
+    # Real bug found 2026-07-19: a live v4.0 run returned verdict=CONDITIONAL
+    # with final_mrr_floor at only 28% of the price-adjusted floor
+    # (gate_clear: false) and time_to_floor still classified STRONG -- the
+    # code-level floor check only ever guarded BUILD, so this internally
+    # inconsistent verdict reached the DB and tripped the mrr_floor_check
+    # constraint instead of being caught here first.
+    payload = _with_floor(_base_payload(verdict="CONDITIONAL", proposed_price=69, marginal_pass=True), final_mrr_floor=1247, gate_clear=False)
+    payload["time_to_floor"] = {"ramp_summary": "n/a", "estimated_month": 6, "classification": "STRONG"}
+    llm = lambda system, user: _canned(payload)
+    result = run([{"opportunity_id": "opp-1"}], llm=llm)[0]
+    assert result["status"] == "rejected"
+    assert "Code-level floor check failed" in result["rejection_reason"]
+
+
+def test_conditional_below_floor_is_legitimate_when_time_to_floor_is_conditional_class():
+    # The one spec-legitimate way for CONDITIONAL to clear below the raw
+    # floor scenario: a named distribution partner projected to close the
+    # gap within 13-18 months (time_to_floor.classification == "CONDITIONAL").
+    # That classification is itself gated behind the model naming a real
+    # partner in the prompt, so trusting the label here (not re-deriving
+    # the partner claim) is a deliberate, narrow exception.
+    payload = _with_floor(_base_payload(verdict="CONDITIONAL", proposed_price=69, marginal_pass=False), final_mrr_floor=3200, gate_clear=False)
+    payload["time_to_floor"] = {"ramp_summary": "named partner ramp", "estimated_month": 15, "classification": "CONDITIONAL"}
+    llm = lambda system, user: _canned(payload)
+    result = run([{"opportunity_id": "opp-1"}], llm=llm)[0]
+    assert result["status"] == "validated"
+
+
 def test_partial_competitor_state_can_still_build():
     # v3.0's core change: a platform-locked competitor no longer means
     # automatic death -- PARTIAL with an approved differentiation thesis

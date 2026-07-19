@@ -104,3 +104,51 @@ def test_v3_nested_scenarios_floor_is_read_correctly(monkeypatch, fake_db):
     # Must use the agent's real nested figure (4700), never the unrelated
     # upstream self-report (99999) that a silent fallback would have used.
     assert payload["conservative_mrr_potential"] == 4700.0
+
+
+def test_one_bad_row_does_not_block_the_rest_of_the_batch(monkeypatch, fake_db):
+    # Real bug found 2026-07-19: a single batch INSERT of all rows in a
+    # session is one atomic Postgres statement -- one row violating the
+    # mrr_floor_check constraint (an internally-inconsistent CONDITIONAL
+    # verdict) rolled back two other, perfectly valid SATURATED rows in
+    # the same batch, silently losing them with no error surfaced to the
+    # caller. node_write_pipeline must insert row-by-row so one bad row
+    # can fail without taking the others down with it.
+    monkeypatch.setattr(orchestrator, "get_supabase", lambda: fake_db)
+    fake_db.fail_on_insert.add("Bad Row")
+
+    orchestrator.node_write_pipeline(_state([
+        {
+            "vertical": "Legal / Professional Services",
+            "solution_concept": "Good Row One",
+            "status": "rejected",
+            "rejection_reason": "Competitor saturated: Example Inc",
+            "verdict_v2_output": {"verdict": "DO_NOT_BUILD"},
+        },
+        {
+            "vertical": "Finance / Accounting / Bookkeeping",
+            "solution_concept": "Bad Row",
+            "status": "validated",
+            "rejection_reason": None,
+            "verdict_v2_output": {"verdict": "CONDITIONAL"},
+        },
+        {
+            "vertical": "HR / Ops / People Management",
+            "solution_concept": "Good Row Two",
+            "status": "rejected",
+            "rejection_reason": "Competitor saturated: Another Inc",
+            "verdict_v2_output": {"verdict": "DO_NOT_BUILD"},
+        },
+    ]))
+
+    inserts = [c for c in fake_db.executed if c.table_name == "opportunity_pipeline" and c.calls[0][0] == "insert"]
+    concepts_written = {c._payload[0]["solution_concept"] for c in inserts}
+    assert concepts_written == {"Good Row One", "Good Row Two"}
+
+    failure_events = [
+        c for c in fake_db.executed
+        if c.table_name == "usage_events" and c.calls[0][0] == "insert"
+        and c._payload["event_type"] == "research_pipeline_write_failed"
+    ]
+    assert len(failure_events) == 1
+    assert failure_events[0]._payload["metadata"]["failed"][0]["solution_concept"] == "Bad Row"

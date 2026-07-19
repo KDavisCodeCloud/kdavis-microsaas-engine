@@ -83,6 +83,16 @@ class FakeQuery:
 
     def execute(self):
         self.calls.append(("execute",))
+        # Lets a test simulate one specific row failing a DB constraint
+        # (e.g. mrr_floor_check) without a real Postgres — used to verify
+        # node_write_pipeline inserts row-by-row instead of one all-or-
+        # nothing batch insert.
+        if self.table_name == "opportunity_pipeline" and isinstance(self._payload, list):
+            for row in self._payload:
+                if row.get("solution_concept") in self.store.fail_on_insert:
+                    raise Exception(
+                        f"simulated constraint violation for {row.get('solution_concept')!r}"
+                    )
         self.store.executed.append(self)
         result_data = self.store.responses.get(self.table_name, [])
         if getattr(self, "_single", False):
@@ -103,10 +113,11 @@ class FakeSupabase:
     """Fake supabase Client — call .table(name) to get a FakeQuery, inspect
     .executed afterward for what actually ran."""
 
-    def __init__(self, responses=None):
+    def __init__(self, responses=None, fail_on_insert=None):
         self.responses = responses or {}
         self.executed = []
         self.tables_touched = []
+        self.fail_on_insert = fail_on_insert or set()
 
     def table(self, name):
         self.tables_touched.append(name)

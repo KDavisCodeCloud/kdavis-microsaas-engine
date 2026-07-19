@@ -102,6 +102,30 @@ def _evaluate(opp: dict, llm: Callable[..., str]) -> dict:
             f"the ${adjusted_floor:,.0f} price-adjusted floor despite verdict={verdict}."
         ]
 
+    # Same hard check extended to CONDITIONAL/"validated" — found missing
+    # 2026-07-19 when a real v4.0 run returned verdict=CONDITIONAL with
+    # final_mrr_floor at only 28% of the price-adjusted floor (gate_clear:
+    # false) and no compensating factor. Per the spec, CONDITIONAL is only
+    # legitimate below-floor when TIME_TO_FLOOR classifies as CONDITIONAL
+    # (13-18 months with a named distribution partner) — that classification
+    # is itself gated behind the model naming a real partner in this prompt,
+    # so trusting the classification label here (not re-deriving the partner
+    # claim) is a reasonable line, same as trusting MARGINAL_PASS's own math
+    # once GATE_CLEAR is independently verified. Any other below-floor
+    # CONDITIONAL is an internally inconsistent verdict, not a real one —
+    # this is exactly what let a $1,247-vs-$4,500 result reach the DB and
+    # trip the mrr_floor_check constraint instead of being caught here first.
+    if status == "validated" and final_floor < adjusted_floor:
+        classification = (result.get("time_to_floor") or {}).get("classification")
+        if classification != "CONDITIONAL":
+            status = "rejected"
+            result["blocking_issues"] = (result.get("blocking_issues") or []) + [
+                f"Code-level floor check failed: final_mrr_floor ${final_floor:,.0f} is below "
+                f"the ${adjusted_floor:,.0f} price-adjusted floor and time_to_floor "
+                f"classification is '{classification}', not the 13-18mo CONDITIONAL path "
+                f"that's the only spec-legitimate way to clear CONDITIONAL below floor."
+            ]
+
     if status == "rejected" and result.get("competitor_state") == "SATURATED":
         rejection_reason = f"Competitor saturated: {_summarize_competitors(result)}"
     elif status == "rejected":

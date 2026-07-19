@@ -196,13 +196,32 @@ def node_write_pipeline(state: OrchestratorState) -> OrchestratorState:
             "notes":                      f"session:{state['session_id']}",
         })
 
-    if to_insert:
-        db.table("opportunity_pipeline").insert(to_insert).execute()
+    # One row per insert, not a single batch insert — a batch INSERT is one
+    # atomic statement, so a single row violating a DB constraint (e.g. the
+    # mrr_floor_check on an internally-inconsistent verdict) rolls back
+    # every other row in the batch too, silently losing otherwise-valid
+    # results. Found 2026-07-19 when a bad CONDITIONAL row blocked two
+    # correctly-computed SATURATED rows from ever being written.
+    inserted = 0
+    failed = []
+    for row in to_insert:
+        try:
+            db.table("opportunity_pipeline").insert([row]).execute()
+            inserted += 1
+        except Exception as e:
+            failed.append({"solution_concept": row.get("solution_concept", ""), "error": str(e)})
+
+    if failed:
+        db.table("usage_events").insert({
+            "tenant_id": None,
+            "event_type": "research_pipeline_write_failed",
+            "metadata": {"session_id": state["session_id"], "failed": failed},
+        }).execute()
 
     db.table("usage_events").insert({
         "tenant_id": None,
         "event_type": "research_pipeline_written",
-        "metadata": {"session_id": state["session_id"], "inserted": len(to_insert)},
+        "metadata": {"session_id": state["session_id"], "inserted": inserted, "failed_count": len(failed)},
     }).execute()
 
     return {**state, "status": "complete"}
