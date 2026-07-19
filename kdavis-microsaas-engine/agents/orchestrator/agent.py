@@ -4,7 +4,7 @@ import importlib
 from pathlib import Path
 from typing import TypedDict
 from langgraph.graph import StateGraph, END
-from core.llm_router import analyze
+from core.llm_router import analyze_with_web_search
 from core.sanitization import DataSanitizationShield
 from core.supabase_client import get_supabase
 
@@ -55,33 +55,69 @@ async def _run_one_vertical(vertical: str) -> dict:
         except ModuleNotFoundError:
             pass
 
-    # Stub: Sonnet performs the research directly using the orchestrator schema
+    # Stub: Sonnet performs the research directly using the orchestrator schema.
+    # Uses real web search (2026-07-19) -- previously plain analyze() with no
+    # search, which meant Dispatch was submitting ideas from training-data
+    # memory of what a tool currently does. Confirmed in two real v5.0
+    # batches: 4/4 rejections traced back to a claimed FEATURE_GAP the
+    # anchor tool had already shipped (Rentec Direct Oct 2024, Gusto Plus,
+    # Clio Manage) -- Verdict's own live search caught it every time, but
+    # only after burning a full paid Verdict research cycle on an idea that
+    # was dead on arrival. Giving Dispatch the same tool lets it verify
+    # current tool state before ever writing a submission.
     user_prompt = (
         f"Vertical: {vertical}\n\n"
         "You are the vertical research agent for this vertical. "
-        "Apply the search strategy in your system prompt. "
+        "Apply the search strategy in your system prompt, including the "
+        "FEATURE_GAP VERIFICATION section if applicable -- use your web "
+        "search tool to check the anchor tool's CURRENT help docs/release "
+        "notes before claiming a feature is missing. "
         "Return a JSON array of 2–3 opportunity cards using the exact schema defined above. "
         "Every pain point must cite a real source. Every MRR figure must show math. "
-        "Return only the JSON array — no prose, no markdown fences."
+        "Once your research is complete, end your response with the JSON array and "
+        "nothing after it -- no closing remarks, no markdown fence around it."
     )
     safe = DataSanitizationShield.clean(user_prompt)
-    raw = analyze(_SYSTEM_PROMPT, safe, max_tokens=8192)
-
-    # Strip markdown code fences if present
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```", 2)[1]          # drop opening fence
-        if raw.startswith("json"):
-            raw = raw[4:]                      # drop language tag
-        raw = raw.rsplit("```", 1)[0].strip()  # drop closing fence
-    try:
-        findings = json.loads(raw)
-        if not isinstance(findings, list):
-            findings = [findings]
-    except json.JSONDecodeError:
-        findings = []
+    raw = analyze_with_web_search(_SYSTEM_PROMPT, safe, max_tokens=8192)
+    findings = _extract_trailing_json_array(raw)
 
     return {"vertical": vertical, "findings": findings}
+
+
+def _extract_trailing_json_array(text: str) -> list:
+    """
+    Finds the LAST top-level balanced [...] span in the response text and
+    parses it -- mirrors agents/aggregator/agent.py's _extract_trailing_json
+    for objects. Needed once this call gained real web search: a
+    search-backed response narrates its research before the final array,
+    the same way Verdict's does, instead of emitting bare JSON at the very
+    start of the response the way the old no-search prompt could get away
+    with assuming. Depth is tracked only over '[' / ']' so a nested array
+    inside an opportunity card (source_evidence, milestone_sequence) never
+    gets mistaken for the outer array's own close.
+    """
+    spans = []
+    depth = 0
+    start = None
+    for i, ch in enumerate(text):
+        if ch == "[":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "]":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    spans.append((start, i))
+
+    for start, end in reversed(spans):
+        try:
+            parsed = json.loads(text[start:end + 1])
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            continue
+    return []
 
 
 async def node_dispatch_verticals(state: OrchestratorState) -> OrchestratorState:
