@@ -78,7 +78,12 @@ async def _run_one_vertical(vertical: str) -> dict:
         "nothing after it -- no closing remarks, no markdown fence around it."
     )
     safe = DataSanitizationShield.clean(user_prompt)
-    raw = analyze_with_web_search(_SYSTEM_PROMPT, safe, max_tokens=8192)
+    # max_tokens=16000, not the old 8192: a web-search-backed call narrates
+    # through multiple searches before its final array, the same failure
+    # mode that truncated Verdict's own web-search call mid-reasoning
+    # before core.llm_router.analyze_with_web_search's default was bumped
+    # 2026-07-19 -- this explicit override was bypassing that fix.
+    raw = analyze_with_web_search(_SYSTEM_PROMPT, safe, max_tokens=16000)
     findings = _extract_trailing_json_array(raw)
 
     return {"vertical": vertical, "findings": findings}
