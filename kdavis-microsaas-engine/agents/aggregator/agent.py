@@ -1,27 +1,25 @@
 """
-Verdict agent v3.0 — Consolidated from an 8-Model Audit + Post-Audit
-Refinements, July 2026.
+Verdict agent v5.0 — complete replacement of v2.0/v3.0/v4.0, July 2026.
 
-Replaces v2.0. v2.0 replaced the original deterministic Python gate-checker
-(which never actually called an LLM — prompt.md was loaded but confirmed
-dead code) with a genuinely research-backed agent, using Sonnet + Anthropic's
-server-side web_search tool via core.llm_router.analyze_with_web_search.
-That part is unchanged in v3.0.
+22 real opportunities were evaluated across v2.0-v4.0 (6/6/10 respectively):
+19 SATURATED, 2 PARTIAL that both failed on MRR math, 0 CLEAR, 0 genuine
+RESUBMIT. The competitor-absence gate (CLEAR/PARTIAL/SATURATED) killed an
+idea the instant ANY competitor existed, regardless of whether that
+competitor was actually serving its users well. v5.0 retires that gate
+entirely: Dispatch now anchors every idea on a NAMED existing tool people
+are already using and already complaining about (via G2/Capterra/Reddit/
+forum reviews), and Verdict asks only whether that competitor is failing
+enough people to build a $4K MRR business around the specific gap.
 
-v3.0's own premise: v2.0 ran 6 real opportunities and got 6 straight
-rejections — 0 BUILD, 0 CONDITIONAL, 0 RESUBMIT. The flat $4K floor and
-binary competitor gate (any competitor at all = death) were too tight,
-independent of research quality. v3.0 replaces the binary competitor
-check with a three-state gate (CLEAR / PARTIAL / SATURATED — PARTIAL lets
-through opportunities where an existing tool only serves users already on
-some other broader platform) and replaces the flat floor with a
-price-adjusted one (lower-priced, larger-TAM products get a lower floor).
+Verdict still independently re-derives the unhappy segment, reachable
+segment, and MRR math from scratch via live web search on every call
+(core.llm_router.analyze_with_web_search) — it never trusts Dispatch's
+submitted numbers outright, unchanged from v2.0-v4.0.
 
-Full reasoning rules live in prompt.md (the v3.0 spec verbatim, plus an
-appended OUTPUT CONTRACT). The spec's per-step output format is a mix of
-labeled text blocks, which isn't reliably parseable on its own — the
-contract instructs the model to end with one consolidated JSON object
-covering every step's key fields instead.
+Full reasoning rules live in prompt.md (the v5.0 spec verbatim, plus an
+appended OUTPUT CONTRACT). The model narrates its research before the
+final JSON object; the contract instructs it to end with one consolidated
+object covering every step's key fields.
 """
 import json
 from pathlib import Path
@@ -29,12 +27,12 @@ from typing import Callable, Optional
 
 from core.llm_router import analyze_with_web_search
 
-AGENT_ID = "aggregator-verdict-v3"
+AGENT_ID = "aggregator-verdict-v5"
 
 SYSTEM_PROMPT = (Path(__file__).parent / "prompt.md").read_text()
 
-# Price-adjusted MRR floor (v3.0) — replaces the flat $4,000 floor. Applied
-# as half-open intervals at the spec's stated tier breakpoints ($19-29,
+# Price-adjusted MRR floor — unchanged across v3.0-v5.0. Applied as
+# half-open intervals at the spec's stated tier breakpoints ($19-29,
 # $39-59, $69-99, $100+) since the spec itself leaves the $30-38/$60-68/
 # $99-100 gaps undefined; each gap is folded into the tier below it.
 _PRICE_TIER_FLOORS = [
@@ -47,29 +45,27 @@ _DEFAULT_FLOOR = 5000  # >= $100/mo, and the fallback when price is missing/None
 
 def _price_adjusted_floor(proposed_price: Optional[float]) -> int:
     if not proposed_price:
-        return 4000  # no price reported — fall back to the v2.0 standard floor, not the $100+ ceiling
+        return 4000  # no price reported — fall back to the standard floor, not the $100+ ceiling
     for ceiling, floor in _PRICE_TIER_FLOORS:
         if proposed_price < ceiling:
             return floor
     return _DEFAULT_FLOOR
 
 
-# v3.0's VERDICT enum maps onto the pipeline's existing status vocabulary
-# (READY_TO_BUILD/validated/rejected/needs_correction) — unchanged from
-# v2.0's mapping. RESUBMIT still maps to 'needs_correction', not 'rejected'
-# — the dashboard's Reject & Delete button archives-then-deletes rejected
-# rows, which would destroy a genuinely fixable opportunity instead of
-# surfacing the correction needed.
+# v5.0 has only three legal verdicts (BUILD | CONDITIONAL | DO_NOT_BUILD)
+# — RESUBMIT is explicitly retired as a primary output (a malformed
+# submission is DO_NOT_BUILD with the missing element named as the
+# reason). Any unrecognized verdict value falls back to rejected via
+# .get()'s default, same as before.
 _VERDICT_TO_STATUS = {
     "BUILD": "READY_TO_BUILD",
     "CONDITIONAL": "validated",
     "DO_NOT_BUILD": "rejected",
-    "RESUBMIT": "needs_correction",
 }
 
 
 def run(raw_findings: list[dict], llm: Callable[..., str] = analyze_with_web_search) -> list[dict]:
-    """Evaluate every opportunity card through the full v3.0 research pipeline."""
+    """Evaluate every opportunity card through the full v5.0 research pipeline."""
     return [_evaluate(opp, llm) for opp in raw_findings]
 
 
@@ -84,54 +80,38 @@ def _evaluate(opp: dict, llm: Callable[..., str]) -> dict:
     # Hard-enforce the price-adjusted floor at the code level too —
     # CLAUDE.md's floor rule is non-negotiable, and this is the one number
     # the whole factory's business model depends on. Never trust the
-    # model's own verdict/gate_clear alone for it. v3.0 nests the actual
-    # number under scenarios.floor.final_mrr_floor (three scenarios are
-    # now required); fall back to a legacy top-level final_mrr_floor key
-    # in case a response doesn't nest perfectly.
-    floor_scenario = (result.get("scenarios") or {}).get("floor") or {}
-    final_floor = floor_scenario.get("final_mrr_floor")
+    # model's own verdict alone for it. v5.0 flattens the MRR figure to a
+    # single top-level net_mrr_floor (no more three-scenario nesting) —
+    # fall back to the v3.0/v4.0 nested scenarios.floor.final_mrr_floor
+    # shape, then the even older legacy top-level key, in case a response
+    # doesn't follow the current contract exactly.
+    final_floor = result.get("net_mrr_floor")
+    if final_floor is None:
+        final_floor = (result.get("scenarios") or {}).get("floor", {}).get("final_mrr_floor")
     if final_floor is None:
         final_floor = result.get("final_mrr_floor") or 0
     adjusted_floor = _price_adjusted_floor(result.get("proposed_price"))
     result["price_adjusted_floor"] = adjusted_floor  # store what was actually enforced, not just what the model claimed
 
-    if status == "READY_TO_BUILD" and final_floor < adjusted_floor:
+    # v5.0 simplifies the floor rule: BUILD and CONDITIONAL both require
+    # the floor to genuinely clear — they differ only in WHEN (month 1-7
+    # vs 8-12), never in WHETHER. There is no more "floor doesn't clear
+    # but might with a named partner" escape hatch for CONDITIONAL — that
+    # exact ambiguity let a real v4.0 CONDITIONAL result reach the DB at
+    # 28% of its target floor and trip the mrr_floor_check constraint.
+    # Applying one uniform check to both statuses closes that gap by
+    # construction instead of requiring a special-cased exception.
+    if status in ("READY_TO_BUILD", "validated") and final_floor < adjusted_floor:
         status = "rejected"
-        result["blocking_issues"] = (result.get("blocking_issues") or []) + [
-            f"Code-level floor check failed: final_mrr_floor ${final_floor:,.0f} is below "
-            f"the ${adjusted_floor:,.0f} price-adjusted floor despite verdict={verdict}."
-        ]
+        result["reason"] = (
+            f"Code-level floor check failed: net_mrr_floor ${final_floor:,.0f} is below "
+            f"the ${adjusted_floor:,.0f} price-adjusted floor despite verdict={verdict}. "
+            f"v5.0 requires the floor to genuinely clear for both BUILD and CONDITIONAL — "
+            f"only the timing differs."
+        )
 
-    # Same hard check extended to CONDITIONAL/"validated" — found missing
-    # 2026-07-19 when a real v4.0 run returned verdict=CONDITIONAL with
-    # final_mrr_floor at only 28% of the price-adjusted floor (gate_clear:
-    # false) and no compensating factor. Per the spec, CONDITIONAL is only
-    # legitimate below-floor when TIME_TO_FLOOR classifies as CONDITIONAL
-    # (13-18 months with a named distribution partner) — that classification
-    # is itself gated behind the model naming a real partner in this prompt,
-    # so trusting the classification label here (not re-deriving the partner
-    # claim) is a reasonable line, same as trusting MARGINAL_PASS's own math
-    # once GATE_CLEAR is independently verified. Any other below-floor
-    # CONDITIONAL is an internally inconsistent verdict, not a real one —
-    # this is exactly what let a $1,247-vs-$4,500 result reach the DB and
-    # trip the mrr_floor_check constraint instead of being caught here first.
-    if status == "validated" and final_floor < adjusted_floor:
-        classification = (result.get("time_to_floor") or {}).get("classification")
-        if classification != "CONDITIONAL":
-            status = "rejected"
-            result["blocking_issues"] = (result.get("blocking_issues") or []) + [
-                f"Code-level floor check failed: final_mrr_floor ${final_floor:,.0f} is below "
-                f"the ${adjusted_floor:,.0f} price-adjusted floor and time_to_floor "
-                f"classification is '{classification}', not the 13-18mo CONDITIONAL path "
-                f"that's the only spec-legitimate way to clear CONDITIONAL below floor."
-            ]
-
-    if status == "rejected" and result.get("competitor_state") == "SATURATED":
-        rejection_reason = f"Competitor saturated: {_summarize_competitors(result)}"
-    elif status == "rejected":
-        rejection_reason = "; ".join(result.get("blocking_issues") or [result.get("next_action") or "Did not clear v3.0 gates."])
-    elif status == "needs_correction":
-        rejection_reason = _summarize_resubmit(result)
+    if status == "rejected":
+        rejection_reason = result.get("reason") or "Did not clear v5.0 gates — no reason returned."
     else:
         rejection_reason = None
 
@@ -145,17 +125,11 @@ def _evaluate(opp: dict, llm: Callable[..., str]) -> dict:
     }
 
 
-def _summarize_competitors(result: dict) -> str:
-    comps = result.get("competitors_found") or []
-    if not comps:
-        return "saturated, no competitor detail returned"
-    return "; ".join(f"{c.get('name')} ({c.get('price')}, {c.get('channel')})" for c in comps)
-
-
-def _summarize_resubmit(result: dict) -> str:
-    reason = result.get("resubmit_reason") or "Fixable error found — see verdict_v2_output."
-    correction = result.get("correction_required")
-    return f"Needs correction: {reason}" + (f" — {correction}" if correction else "")
+def _summarize_existing_tool(result: dict) -> str:
+    tool = result.get("existing_tool") or {}
+    if not tool.get("name"):
+        return "no existing_tool detail returned"
+    return f"{tool.get('name')} ({tool.get('price')}, {tool.get('rating')} stars, {tool.get('review_count')} reviews)"
 
 
 def _extract_trailing_json(text: str) -> dict:
@@ -165,8 +139,8 @@ def _extract_trailing_json(text: str) -> dict:
     object per the OUTPUT CONTRACT, so the final block is what matters —
     not the first brace encountered, and NOT simply the last '{' character
     in the text either: the contract object itself contains nested dicts
-    (comp_set entries, tam_funnel entries), whose own closing braces would
-    otherwise be mistaken for the outer object's end. Scanning depth
+    (existing_tool, no_saturation_checklist), whose own closing braces
+    would otherwise be mistaken for the outer object's end. Scanning depth
     across the whole string and recording every span where depth returns
     to zero correctly identifies each *complete* top-level object,
     nested content included — the last one is the one we want.

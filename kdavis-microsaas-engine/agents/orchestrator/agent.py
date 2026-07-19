@@ -133,17 +133,17 @@ def node_write_pipeline(state: OrchestratorState) -> OrchestratorState:
         v2 = result.get("verdict_v2_output") or {}
 
         # The Verdict agent's own independently-researched MRR floor is
-        # authoritative when present — it's backed by real TAM/capture-rate
-        # math and live competitor pricing, not the upstream vertical
-        # agent's unverified self-report. v3.0 nests this under
-        # scenarios.floor.final_mrr_floor (three required scenarios,
-        # replacing v2.0's single top-level final_mrr_floor) — checked
-        # here after v3.0 shipped and this line was found still reading
-        # the old top-level key, which would have silently fallen through
-        # to the unverified upstream figure on every v3.0 result. Falls
-        # back to the upstream figure only if the aggregator didn't run
-        # at all (e.g. legacy findings).
-        mrr = (v2.get("scenarios") or {}).get("floor", {}).get("final_mrr_floor")
+        # authoritative when present — it's backed by real segment-sizing
+        # and live pricing research, not the upstream Dispatch submission's
+        # unverified self-report. v5.0 flattens this to a single top-level
+        # net_mrr_floor (no more three-scenario FLOOR/BASE/STRETCH nesting)
+        # — fall back to the v3.0/v4.0 nested shape, then the v2.0 legacy
+        # top-level key, in case an older-shaped response ever comes
+        # through. Falls back to the upstream figure only if the
+        # aggregator didn't run at all (e.g. legacy findings).
+        mrr = v2.get("net_mrr_floor")
+        if mrr is None:
+            mrr = (v2.get("scenarios") or {}).get("floor", {}).get("final_mrr_floor")
         if mrr is None:
             mrr = v2.get("final_mrr_floor")  # legacy v2.0 top-level shape
         if mrr is None:
@@ -159,13 +159,18 @@ def node_write_pipeline(state: OrchestratorState) -> OrchestratorState:
         # cleared the floor is exactly the "floor inflation" failure mode
         # Verdict v2.0 was written to eliminate.
 
+        # v5.0 anchors each idea on a single named existing_tool (not a
+        # competitors_found list) — fall back through the older shapes for
+        # any legacy-format result.
         competitor_examples = source.get("competitor_examples") or []
-        if v2.get("competitors_found"):
+        if v2.get("existing_tool", {}).get("name"):
+            competitor_examples = [v2["existing_tool"]["name"]]
+        elif v2.get("competitors_found"):
             competitor_examples = [c.get("name") for c in v2["competitors_found"] if c.get("name")] or competitor_examples
 
         to_insert.append({
             "vertical":                   result.get("vertical", "") or source.get("vertical", ""),
-            "pain_point":                 v2.get("pain_stakes") or source.get("pain_point", "See research session notes"),
+            "pain_point":                 v2.get("gap_evidence") or v2.get("pain_evidence") or v2.get("pain_stakes") or source.get("pain_point", "See research session notes"),
             "icp":                        source.get("icp") or {},
             "solution_concept":           result.get("solution_concept", ""),
             "mrr_calculation":            source.get("mrr_calculation", ""),
