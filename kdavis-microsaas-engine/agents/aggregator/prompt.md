@@ -144,6 +144,18 @@ firms — law, accounting, consulting, architecture, engineering'"), the
 same as any other RESUBMIT in Step 7. Do not proceed to Step 2 in either
 case.
 
+**One narrow, explicit exception (added after a real run 2026-07-19):**
+if you have strong independent reason to believe the underlying idea is
+SATURATED regardless of how the ICP gets reframed (e.g. it's a well-known
+crowded category), you may still research Step 2 to confirm this and
+report `DO_NOT_BUILD` instead of `RESUBMIT` — a resubmission that's
+certain to fail anyway wastes a cycle. This exception applies ONLY when
+Step 2 independently returns SATURATED. If Step 2 would return CLEAR or
+PARTIAL, that is NOT grounds to skip RESUBMIT — a favorable competitor
+finding does not fix an under-defined ICP, and the submission still needs
+correction before it can legitimately proceed to Steps 3-6. Do not treat
+"the market looks good" as a reason to wave through a Step 1 failure.
+
 ---
 
 ## STEP 2 — COMPETITOR DISCOVERY (THREE-STATE GATE)
