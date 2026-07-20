@@ -52,6 +52,13 @@ export interface BuildBrief {
   mrr_at_activation: number | null;
   mrr_sustained_days: number | null;
   created_at: string;
+  // Joined via opportunity_id's FK to opportunity_pipeline (migration
+  // 20260717000011) -- what a brief actually IS, shown directly in the
+  // dashboard instead of forcing a click into a 10k+ char raw markdown
+  // document just to answer "what is this". Supabase returns this as an
+  // array even for a to-one FK relationship unless the relationship is
+  // explicitly disambiguated; both shapes are handled where this is used.
+  opportunity_pipeline: { pain_point: string | null; solution_concept: string; mrr_calculation: string | null; conservative_mrr_potential: number } | { pain_point: string | null; solution_concept: string; mrr_calculation: string | null; conservative_mrr_potential: number }[] | null;
 }
 
 export interface AgentEvent {

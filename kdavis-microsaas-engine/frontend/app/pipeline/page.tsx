@@ -170,11 +170,28 @@ export default function PipelinePage() {
   const fetchBriefs = useCallback(async () => {
     const { data } = await supabase
       .from("mse_build_briefs")
-      .select("id, opportunity_id, product_name, product_slug, verdict_score, vertical, claude_code_brief, claude_design_brief, repo_branch, status, activated_monitoring, mrr_at_activation, mrr_sustained_days, created_at")
+      // opportunity_pipeline(...) is a PostgREST embedded select via the
+      // real FK (mse_build_briefs.opportunity_id -> opportunity_pipeline.id,
+      // migration 20260717000011) -- pulls what a brief actually IS
+      // directly, instead of forcing a click into a 10k+ char raw markdown
+      // document just to answer "what is this" (real gap Kelvin hit
+      // 2026-07-21 on Ninety Nine Comply).
+      .select("id, opportunity_id, product_name, product_slug, verdict_score, vertical, claude_code_brief, claude_design_brief, repo_branch, status, activated_monitoring, mrr_at_activation, mrr_sustained_days, created_at, opportunity_pipeline(pain_point, solution_concept, mrr_calculation, conservative_mrr_potential)")
       .order("created_at", { ascending: false });
-    setBriefs((data ?? []) as BuildBrief[]);
+    setBriefs((data ?? []) as unknown as BuildBrief[]);
     setBriefsLoading(false);
   }, [supabase]);
+
+  // opportunity_id's FK is to-one, but Supabase's JS client types (and
+  // sometimes the raw response) represent an embedded relationship as an
+  // array regardless of cardinality unless the relationship name is
+  // explicitly disambiguated -- normalize both shapes here once rather
+  // than at every render site.
+  function briefOpportunity(brief: BuildBrief) {
+    const opp = brief.opportunity_pipeline;
+    if (!opp) return null;
+    return Array.isArray(opp) ? opp[0] ?? null : opp;
+  }
 
   useEffect(() => { fetchData(); fetchBriefs(); }, [fetchData, fetchBriefs]);
 
@@ -439,7 +456,9 @@ export default function PipelinePage() {
                 No build briefs yet. Briefs are generated automatically when Verdict passes an opportunity.
               </p>
             ) : (
-              briefs.map((brief, i) => (
+              briefs.map((brief, i) => {
+                const opp = briefOpportunity(brief);
+                return (
                 <div key={brief.id}>
                   <button
                     onClick={() => { setExpandedBrief(expandedBrief === brief.id ? null : brief.id); setBriefDoc("code"); }}
@@ -450,6 +469,9 @@ export default function PipelinePage() {
                       <div className="flex-1 min-w-0">
                         <p className="text-[12.5px] font-semibold truncate-text min-w-0 mb-0.5" style={{ color: "#eef2f5" }}>{brief.product_name}</p>
                         <p className="text-[11px] font-mono truncate-text" style={{ color: "#5b6673" }}>{brief.vertical}</p>
+                        {opp?.pain_point && (
+                          <p className="text-[11px] truncate-text mt-0.5" style={{ color: "#8b96a3" }}>{opp.pain_point}</p>
+                        )}
                       </div>
                       <div className="flex items-center gap-3 shrink-0">
                         {brief.verdict_score !== null && (
@@ -463,6 +485,26 @@ export default function PipelinePage() {
 
                   {expandedBrief === brief.id && (
                     <div className="ml-2 mb-3 space-y-2.5">
+                      {opp && (
+                        <div className="rounded-[8px] p-3.5 space-y-2" style={{ backgroundColor: "#10151b", border: "1px solid #1c222b" }}>
+                          <p className="text-[10px] font-mono uppercase" style={{ color: "#5b6673" }}>What This Is</p>
+                          <p className="text-[13px]" style={{ color: "#eef2f5" }}>{opp.solution_concept}</p>
+                          {opp.pain_point && (
+                            <>
+                              <p className="text-[10px] font-mono uppercase mt-2" style={{ color: "#5b6673" }}>Pain Point</p>
+                              <p className="text-[12px]" style={{ color: "#aab4bd" }}>{opp.pain_point}</p>
+                            </>
+                          )}
+                          <div className="flex items-center gap-4 mt-2">
+                            <p className="text-[13px] font-bold font-mono" style={{ color: "#5eead4" }}>
+                              ${Number(opp.conservative_mrr_potential).toLocaleString()}/mo
+                            </p>
+                            {opp.mrr_calculation && (
+                              <p className="text-[10px] font-mono flex-1" style={{ color: "#5b6673" }}>{opp.mrr_calculation}</p>
+                            )}
+                          </div>
+                        </div>
+                      )}
                       <div className="flex gap-2">
                         <button
                           onClick={() => setBriefDoc("code")}
@@ -502,7 +544,7 @@ export default function PipelinePage() {
                     </div>
                   )}
                 </div>
-              ))
+              );})
             )}
           </SectionCard>
         </div>
