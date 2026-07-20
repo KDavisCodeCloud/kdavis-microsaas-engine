@@ -124,6 +124,8 @@ export default function PipelinePage() {
   const [briefsLoading, setBriefsLoading] = useState(true);
   const [expandedBrief, setExpandedBrief] = useState<string | null>(null);
   const [briefDoc, setBriefDoc] = useState<"code" | "design">("code");
+  const [briefGenState, setBriefGenState] = useState<Record<string, "idle" | "queuing" | "queued" | "error">>({});
+  const [briefGenError, setBriefGenError] = useState<Record<string, string>>({});
 
   const fetchData = useCallback(async () => {
     const { data } = await supabase
@@ -198,6 +200,45 @@ export default function PipelinePage() {
   const visible = opportunities.filter((o) => filter === "all" || o.status === filter);
   const ready = opportunities.filter((o) => o.status === "READY_TO_BUILD").length;
   const validated = opportunities.filter((o) => o.status === "validated").length;
+
+  // One brief per opportunity in practice (generate-brief is a one-shot
+  // action per opportunity_id) -- lets each Build Queue card link
+  // straight to its own brief instead of making Kelvin scroll down and
+  // match titles by hand in the separate Build Briefs list.
+  const briefByOpportunityId = new Map(briefs.filter((b) => b.opportunity_id).map((b) => [b.opportunity_id as string, b]));
+
+  function scrollToBrief(briefId: string) {
+    setExpandedBrief(briefId);
+    setBriefDoc("code");
+    setTimeout(() => {
+      document.getElementById(`brief-${briefId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 50);
+  }
+
+  async function triggerGenerateBrief(opportunityId: string) {
+    setBriefGenState((s) => ({ ...s, [opportunityId]: "queuing" }));
+    setBriefGenError((e) => ({ ...e, [opportunityId]: "" }));
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error("Not signed in");
+
+      const res = await fetch(`${API_BASE}/factory/generate-brief/${opportunityId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? `API error ${res.status}`);
+      setBriefGenState((s) => ({ ...s, [opportunityId]: "queued" }));
+      // Brief insert publishes over Supabase Realtime elsewhere on this
+      // page, but this section only re-fetches on mount/interval — a
+      // direct re-fetch here means the new brief (and its "View Build
+      // Brief" link) shows up without waiting on that or a manual refresh.
+      setTimeout(fetchBriefs, 8000);
+    } catch (e: unknown) {
+      setBriefGenError((err) => ({ ...err, [opportunityId]: e instanceof Error ? e.message : "Unknown error" }));
+      setBriefGenState((s) => ({ ...s, [opportunityId]: "error" }));
+    }
+  }
 
   async function submitBuild(opportunityId: string) {
     setBuildState("queuing");
@@ -387,6 +428,44 @@ export default function PipelinePage() {
                       </div>
 
                       {opp.status === "READY_TO_BUILD" && (
+                        <div className="rounded-[8px] p-3.5" style={{ backgroundColor: "#10151b", border: "1px solid #1c222b" }}>
+                          <p className="text-[10px] font-mono uppercase mb-2" style={{ color: "#5b6673" }}>Build Brief</p>
+                          {briefByOpportunityId.has(opp.id) ? (
+                            <button
+                              onClick={() => scrollToBrief(briefByOpportunityId.get(opp.id)!.id)}
+                              className="text-[12px] px-3 py-1.5 rounded-[8px] font-semibold"
+                              style={{ backgroundColor: "#5eead41a", border: "1px solid #5eead4", color: "#5eead4" }}
+                            >
+                              View Build Brief ↓
+                            </button>
+                          ) : briefGenState[opp.id] === "queued" ? (
+                            <p className="text-[12px]" style={{ color: "#5eead4" }}>
+                              Brief generation queued — this takes a minute or two. Refresh to check.
+                            </p>
+                          ) : (
+                            <>
+                              <button
+                                onClick={() => triggerGenerateBrief(opp.id)}
+                                disabled={briefGenState[opp.id] === "queuing"}
+                                className="text-[12px] px-3 py-1.5 rounded-[8px] font-semibold"
+                                style={{
+                                  backgroundColor: "#5a96ff1a",
+                                  border: "1px solid #5a96ff",
+                                  color: "#5a96ff",
+                                  opacity: briefGenState[opp.id] === "queuing" ? 0.5 : 1,
+                                }}
+                              >
+                                {briefGenState[opp.id] === "queuing" ? "Queuing…" : "Generate Build Brief"}
+                              </button>
+                              {briefGenError[opp.id] && (
+                                <p className="text-[11px] font-mono mt-2" style={{ color: "#e05d5d" }}>{briefGenError[opp.id]}</p>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      )}
+
+                      {opp.status === "READY_TO_BUILD" && (
                         <div className="rounded-[8px] p-3.5" style={{ backgroundColor: "#6fce8f11", border: "1px solid #6fce8f44" }}>
                           {buildFormFor !== opp.id ? (
                             <button
@@ -459,7 +538,7 @@ export default function PipelinePage() {
               briefs.map((brief, i) => {
                 const opp = briefOpportunity(brief);
                 return (
-                <div key={brief.id}>
+                <div key={brief.id} id={`brief-${brief.id}`}>
                   <button
                     onClick={() => { setExpandedBrief(expandedBrief === brief.id ? null : brief.id); setBriefDoc("code"); }}
                     className="w-full text-left py-3 min-w-0"
