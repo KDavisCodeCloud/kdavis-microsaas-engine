@@ -1,261 +1,339 @@
 # BUILD_BRIEF_CLAUDE_CODE.md
-# Campaign Aware Replenishment
 
----
+# Series Scheduler Pro
 
-## Product Overview
+## One-Paragraph Pitch
 
-**Product Name:** Campaign Aware Replenishment
-**Tagline:** Reorder for what you're about to sell, not what you already sold.
-**Price Point:** $49/month (single tier; see Tier Structure below)
-
-### One-Paragraph Pitch
-
-Campaign Aware Replenishment is a Shopify-native app that pulls live Meta Ads and Google Ads spend calendars alongside Shopify sales velocity to generate weekly, per-SKU reorder recommendations sized to *upcoming* campaign demand — not trailing averages. DTC brands running $300K–$3M ARR with 200–5,000 SKUs routinely blow out inventory mid-campaign or over-order post-campaign because their replenishment tool has no visibility into the ad calendar. At $49/month this product delivers the specific differentiator (ad-spend-aware reorder uplift) that Prediko at the same price lacks, and at less than half the cost of Inventory Planner Essentials ($119.99/mo) or its full-featured tier (~$245/mo), while requiring zero spreadsheet work from the merchant.
+Series Scheduler Pro is a Calendly add-on that gives therapists, coaches, personal trainers, tutors, consultants, and wellness providers the one feature Calendly explicitly does not offer: recurring appointment series booking. A client clicks once, selects a cadence (weekly, biweekly, monthly), picks a start time, and every session in the series lands on both calendars automatically — no re-booking friction, no dropped clients mid-program. Calendly's own community manager confirmed as of May 2026 that recurring meetings remain unsupported with no announced timeline, leaving a verified gap that Acuity Scheduling currently exploits. Series Scheduler Pro fills that gap as a lightweight overlay, preserving the Calendly UX professionals already know while adding the retention-driving series mechanic their practices depend on.
 
 ---
 
 ## Target Customer
 
-| Attribute | Spec |
-|---|---|
-| Platform | Shopify (required; Shopify Plus acceptable) |
-| Revenue band | $300K – $3M ARR |
-| SKU count | 200 – 5,000 active SKUs |
-| Ad channels | Running Meta Ads and/or Google Ads with scheduled campaign budgets |
-| Current pain | Stockouts during campaigns, overstock after campaigns, manual spreadsheet reconciliation |
-| Current tools | Shopify native inventory, possibly Prediko or Inventory Planner Essentials |
-| Sophistication | Has a media buyer or agency; inventory managed by founder or ops hire |
+**Primary:** Independent service professionals already paying for Calendly (Calendly Standard/Teams tier) who run multi-session engagements — therapy series, coaching packages, training blocks, tutoring semesters, wellness programs.
+
+**Buying signal:** They are manually re-sending Calendly links after every session, or they have already complained in the Calendly community forum about the missing recurring feature.
+
+**Anti-customer:** One-time booking businesses (haircuts, single consultations, event speakers) who have no recurring engagement model.
 
 ---
 
 ## Conservative MRR Potential
 
-**$5,174/month** (from research report)
-*Note: The research report does not provide the subscriber count assumption, addressable market size, or conversion rate methodology behind this figure. Do not hard-code this number into any in-app metric. Use it only as the go/no-go floor benchmark ($4,000 MRR minimum required by THD non-negotiables).*
+**$12,480/month** (as stated in research report). No additional market-size metrics were provided in the source data; none are invented here.
 
----
-
-## Core Feature List (Build Order)
-
-Build in strict sequence. Do not begin a phase until the prior phase passes its acceptance criteria.
-
-### Phase 0 — Foundation & Auth
-1. Shopify OAuth 2.0 install flow (embedded app, Shopify App Bridge 3.x)
-2. Multi-tenant Postgres schema with `tenant_id` on every table + Row-Level Security policies enforced at DB layer (see CLAUDE.md Non-Negotiables)
-3. `POST /events` endpoint wired and accepting payloads before any agent action is built
-4. Billing: Shopify Recurring Application Charge API, $49/month, 14-day free trial, charge activates on day 15
-5. CLAUDE.md non-negotiables checklist gating CI — build fails if any check is missing
-
-### Phase 1 — Data Ingestion Connectors
-6. **Shopify Sales Velocity Ingestion:** Pull `orders` and `inventory_levels` via Shopify REST/GraphQL Admin API; compute trailing 30/60/90-day velocity per variant/SKU; store in `sku_velocity` table
-7. **Meta Ads Calendar Connector:** OAuth to Meta Marketing API; ingest `campaigns`, `ad_sets` with `start_time`, `end_time`, `daily_budget`, `lifetime_budget`; store in `ad_campaigns` table with `platform = 'meta'`
-8. **Google Ads Calendar Connector:** OAuth to Google Ads API (v14+); ingest campaigns with date ranges and budgets; store in `ad_campaigns` table with `platform = 'google'`
-9. **SKU ↔ Campaign Attribution:** UI for merchant to map ad campaigns → product collections or specific SKU lists; store in `campaign_sku_map` junction table
-10. Webhook subscriptions: `orders/create`, `inventory_levels/update`, `products/update` — emit `POST /events` on each receipt
-
-### Phase 2 — Forecasting Engine
-11. **Baseline Velocity Model:** Weighted moving average (weight: 60-day > 30-day > 7-day) per SKU; store snapshot in `forecast_baseline`
-12. **Campaign Uplift Multiplier:** For each future campaign window with attributed SKUs, compute uplift factor from: (campaign daily budget) × (configurable spend-to-units coefficient, default 1.0, merchant-editable); store in `forecast_uplift`
-13. **Composite Forecast:** Merge baseline + uplift into `forecast_weekly` — one row per SKU per ISO week, covering 8 weeks forward
-14. **Reorder Quantity Calculator:** `reorder_qty = max(0, forecast_weekly_units × lead_time_weeks + safety_stock_days/7 × avg_daily_velocity − current_inventory)`; lead time and safety stock are merchant-configurable per supplier
-15. Emit `POST /events` with `event_type: 'forecast_generated'` after each weekly forecast run
-
-### Phase 3 — Recommendations UI
-16. **Weekly Reorder Dashboard:** Embedded Shopify app page; table of SKUs with columns: SKU, current stock, forecasted demand (8-week), next reorder date, recommended reorder qty, linked campaign(s), confidence indicator
-17. **Campaign Calendar View:** Timeline visualization of upcoming ad campaigns with overlaid inventory runway per attributed SKU collection; highlight SKUs with <14-day runway during a campaign window
-18. **Reorder Export:** One-click CSV export of current week's reorder list (SKU, qty, supplier); future: PO draft push
-19. **Alert Banner:** In-app alert when any SKU's projected runway drops below merchant-set threshold (default: 7 days) during a funded campaign window
-
-### Phase 4 — Retention Loops (see dedicated section below)
-20. Weekly email digest (reorder summary + campaign countdown)
-21. Slack webhook alert (stockout risk during live campaign)
-22. Spend-to-stock health score widget (embeddable)
-23. Historical accuracy report (forecast vs. actual)
-24. Supplier lead time learning (auto-adjust from PO close dates)
-25. Benchmark nudge (anonymous peer comparison)
-
-### Phase 5 — Reliability & Scale
-26. Background job queue (Sidekiq or equivalent) for all API ingestion and forecast runs
-27. Ingestion rate-limit handling for Meta and Google Ads APIs (exponential backoff, dead-letter queue)
-28. Shopify API rate-limit middleware (leaky bucket)
-29. Per-tenant ingestion schedule (default: nightly at 2am merchant local time, configurable)
-30. Audit log table (`events_log`) — append-only, `tenant_id`-scoped, stores all `POST /events` payloads
-
----
-
-## The 6 Required Retention Loops
-
-*Retention loops must be built as discrete, testable modules — not bolted onto the UI.*
-
-### Loop 1 — Weekly Reorder Digest Email
-**Trigger:** Every Monday 7am merchant local time (or configurable day)
-**Content:** Top 10 SKUs to reorder this week, qty, days of stock remaining, upcoming campaigns that drive the recommendation
-**Why it works:** Pulls merchant back into the app on a cadence tied to their buying workflow; the email is only accurate if the app stays connected to ad accounts
-**Implementation:** Sendgrid (or Resend); unsubscribe must honor; emit `POST /events { event_type: 'digest_sent', tenant_id }`
-
-### Loop 2 — Live Campaign Stockout Alert (Slack + Email)
-**Trigger:** Real-time (or next ingestion cycle) — fires when a campaign transitions to `ACTIVE` status AND any attributed SKU has projected runway < threshold
-**Content:** "Your [Campaign Name] goes live in X days. [SKU] has [N] units — estimated sellout in [M] days at projected demand."
-**Why it works:** High urgency, directly tied to money being spent on ads; creates Pavlovian association between ad launch and opening the app
-**Implementation:** Slack incoming webhook (merchant provides URL); fallback to email; emit `POST /events { event_type: 'stockout_alert_sent' }`
-
-### Loop 3 — Spend-to-Stock Health Score (Dashboard Widget)
-**Trigger:** Computed nightly; displayed on app home screen
-**Content:** A single 0–100 score representing the ratio of funded campaign demand to covered inventory across all active SKU-campaign pairs; color-coded red/yellow/green
-**Why it works:** Gives merchant a single number to check daily; shareable with ops/media buyer; score dropping creates urgency
-**Implementation:** Computed in `tenant_health_score` table; embed in app home; emit `POST /events { event_type: 'health_score_computed' }` nightly
-
-### Loop 4 — Forecast vs. Actual Accuracy Report (Monthly)
-**Trigger:** First day of each month, covering prior month
-**Content:** Per-SKU table of forecasted units vs. actual units sold, MAPE (mean absolute percentage error), campaigns that ran, and whether stock was sufficient
-**Why it works:** Demonstrates value concretely; merchants who see accuracy report are reminded the app was "right" — increases trust and reduces churn at renewal
-**Implementation:** Computed from `forecast_weekly` vs. `orders` actuals; delivered via email + in-app report page; emit `POST /events { event_type: 'accuracy_report_generated' }`
-
-### Loop 5 — Supplier Lead Time Learning Nudge
-**Trigger:** When merchant marks a reorder as "received" (manual input or future PO integration), system compares expected lead time vs. actual days elapsed
-**Content:** "Your supplier [Name] delivered in 12 days vs. your 7-day setting. Updating your lead time improves forecast accuracy. [Update Now]"
-**Why it works:** Prompts active configuration engagement; each update improves forecast quality, which increases the merchant's perceived value; creates data flywheel
-**Implementation:** `supplier_lead_time_log` table; nudge shown in-app and via email; emit `POST /events { event_type: 'lead_time_nudge_shown' }`
-
-### Loop 6 — Anonymous Peer Benchmark Nudge
-**Trigger:** Monthly, after accuracy report
-**Content:** "Merchants in your category (apparel/beauty/etc.) reorder an average of [N] days before campaign launch. You're reordering [M] days before. [See Recommendations]"
-**Why it works:** Social proof and competitive anxiety; drives merchants to engage with recommendations tab to close the gap; benchmarks are computed only from opted-in tenant data
-**Implementation:** Aggregate query across consenting tenants (opt-in checkbox during onboarding); never expose individual tenant data; emit `POST /events { event_type: 'benchmark_nudge_shown' }`
-*Note: Research report does not provide actual benchmark figures — do not hard-code any percentages or day counts; compute from real tenant data at runtime.*
-
----
-
-## Data Model Sketch
-
-```sql
--- All tables require tenant_id (UUID, NOT NULL) and RLS policy.
--- RLS: CREATE POLICY on each table WHERE tenant_id = current_setting('app.current_tenant')::uuid
-
-tenants (
-  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  shopify_shop_domain TEXT NOT NULL UNIQUE,
-  shopify_access_token TEXT NOT NULL,          -- encrypted at rest
-  subscription_status TEXT NOT NULL DEFAULT 'trial', -- trial | active | cancelled
-  trial_ends_at       TIMESTAMPTZ,
-  created_at          TIMESTAMPTZ DEFAULT NOW()
-)
-
--- NO tenant_id on tenants table itself (it IS the tenant anchor)
-
-sku_velocity (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-  shopify_variant_id BIGINT NOT NULL,
-  sku             TEXT NOT NULL,
-  product_title   TEXT,
-  velocity_7d     NUMERIC(10,4),   -- units/day
-  velocity_30d    NUMERIC(10,4),
-  velocity_60d    NUMERIC(10,4),
-  current_stock   INT,
-  updated_at      TIMESTAMPTZ DEFAULT NOW()
-)
--- RLS: ENABLE ROW LEVEL SECURITY; CREATE POLICY tenant_isolation ON sku_velocity USING (tenant_id = ...)
-
-ad_campaigns (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-  platform        TEXT NOT NULL CHECK (platform IN ('meta', 'google')),
-  external_id     TEXT NOT NULL,              -- platform's campaign ID
-  campaign_name   TEXT NOT NULL,
-  status          TEXT,                        -- ACTIVE | PAUSED | SCHEDULED
-  start_date      DATE,
-  end_date        DATE,
-  daily_budget_usd NUMERIC(12,2),
-  lifetime_budget_usd NUMERIC(12,2),
-  synced_at       TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(tenant_id, platform, external_id)
-)
-
-campaign_sku_map (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-  ad_campaign_id  UUID NOT NULL REFERENCES ad_campaigns(id) ON DELETE CASCADE,
-  shopify_variant_id BIGINT NOT NULL,
-  sku             TEXT NOT NULL,
-  uplift_coefficient NUMERIC(6,4) DEFAULT 1.0  -- merchant-editable
-)
-
-forecast_baseline (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-  shopify_variant_id BIGINT NOT NULL,
-  sku             TEXT NOT NULL,
-  weighted_velocity_daily NUMERIC(10,4),      -- composite of 7/30/60d
-  computed_at     TIMESTAMPTZ DEFAULT NOW()
-)
-
-forecast_weekly (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-  shopify_variant_id BIGINT NOT NULL,
-  sku             TEXT NOT NULL,
-  iso_week        INT NOT NULL,                -- YYYYWW format
-  iso_year        INT NOT NULL,
-  forecasted_units NUMERIC(10,2),
-  has_campaign_uplift BOOLEAN DEFAULT FALSE,
-  reorder_qty_recommended INT,
-  confidence      TEXT CHECK (confidence IN ('high','medium','low')),
-  generated_at    TIMESTAMPTZ DEFAULT NOW()
-)
-
-suppliers (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-  supplier_name   TEXT NOT NULL,
-  lead_time_days  INT NOT NULL DEFAULT 7,
-  safety_stock_days INT NOT NULL DEFAULT 3
-)
-
-supplier_sku_map (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-  supplier_id     UUID NOT NULL REFERENCES suppliers(id),
-  shopify_variant_id BIGINT NOT NULL,
-  sku             TEXT NOT NULL
-)
-
-supplier_lead_time_log (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-  supplier_id     UUID NOT NULL REFERENCES suppliers(id),
-  expected_days   INT,
-  actual_days     INT,
-  recorded_at     TIMESTAMPTZ DEFAULT NOW()
-)
-
-tenant_health_score (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-  score           INT CHECK (score BETWEEN 0 AND 100),
-  computed_at     TIMESTAMPTZ DEFAULT NOW()
-)
-
--- Append-only event log — stores every POST /events payload
-events_log (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id       UUID NOT NULL,              -- not FK — must survive tenant delete for audit
-  event_type      TEXT NOT NULL,
-  payload         JSONB,
-  emitted_at      TIMESTAMPTZ DEFAULT NOW()
-)
--- RLS on events_log: tenant_id isolation; service role bypasses for internal writes
-```
+**$4,000 MRR floor** is the non-negotiable launch gate before any feature expansion is approved (see CLAUDE.md §7).
 
 ---
 
 ## Tier Structure
 
-*The research report does not provide a validated multi-tier structure or per-tier pricing rationale beyond the $49/month anchor.*
+> ⚠️ No tier structure was included in the research report input. The following is the minimum viable commercial structure required to reach the $4K MRR floor and must be validated with pricing discovery before GA launch.
 
-**Implemented for launch: Single tier at $49/month.**
+| Tier | Placeholder Price | Limit |
+|---|---|---|
+| Solo | TBD | 1 Calendly user, up to X active series |
+| Practice | TBD | Up to 5 users, unlimited series |
+| Clinic | TBD | 5+ users, white-label booking page |
 
-Placeholder for future tiers (do not build at launch; stubs only in billing code):
-- `starter` — $49/month (current)
-- `growth` — price TBD; unlock: PO push integrations,
+---
+
+## Core Feature List (Build Order)
+
+Build in strict sequence. Do not begin a feature until all tests for the prior feature pass and the `/events` POST is wired.
+
+### Phase 0 — Foundation (must complete before any user-facing work)
+
+**0.1 — Repo & Environment Scaffold**
+- Next.js 14 (App Router) + TypeScript
+- Supabase project: enforce RLS from migration `0001`
+- Stripe account connected (test mode)
+- Vercel project linked
+- `.env.example` committed with all required keys documented
+
+**0.2 — CLAUDE.md Non-Negotiables Hardened**
+- `tenant_id` column present in every table migration before merge
+- RLS policies written and tested in the same migration file
+- `/api/events` POST endpoint live and accepting structured payloads
+- Stripe webhook handler skeleton deployed
+
+**0.3 — Calendly OAuth Integration**
+- OAuth 2.0 flow against Calendly v2 API
+- Store `access_token`, `refresh_token`, `calendly_user_uri`, `calendly_org_uri` per tenant
+- Token refresh middleware
+- Fetch and cache user's existing event types
+
+---
+
+### Phase 1 — Core Booking Engine
+
+**1.1 — Series Definition UI**
+- "Create a Series" flow: select base Calendly event type, set cadence (weekly / biweekly / monthly / custom interval), set series length (number of sessions OR end date), set buffer days before first session
+- Series saved to `series_templates` table with `tenant_id`
+- POST `/events` on every series creation action
+
+**1.2 — Series Booking Link Generator**
+- Generate a shareable `series.seriesschedulerpro.com/s/{slug}` booking page per series template
+- Slug is human-readable + UUID suffix
+- Page renders: practitioner name, session count, cadence, duration, next available start date
+
+**1.3 — Client-Facing Booking Flow**
+- Client selects a start time slot (pulled live from Calendly availability API for that event type)
+- System calculates all subsequent session datetimes based on cadence
+- Show client a full series preview ("Your 8 sessions: Oct 6, Oct 13, Oct 20…") before confirmation
+- Client submits name + email
+
+**1.4 — Calendly Invite Cascade**
+- On client confirmation: loop through calculated session datetimes, POST one Calendly scheduling event per session via Calendly API (or use `one_off_event_types` if scheduled invites endpoint is available; document fallback)
+- Collect all returned `calendly_event_uris` and store in `series_bookings` table
+- Send confirmation email to client listing all sessions (use Resend or Postmark)
+- POST `/events` for each invite dispatched
+
+**1.5 — Practitioner Dashboard (MVP)**
+- List all active series templates
+- List all booked series with client name, session count, next session date, completion percentage
+- Basic cancel-entire-series action (cancels all remaining Calendly invites via API)
+- POST `/events` on every dashboard action
+
+---
+
+### Phase 2 — Billing & Access Control
+
+**2.1 — Stripe Subscription Flow**
+- Checkout Session creation per tier
+- Webhook handler: `checkout.session.completed` → provision tenant, set `plan_tier`
+- Webhook handler: `customer.subscription.deleted` → downgrade tenant, block new series creation (do not delete existing data)
+- Customer portal link in dashboard
+
+**2.2 — Entitlement Guards**
+- Middleware checks `plan_tier` before series creation
+- Enforce series/user limits per tier
+- Upgrade prompt modal with Stripe Checkout deep-link
+
+---
+
+### Phase 3 — Retention Loops (see dedicated section below)
+
+**3.1** — Pre-session reminder engine
+**3.2** — Series completion + re-book prompt
+**3.3** — Practitioner weekly digest
+**3.4** — Incomplete series rescue (client missed booking)
+**3.5** — Rescheduling within series
+**3.6** — Client portal (series history + self-rebook)
+
+---
+
+### Phase 4 — Polish & Growth
+
+**4.1** — Calendly webhook ingestion (listen for cancellations/reschedules from Calendly side, sync state)
+**4.2** — Intake form attachment per series template
+**4.3** — Multi-user / team support (Practice/Clinic tiers)
+**4.4** — Series template library (shareable templates between team members)
+**4.5** — Analytics dashboard: completion rates, cancellation rates, rebooking rates
+
+---
+
+## The 6 Required Retention Loops
+
+> These are wired in Phase 3. Each loop must POST to `/api/events` when triggered.
+
+### Loop 1 — Pre-Session Reminder Sequence
+**Trigger:** 48h and 2h before each scheduled session in a series
+**Action:** Email (and optionally SMS) to client with session details, practitioner name, and a one-click reschedule link scoped to that single session
+**Why it retains:** Reduces no-shows, which are the #1 cause of practitioners abandoning any scheduling tool mid-series
+
+### Loop 2 — Series Completion + Re-Enrollment Prompt
+**Trigger:** 24h after the final session in a series is completed (Calendly webhook confirms attendance or session datetime passes)
+**Action:** Email to client: "Your [Program Name] series is complete. Ready to book your next block?" with one-click re-enrollment link pre-filled with same cadence
+**Why it retains:** Converts single-series users into perpetual re-subscribers; keeps both practitioner and client active in the product
+
+### Loop 3 — Practitioner Weekly Digest
+**Trigger:** Every Monday 8am in practitioner's timezone (cron job)
+**Action:** Email to practitioner: upcoming sessions this week, series completion rates, clients with expiring series (within 2 sessions of end), clients who have not yet confirmed a follow-on series
+**Why it retains:** Makes Series Scheduler Pro the operating heartbeat of their practice; creates daily-driver habit for a product that could otherwise feel passive
+
+### Loop 4 — Abandoned Series Rescue
+**Trigger:** Series template created but no booking link shared within 72h, OR booking link opened but client did not complete booking within 48h
+**Action:** Email to practitioner: "Your [Series Name] hasn't been booked yet — share this link with [client name if known]." Includes one-click copy of the booking link
+**Why it retains:** Prevents silent churn where practitioners create a series, forget to send it, see no value, and cancel subscription
+
+### Loop 5 — Mid-Series Rescheduling Flow
+**Trigger:** Client or practitioner cancels a single session within an active series (received via Calendly webhook)
+**Action:** Immediately surface a rescheduling UI that proposes alternative time slots and offers to shift the entire remaining series by one week if needed; notify both parties
+**Why it retains:** The #1 reason recurring-series workflows fail is that a single cancellation breaks the whole chain. Solving this in-product eliminates the "it's too complicated" cancellation reason
+
+### Loop 6 — Client Portal + Series History
+**Trigger:** Passive (always-on client-facing page at `/portal/{client_token}`)
+**Action:** Client can view all past and upcoming sessions across all their series with this practitioner, see session notes (if practitioner adds them), and self-initiate a new series booking
+**Why it retains:** Creates perceived switching cost — clients have history, context, and continuity stored here. Practitioners cannot easily migrate this relationship context to a competitor
+
+---
+
+## Data Model Sketch
+
+> All tables require `tenant_id UUID NOT NULL` and RLS policies restricting access to `auth.uid()` → `tenants.owner_id` before any other column is defined.
+
+```sql
+-- Core tenant / auth
+tenants
+  id UUID PK
+  owner_id UUID FK → auth.users
+  plan_tier TEXT  -- 'solo' | 'practice' | 'clinic'
+  stripe_customer_id TEXT
+  stripe_subscription_id TEXT
+  created_at TIMESTAMPTZ
+
+-- Calendly OAuth tokens (one per user within a tenant for multi-user tiers)
+calendly_connections
+  id UUID PK
+  tenant_id UUID FK → tenants   ← RLS
+  user_id UUID FK → auth.users
+  calendly_user_uri TEXT
+  calendly_org_uri TEXT
+  access_token TEXT  -- encrypted at rest
+  refresh_token TEXT -- encrypted at rest
+  expires_at TIMESTAMPTZ
+  created_at TIMESTAMPTZ
+
+-- Series templates (the recurring pattern definition)
+series_templates
+  id UUID PK
+  tenant_id UUID FK → tenants   ← RLS
+  name TEXT
+  calendly_event_type_uri TEXT
+  cadence TEXT  -- 'weekly' | 'biweekly' | 'monthly' | 'custom'
+  custom_interval_days INT  -- nullable, used when cadence='custom'
+  session_count INT
+  end_date DATE  -- nullable, alternative to session_count
+  booking_slug TEXT UNIQUE
+  is_active BOOLEAN
+  created_at TIMESTAMPTZ
+
+-- Booked series (one row per client-series engagement)
+series_bookings
+  id UUID PK
+  tenant_id UUID FK → tenants   ← RLS
+  series_template_id UUID FK → series_templates
+  client_name TEXT
+  client_email TEXT
+  client_portal_token UUID  -- for passwordless client portal access
+  status TEXT  -- 'active' | 'completed' | 'cancelled'
+  created_at TIMESTAMPTZ
+
+-- Individual sessions within a booked series
+series_sessions
+  id UUID PK
+  tenant_id UUID FK → tenants   ← RLS
+  series_booking_id UUID FK → series_bookings
+  session_number INT
+  scheduled_at TIMESTAMPTZ
+  calendly_event_uri TEXT  -- returned by Calendly after invite creation
+  calendly_invitee_uri TEXT
+  status TEXT  -- 'scheduled' | 'completed' | 'cancelled' | 'rescheduled'
+  rescheduled_to TIMESTAMPTZ  -- nullable
+  created_at TIMESTAMPTZ
+
+-- Event log (append-only, never delete)
+events
+  id UUID PK
+  tenant_id UUID FK → tenants   ← RLS
+  actor_type TEXT  -- 'practitioner' | 'client' | 'system' | 'webhook'
+  actor_id TEXT    -- user UUID or 'system'
+  event_type TEXT  -- e.g. 'series.created', 'session.booked', 'reminder.sent'
+  entity_type TEXT -- 'series_template' | 'series_booking' | 'series_session'
+  entity_id UUID
+  payload JSONB
+  created_at TIMESTAMPTZ
+```
+
+**Indexes required (minimum):**
+- `series_templates(tenant_id, is_active)`
+- `series_bookings(tenant_id, status)`
+- `series_sessions(tenant_id, scheduled_at)` — for reminder cron queries
+- `series_sessions(series_booking_id, session_number)`
+- `events(tenant_id, created_at DESC)`
+
+---
+
+## CLAUDE.md Non-Negotiables
+
+> These rules are absolute constraints. Claude Code must refuse to generate or merge code that violates any item in this section.
+
+```markdown
+# CLAUDE.md — Series Scheduler Pro
+
+## §1 — Tenant Isolation (HARD BLOCK)
+
+Every database table without exception must have:
+  - `tenant_id UUID NOT NULL` column
+  - A Supabase RLS policy that restricts SELECT/INSERT/UPDATE/DELETE
+    to rows where tenant_id matches the authenticated user's tenant
+
+If a migration file is proposed that creates a table WITHOUT tenant_id
+and WITHOUT RLS policies in the same file, reject it and do not proceed.
+
+No exceptions. Lookup/reference tables (e.g. cadence_types) are exempt
+only if they contain zero user data and are read-only to all tenants.
+
+## §2 — Event Emission (HARD BLOCK)
+
+Every agent action, user action, webhook receipt, cron job execution,
+and background task must POST to /api/events before returning a response.
+
+The /api/events endpoint signature:
+  POST /api/events
+  Body: {
+    tenant_id: string,
+    actor_type: 'practitioner' | 'client' | 'system' | 'webhook',
+    actor_id: string,
+    event_type: string,   // dot-notation: 'series.created', 'session.booked'
+    entity_type: string,
+    entity_id: string,
+    payload: object
+  }
+
+If a function performs a meaningful state change and does NOT call
+POST /api/events, it is incomplete. Do not mark it done.
+
+## §3 — $4,000 MRR Floor Gate
+
+No feature work beyond Phase 2 (Billing) may be prioritized or
+announced until Stripe MRR dashboard confirms ≥ $4,000 active MRR.
+
+The $4K gate is not a suggestion. It is the signal that the core
+value proposition is validated and retention loops are worth building.
+
+Do not build Phase 4 features before Phase 3 retention loops are live.
+
+## §4 — Calendly API Respect
+
+- Always honor Calendly rate limits; implement exponential backoff
+- Never store client PII beyond what Calendly already holds; sync
+  only what is needed for Series Scheduler Pro's own session records
+- If Calendly's API changes and a feature becomes impossible,
+  surface this as a blocker immediately — do not silently degrade
+
+## §5 — Encryption at Rest for OAuth Tokens
+
+calendly_connections.access_token and .refresh_token must be
+encrypted before INSERT and decrypted on SELECT.
+Do not store raw OAuth tokens in plaintext in the database.
+Use AES-256-GCM with a key stored in environment variables (not in DB).
+
+## §6 — No Invented Metrics in User-Facing Copy
+
+Marketing copy, onboarding screens, and email templates must not
+cite specific market size numbers, user count claims, or revenue
+figures unless they appear in the validated research report.
+The only confirmed external data point is:
+  "Calendly community manager confirmed recurring meetings
+   unsupported as of May 2026 with no announced timeline."
+This specific statement may be referenced. Nothing else may be
+fabricated as a social proof or market validation claim.
+
+## §7 — Stripe Webhook Idempotency
+
+All Stripe webhook handlers must:
+  - Check for duplicate event_id before processing
+  - Return 200 on duplicate (do not reprocess)
+  - Store processed stripe_event_ids in a dedupe table
