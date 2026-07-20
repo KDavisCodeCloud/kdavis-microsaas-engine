@@ -4,7 +4,7 @@ import importlib
 from pathlib import Path
 from typing import TypedDict
 from langgraph.graph import StateGraph, END
-from core.llm_router import analyze_with_web_search
+from core.llm_router import HAIKU, analyze_with_web_search
 from core.sanitization import DataSanitizationShield
 from core.supabase_client import get_supabase
 
@@ -78,12 +78,15 @@ async def _run_one_vertical(vertical: str) -> dict:
         "nothing after it -- no closing remarks, no markdown fence around it."
     )
     safe = DataSanitizationShield.clean(user_prompt)
-    # max_tokens=16000, not the old 8192: a web-search-backed call narrates
-    # through multiple searches before its final array, the same failure
-    # mode that truncated Verdict's own web-search call mid-reasoning
-    # before core.llm_router.analyze_with_web_search's default was bumped
-    # 2026-07-19 -- this explicit override was bypassing that fix.
-    raw = analyze_with_web_search(_SYSTEM_PROMPT, safe, max_tokens=16000)
+    # Haiku, not Sonnet (2026-07-19 cost pass) -- Dispatch's job is finding
+    # named tools + review patterns and formatting a fixed-schema
+    # submission, not open-ended judgment; verified against real batches
+    # before going live, same bar as any model swap on a live-search agent.
+    # max_tokens=10000, not the old 16000: a real cost reduction, but well
+    # above the 8192 that already truncated a similar web-search call mid-
+    # narration once this session -- not dropped all the way to a guessed
+    # low number.
+    raw = analyze_with_web_search(_SYSTEM_PROMPT, safe, max_tokens=10000, model=HAIKU)
     findings = _extract_trailing_json_array(raw)
 
     return {"vertical": vertical, "findings": findings}

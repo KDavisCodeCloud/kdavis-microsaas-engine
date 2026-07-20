@@ -25,11 +25,24 @@ import json
 from pathlib import Path
 from typing import Callable, Optional
 
-from core.llm_router import analyze_with_web_search
+from core.llm_router import HAIKU, analyze_with_web_search
 
 AGENT_ID = "aggregator-verdict-v5"
 
 SYSTEM_PROMPT = (Path(__file__).parent / "prompt.md").read_text()
+
+
+def _default_llm(system: str, user: str) -> str:
+    """
+    Haiku, not Sonnet (2026-07-19 cost pass) — v5.0's three-step evaluation
+    plus the confidence-score step below is explicit enough that Haiku
+    follows it reliably; the earlier versions' ambiguous multi-step
+    frameworks were the actual reason Sonnet was load-bearing, not the
+    web-search-driven fact-finding itself. Verified against real batches
+    before going live (see MSE-Build-Order.md's Haiku regression notes),
+    same bar as any other model swap on a live-search-backed agent.
+    """
+    return analyze_with_web_search(system, user, model=HAIKU)
 
 # Price-adjusted MRR floor — unchanged across v3.0-v5.0. Applied as
 # half-open intervals at the spec's stated tier breakpoints ($19-29,
@@ -64,7 +77,7 @@ _VERDICT_TO_STATUS = {
 }
 
 
-def run(raw_findings: list[dict], llm: Callable[..., str] = analyze_with_web_search) -> list[dict]:
+def run(raw_findings: list[dict], llm: Callable[..., str] = _default_llm) -> list[dict]:
     """Evaluate every opportunity card through the full v5.0 research pipeline."""
     return [_evaluate(opp, llm) for opp in raw_findings]
 
@@ -109,6 +122,28 @@ def _evaluate(opp: dict, llm: Callable[..., str]) -> dict:
             f"v5.0 requires the floor to genuinely clear for both BUILD and CONDITIONAL — "
             f"only the timing differs."
         )
+
+    # Confidence-score override (added 2026-07-19) — same "never trust the
+    # model's self-report alone" principle as the floor check above. The
+    # score can only ever downgrade a verdict, never upgrade one: a
+    # DO_NOT_BUILD from Steps 1-3 stays DO_NOT_BUILD regardless of score,
+    # so this only ever runs when status is still READY_TO_BUILD/validated
+    # at this point.
+    confidence_score = result.get("confidence_score")
+    if status in ("READY_TO_BUILD", "validated") and confidence_score is not None:
+        if confidence_score < 45:
+            status = "rejected"
+            result["reason"] = (
+                f"Confidence override: score {confidence_score}/100 is below the 45 "
+                f"floor — verdict={verdict} demoted to DO_NOT_BUILD regardless of what "
+                f"Steps 1-3 concluded."
+            )
+        elif confidence_score < 60 and status == "READY_TO_BUILD":
+            status = "validated"
+            result["confidence_downgrade_note"] = (
+                f"Downgraded BUILD to CONDITIONAL — confidence score {confidence_score}/100 "
+                f"is below 60."
+            )
 
     if status == "rejected":
         rejection_reason = result.get("reason") or "Did not clear v5.0 gates — no reason returned."

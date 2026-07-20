@@ -201,6 +201,53 @@ def test_full_verdict_v5_output_is_preserved_on_the_result():
     assert result["verdict_v2_output"]["price_adjusted_floor"] == 4000  # code-computed, stored back for auditability
 
 
+# ── Confidence score override (added 2026-07-19) ────────────────────
+
+def test_confidence_below_45_forces_do_not_build_regardless_of_verdict():
+    payload = _with_floor(_base_payload(verdict="BUILD", confidence_score=30), net_mrr_floor=4500)
+    llm = lambda system, user: _canned(payload)
+    result = run([{"opportunity_id": "opp-1"}], llm=llm)[0]
+    assert result["status"] == "rejected"
+    assert "Confidence override" in result["rejection_reason"]
+    assert "30" in result["rejection_reason"]
+
+
+def test_confidence_45_to_59_downgrades_build_to_conditional():
+    payload = _with_floor(_base_payload(verdict="BUILD", confidence_score=52), net_mrr_floor=4500)
+    llm = lambda system, user: _canned(payload)
+    result = run([{"opportunity_id": "opp-1"}], llm=llm)[0]
+    assert result["status"] == "validated"
+    assert "Downgraded BUILD to CONDITIONAL" in result["verdict_v2_output"]["confidence_downgrade_note"]
+
+
+def test_confidence_score_never_upgrades_a_do_not_build():
+    # A perfect confidence score must not rescue a verdict that already
+    # failed Steps 1-3 on the merits (e.g. the floor never cleared).
+    payload = _with_floor(_base_payload(verdict="DO_NOT_BUILD", confidence_score=95, reason="Floor never clears."), net_mrr_floor=500)
+    llm = lambda system, user: _canned(payload)
+    result = run([{"opportunity_id": "opp-1"}], llm=llm)[0]
+    assert result["status"] == "rejected"
+
+
+def test_confidence_60_plus_leaves_build_verdict_untouched():
+    payload = _with_floor(_base_payload(verdict="BUILD", confidence_score=82), net_mrr_floor=4500)
+    llm = lambda system, user: _canned(payload)
+    result = run([{"opportunity_id": "opp-1"}], llm=llm)[0]
+    assert result["status"] == "READY_TO_BUILD"
+    assert "confidence_downgrade_note" not in result["verdict_v2_output"]
+
+
+def test_confidence_score_absent_does_not_affect_legacy_style_responses():
+    # A response that never mentions confidence_score at all (e.g. an
+    # older-shaped canned test) must not be touched by this override --
+    # the branch only activates when the model actually reports a score.
+    payload = _with_floor(_base_payload(verdict="BUILD"), net_mrr_floor=4500)
+    assert "confidence_score" not in payload or payload.get("confidence_score") is None
+    llm = lambda system, user: _canned(payload)
+    result = run([{"opportunity_id": "opp-1"}], llm=llm)[0]
+    assert result["status"] == "READY_TO_BUILD"
+
+
 # ── Regression cases from prompt.md's SATURATED-is-retired rule ─────
 # A competitor existing (even a well-reviewed one) is never grounds for
 # DO_NOT_BUILD on its own -- only a failure of Steps 1-3 is. These verify

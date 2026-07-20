@@ -185,6 +185,91 @@ the 12-month window, the verdict is DO_NOT_BUILD.
 
 ---
 
+### STEP 4 — CONFIDENCE SCORE (MANDATORY, added 2026-07-19)
+
+After completing Steps 1-3, calculate a confidence score regardless of
+verdict outcome. This score is required on every output. No exceptions —
+even a DO_NOT_BUILD gets a score, for the same reason it still gets
+SUPPORTING DATA.
+
+**COMPONENT 1 — PAIN EVIDENCE STRENGTH (0-25 pts)**
+```
+25: Multiple named sources, dated last 90 days, 5+ reviews citing same specific gap
+20: 2-3 named sources, recent, pattern clear
+15: 1-2 sources, somewhat recent, pattern clear
+10: Sources found but older than 12 months
+5:  Single source, pattern weak
+0:  Pain not independently confirmed
+```
+
+**COMPONENT 2 — GAP VERIFICATION (0-25 pts)**
+```
+25: Gap verified by your own web search -- help docs confirm feature absent
+    AND reviews dated last 90 days still cite the gap
+20: Verified via help docs, reviews 90 days to 12 months old
+15: Verified via reviews only, no help doc check
+10: Gap plausible, Dispatch's claim accepted without independent verification
+5:  Gap partially verified, some doubt remains
+0:  Gap verification failed or contradicted
+```
+
+**COMPONENT 3 — MATH RELIABILITY (0-25 pts)**
+```
+25: Segment from named source, 0.5% capture, floor cleared 25%+ above target, Month 1-5
+20: Segment sourced, floor 10-25% above target, Month 5-7
+15: Segment estimated but logical, floor barely cleared, Month 7-10
+10: Segment uncertain, floor barely cleared, Month 10-12
+5:  Math required your own correction of Dispatch's numbers to clear
+0:  Math does not clear floor
+```
+
+**COMPONENT 4 — GTM REALISM (0-25 pts)**
+```
+25: Named channel with confirmed access -- App Store listing available,
+    partner program confirmed, existing audience
+20: Named channel, access likely, mechanism clear
+15: Named channel, logical but unconfirmed
+10: Channel named but vague -- "SEO" only
+5:  GTM unclear or missing
+0:  No viable GTM identified
+```
+
+**Output format (required):**
+```
+CONFIDENCE_SCORE: [total 0-100]
+CONFIDENCE_BREAKDOWN:
+  Pain Evidence:     [score]/25
+  Gap Verified:      [score]/25
+  Math Reliability:  [score]/25
+  GTM Realism:       [score]/25
+
+SCORE_INTERPRETATION:
+  90-100: STRONG BUILD -- execute immediately
+  75-89:  BUILD -- proceed with HITL review
+  60-74:  CONDITIONAL -- validate before building
+  45-59:  WEAK -- resolve gaps before deciding
+  <45:    DO_NOT_BUILD regardless of verdict label
+```
+
+**Confidence override rule (this is enforced again at the code level —
+never trust your own score self-report alone, same reason the price
+floor is code-enforced):**
+```
+If CONFIDENCE_SCORE < 45 -> the final verdict is DO_NOT_BUILD regardless
+  of what Steps 1-3 concluded.
+
+If CONFIDENCE_SCORE is 45-59 AND your Step 1-3 verdict is BUILD ->
+  downgrade to CONDITIONAL. State explicitly: "Downgraded BUILD to
+  CONDITIONAL -- confidence score below 60."
+
+The confidence score can only DOWNGRADE a verdict, never upgrade one.
+A DO_NOT_BUILD from Steps 1-3 stays DO_NOT_BUILD regardless of score --
+a high confidence score does not rescue a verdict that failed on the
+merits.
+```
+
+---
+
 ### VERDICT OUTPUT
 
 ```
@@ -365,6 +450,8 @@ numbers (not strings), all `_pct` fields are numbers 0-100.
   "verdict": "BUILD | CONDITIONAL | DO_NOT_BUILD",
   "failed_at_step": "1 | 2 | 3 | null — only when verdict is DO_NOT_BUILD",
   "reason": "string — one sentence, specific",
-  "no_saturation_checklist": {"rating_above_4_3": false, "no_recurring_complaint_pattern": false, "priced_accessibly": false, "no_platform_dependency": false}
+  "no_saturation_checklist": {"rating_above_4_3": false, "no_recurring_complaint_pattern": false, "priced_accessibly": false, "no_platform_dependency": false},
+  "confidence_score": 0,
+  "confidence_breakdown": {"pain_evidence": 0, "gap_verified": 0, "math_reliability": 0, "gtm_realism": 0}
 }
 ```
