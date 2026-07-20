@@ -254,6 +254,17 @@ The practical rule of thumb: if it's a decision, a credential, or a click inside
 
 ---
 
+## Launch readiness audit (2026-07-20) — 2 critical items resolved same day
+
+Full audit published as an artifact; two of the four critical findings were fixed immediately:
+
+- **Deploy pipeline auth fixed** (`b679afc`): `agents/factory/deploy.py` no longer assumes an interactive `railway`/`vercel` login session. Both CLIs now get their token from `RAILWAY_TOKEN`/`VERCEL_TOKEN` env vars, validated with a fail-fast, specifically-named error before any CLI command runs — `deploy_product` checks both up front so a missing Vercel token can never be discovered only after a Railway project already exists. Documented in `.env.example`. **Still needs Kelvin:** actually generate both tokens (railway.app / vercel.com account settings) and set them wherever `mse-api` actually runs — the code fix alone doesn't create the credentials.
+- **CLAUDE.md brought current to v5.0** (`b679afc`): was still describing Verdict v3.0 as the live system and said "Sonnet for analysis — do not swap," directly contradicting the verified Haiku switch. Both fixed surgically, nothing else touched.
+
+**Still open from the audit** (see the artifact for the full ranked list): 2 opportunities awaiting Kelvin's review (Ninety Nine Comply, 3+ days; Shopify inventory forecasting, 1+ day) — nothing else in the pipeline can proceed until one gets approved; dedicated MSE Stripe account still needs creating; Search Visibility Layer (SEO/AEO/GEO/SXO) and the search-signal requirement are both documented as non-negotiable but unimplemented; a few lower-priority items (cross-dashboard agent-run correlation, "Ask More" follow-up flow, GITHUB_TOKEN production verification, VERTICAL_MODULE_MAP likely-dead code).
+
+---
+
 ## Key Constraints (Do Not Violate)
 
 - Dedicated Stripe account for MSE — never share with Cloud Decoded or Decoded Holdings, and never create it before a product needs it
