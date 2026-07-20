@@ -243,29 +243,47 @@ CONFIDENCE_BREAKDOWN:
   Math Reliability:  [score]/25
   GTM Realism:       [score]/25
 
-SCORE_INTERPRETATION:
-  90-100: STRONG BUILD -- execute immediately
-  75-89:  BUILD -- proceed with HITL review
-  60-74:  CONDITIONAL -- validate before building
-  45-59:  WEAK -- resolve gaps before deciding
-  <45:    DO_NOT_BUILD regardless of verdict label
+SCORE_INTERPRETATION (reference commentary for the human reviewer ONLY —
+see the hard rule immediately below before you touch the verdict field):
+  90-100: STRONG BUILD signal
+  75-89:  BUILD signal
+  60-74:  CONDITIONAL-strength signal
+  45-59:  WEAK signal
+  <45:    DO_NOT_BUILD-strength signal
 ```
 
-**Confidence override rule (this is enforced again at the code level —
-never trust your own score self-report alone, same reason the price
-floor is code-enforced):**
+**Confidence override rule — this is the ONLY way the score may change
+`verdict`. Read this before writing the verdict field, not after:**
 ```
-If CONFIDENCE_SCORE < 45 -> the final verdict is DO_NOT_BUILD regardless
-  of what Steps 1-3 concluded.
+The verdict field is set by Steps 1-3 ALONE (pain confirmed -> gap
+identified -> floor cleared, and WHEN it clears). The SCORE_INTERPRETATION
+labels above are commentary for a human skimming the confidence
+breakdown -- they are NEVER a second way to decide the verdict, and a
+score landing in a labeled band (e.g. "60-74: CONDITIONAL-strength
+signal") is NOT by itself a reason to write CONDITIONAL if Step 3 says
+STRONG. A real case surfaced this exact bug 2026-07-19: Step 3 correctly
+found floor_cleared=true, timeline_classification=STRONG (month 4), and
+the verdict should have been BUILD -- but confidence landed at 69, in
+the labeled "60-74: CONDITIONAL" band, and the verdict was written as
+CONDITIONAL anyway, contradicting Step 3's own finding.
 
-If CONFIDENCE_SCORE is 45-59 AND your Step 1-3 verdict is BUILD ->
-  downgrade to CONDITIONAL. State explicitly: "Downgraded BUILD to
-  CONDITIONAL -- confidence score below 60."
+There are exactly two rules that let the score touch verdict, and no
+others:
 
-The confidence score can only DOWNGRADE a verdict, never upgrade one.
-A DO_NOT_BUILD from Steps 1-3 stays DO_NOT_BUILD regardless of score --
-a high confidence score does not rescue a verdict that failed on the
-merits.
+  1. CONFIDENCE_SCORE < 45 -> final verdict is DO_NOT_BUILD, regardless
+     of what Steps 1-3 concluded.
+  2. CONFIDENCE_SCORE is 45-59 AND your Step 1-3 verdict is BUILD ->
+     downgrade to CONDITIONAL. State explicitly: "Downgraded BUILD to
+     CONDITIONAL -- confidence score below 60."
+
+A score of 60 or above NEVER changes the verdict Steps 1-3 already
+determined -- report it as-is (BUILD stays BUILD even at a 60-74
+score; CONDITIONAL from Step 3's own Month 8-12 timing stays
+CONDITIONAL). The confidence score can only DOWNGRADE a verdict via
+the two rules above, never upgrade one and never substitute for Step
+3's own timeline determination. A DO_NOT_BUILD from Steps 1-3 stays
+DO_NOT_BUILD regardless of score — a high confidence score does not
+rescue a verdict that failed on the merits.
 ```
 
 ---
