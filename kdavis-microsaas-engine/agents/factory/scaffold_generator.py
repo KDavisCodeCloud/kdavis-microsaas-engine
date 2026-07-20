@@ -21,9 +21,19 @@ something a scaffold step should trigger as a side effect.
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from core.supabase_client import get_supabase
+from agents.factory.search_visibility_generator import (
+    generate_search_visibility_content,
+    render_comparison_page,
+    render_definitive_page,
+    render_faq_page,
+    render_landing_page,
+    render_pricing_page,
+    render_robots_ts,
+    render_sitemap_ts,
+)
 
 AGENT_ID = "factory-scaffold"
 
@@ -590,20 +600,18 @@ export async function GET(request: Request) {
 '''
 
 
-def _frontend_root_page() -> str:
-    return '''import { redirect } from "next/navigation";
-
-export default function Home() {
-  redirect("/login");
-}
-'''
-
-
-def generate_scaffold(product_id: str, output_root: Path, supabase_client: Optional[Any] = None) -> Path:
+def generate_scaffold(
+    product_id: str, output_root: Path, supabase_client: Optional[Any] = None,
+    llm: Optional[Callable[..., str]] = None,
+) -> Path:
     """
     Generates a complete product scaffold at output_root/{product-slug}/.
     Raises if the opportunity isn't READY_TO_BUILD, or on any write failure
     — never fails silently. Returns the path to the generated repo.
+
+    `llm` is passed through to the search visibility generator (defaults
+    to core.llm_router.analyze / Sonnet) — injectable so tests can supply
+    a canned response instead of making a real Anthropic call.
     """
     db = supabase_client if supabase_client is not None else get_supabase()
     opp = _load_opportunity(db, product_id)
@@ -617,6 +625,13 @@ def generate_scaffold(product_id: str, output_root: Path, supabase_client: Optio
     out = Path(output_root) / product_slug
     if out.exists():
         raise FileExistsError(f"Scaffold output already exists: {out}")
+
+    # Search Visibility Layer content — generated before any files are
+    # written. CLAUDE.md: "No product goes live without this layer
+    # complete" — SearchVisibilityError (e.g. fewer than 10 FAQ pairs)
+    # propagates up and aborts the whole scaffold, same as any other
+    # non-negotiable enforced in this pipeline.
+    search_content = generate_search_visibility_content(opp, llm=llm)
 
     for d in _INIT_DIRS:
         _write(out / d / "__init__.py", "")
@@ -646,6 +661,16 @@ def generate_scaffold(product_id: str, output_root: Path, supabase_client: Optio
     _write(out / "frontend" / "app" / "globals.css", _frontend_globals_css())
     _write(out / "frontend" / "tailwind.config.ts", _tailwind_config())
     _write(out / "frontend" / "app" / "auth" / "callback" / "route.ts", _frontend_auth_callback())
-    _write(out / "frontend" / "app" / "page.tsx", _frontend_root_page())
+
+    # Search Visibility Layer — public marketing site + SEO/AEO/GEO/SXO.
+    # app/page.tsx is now the actual landing page, not a redirect to
+    # /login (the scaffold previously had no public marketing site at all).
+    _write(out / "frontend" / "app" / "page.tsx", render_landing_page(product_name, product_slug, search_content, tier_structure))
+    _write(out / "frontend" / "app" / "pricing" / "page.tsx", render_pricing_page(product_name, search_content, tier_structure))
+    _write(out / "frontend" / "app" / "faq" / "page.tsx", render_faq_page(product_name, search_content))
+    _write(out / "frontend" / "app" / search_content["comparison_slug"] / "page.tsx", render_comparison_page(product_name, search_content))
+    _write(out / "frontend" / "app" / search_content["definitive_slug"] / "page.tsx", render_definitive_page(product_name, search_content))
+    _write(out / "frontend" / "app" / "sitemap.ts", render_sitemap_ts(product_slug, search_content))
+    _write(out / "frontend" / "app" / "robots.ts", render_robots_ts(product_slug))
 
     return out

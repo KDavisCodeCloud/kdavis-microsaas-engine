@@ -26,29 +26,62 @@ READY_OPPORTUNITY = {
     "mcp_integration_surface": "Reads invoice discrepancies, writes dispute drafts.",
 }
 
+# Canned Search Visibility Layer content, clearing every non-negotiable
+# floor (10+ FAQ pairs, 10 search queries, 1000+ word definitive answer)
+# -- injected as a fake `llm` so these tests never make a real Anthropic
+# call. generate_scaffold's own content-generation logic (query grounding,
+# floor enforcement) is covered separately in
+# tests/test_search_visibility_generator.py.
+_FAKE_SEARCH_CONTENT = {
+    "meta_title": "Freight Audit Copilot — Catch Billing Errors Automatically",
+    "meta_description": "Freight Audit Copilot automatically catches freight billing discrepancies your carrier's invoices hide, so you stop overpaying every month.",
+    "top_10_queries": [f"freight audit query {i}" for i in range(10)],
+    "hero_headline": "Stop overpaying on freight invoices",
+    "hero_subheadline": "Automatic discrepancy detection for every carrier invoice.",
+    "features": [
+        {"title": "Automatic matching", "description": "Every invoice line matched against your rate contract."},
+        {"title": "Dispute drafts", "description": "One-click dispute letters for every discrepancy found."},
+        {"title": "Weekly digest", "description": "A clear summary of what was caught and recovered."},
+    ],
+    "faq": [{"question": f"Question {i}?", "answer": f"Answer {i}."} for i in range(10)],
+    "definitive_question": "How do you catch freight billing errors automatically?",
+    "definitive_answer_long": "Freight billing errors happen constantly. " * 250,
+    "geo_headline": "Best tool for catching freight invoice errors automatically",
+    "comparison_points": [
+        {"feature": "Automatic dispute drafts", "us": "Included", "them": "Manual only"},
+        {"feature": "Per-invoice matching", "us": "Every invoice", "them": "Spot checks only"},
+    ],
+    "author_attribution": "Freight Audit Copilot",
+    "trial_cta_text": "Start Free Trial",
+}
+
+
+def _fake_llm(system: str, user: str, max_tokens: int = 8000) -> str:
+    return "Some narration.\n\n" + json.dumps(_FAKE_SEARCH_CONTENT)
+
 
 def test_refuses_non_ready_opportunity(fake_db, tmp_path):
     fake_db.responses["opportunity_pipeline"] = [{**READY_OPPORTUNITY, "status": "validated"}]
     with pytest.raises(ValueError, match="not READY_TO_BUILD"):
-        generate_scaffold("opp-1", tmp_path, supabase_client=fake_db)
+        generate_scaffold("opp-1", tmp_path, supabase_client=fake_db, llm=_fake_llm)
 
 
 def test_refuses_missing_opportunity(fake_db, tmp_path):
     fake_db.responses["opportunity_pipeline"] = []
     with pytest.raises(ValueError, match="No opportunity_pipeline row"):
-        generate_scaffold("opp-1", tmp_path, supabase_client=fake_db)
+        generate_scaffold("opp-1", tmp_path, supabase_client=fake_db, llm=_fake_llm)
 
 
 def test_refuses_overwriting_existing_output(fake_db, tmp_path):
     fake_db.responses["opportunity_pipeline"] = [READY_OPPORTUNITY]
     (tmp_path / "freight-audit-copilot").mkdir()
     with pytest.raises(FileExistsError):
-        generate_scaffold("opp-1", tmp_path, supabase_client=fake_db)
+        generate_scaffold("opp-1", tmp_path, supabase_client=fake_db, llm=_fake_llm)
 
 
 def test_generates_expected_file_tree(fake_db, tmp_path):
     fake_db.responses["opportunity_pipeline"] = [READY_OPPORTUNITY]
-    out = generate_scaffold("opp-1", tmp_path, supabase_client=fake_db)
+    out = generate_scaffold("opp-1", tmp_path, supabase_client=fake_db, llm=_fake_llm)
 
     assert out == tmp_path / "freight-audit-copilot"
     expected = [
@@ -65,6 +98,11 @@ def test_generates_expected_file_tree(fake_db, tmp_path):
         "frontend/components/UsageTracker.tsx",
         "frontend/tsconfig.json", "frontend/next.config.ts", "frontend/postcss.config.js",
         "frontend/tailwind.config.ts", "frontend/app/auth/callback/route.ts", "frontend/app/page.tsx",
+        # Search Visibility Layer — public marketing site (2026-07-20)
+        "frontend/app/pricing/page.tsx", "frontend/app/faq/page.tsx",
+        "frontend/app/vs-the-incumbent-tool-in-this-space/page.tsx",
+        "frontend/app/how-do-you-catch-freight-billing-errors-automatically/page.tsx",
+        "frontend/app/sitemap.ts", "frontend/app/robots.ts",
     ]
     for rel in expected:
         assert (out / rel).exists(), f"missing {rel}"
@@ -75,7 +113,7 @@ def test_tailwind_config_uses_global_tokens_not_mse_dashboard_palette(fake_db, t
     CLAUDE.md explicitly bans as a font for shipped products (MSE's
     dashboard is an internal tool, exempt; shipped products are not)."""
     fake_db.responses["opportunity_pipeline"] = [READY_OPPORTUNITY]
-    out = generate_scaffold("opp-1", tmp_path, supabase_client=fake_db)
+    out = generate_scaffold("opp-1", tmp_path, supabase_client=fake_db, llm=_fake_llm)
 
     config = (out / "frontend/tailwind.config.ts").read_text()
     assert "Inter" not in config
@@ -89,7 +127,7 @@ def test_copied_files_match_source_exactly(fake_db, tmp_path):
     that they're already proven — a copy that silently diverges defeats
     that entirely."""
     fake_db.responses["opportunity_pipeline"] = [READY_OPPORTUNITY]
-    out = generate_scaffold("opp-1", tmp_path, supabase_client=fake_db)
+    out = generate_scaffold("opp-1", tmp_path, supabase_client=fake_db, llm=_fake_llm)
 
     repo_root = Path(__file__).resolve().parent.parent
     assert (out / "core/sanitization.py").read_text() == (repo_root / "core/sanitization.py").read_text()
@@ -101,7 +139,7 @@ def test_generated_backend_actually_boots(fake_db, tmp_path):
     repo's own module tree on sys.path and boot its FastAPI app for real,
     the same way test_stripe_webhook.py etc. boot this repo's app."""
     fake_db.responses["opportunity_pipeline"] = [READY_OPPORTUNITY]
-    out = generate_scaffold("opp-1", tmp_path, supabase_client=fake_db)
+    out = generate_scaffold("opp-1", tmp_path, supabase_client=fake_db, llm=_fake_llm)
 
     sys.path.insert(0, str(out))
     try:
@@ -138,7 +176,7 @@ def test_generated_backend_actually_boots(fake_db, tmp_path):
 
 def test_migration_sql_has_rls_on_every_table(fake_db, tmp_path):
     fake_db.responses["opportunity_pipeline"] = [READY_OPPORTUNITY]
-    out = generate_scaffold("opp-1", tmp_path, supabase_client=fake_db)
+    out = generate_scaffold("opp-1", tmp_path, supabase_client=fake_db, llm=_fake_llm)
 
     sql = (out / "supabase/migrations/001_core_schema.sql").read_text()
     tables = ["tenants", "usage_events", "milestones", "retention_sequences", "weekly_digest_log"]
@@ -149,7 +187,7 @@ def test_migration_sql_has_rls_on_every_table(fake_db, tmp_path):
 
 def test_frontend_package_json_is_valid_and_pins_node_22(fake_db, tmp_path):
     fake_db.responses["opportunity_pipeline"] = [READY_OPPORTUNITY]
-    out = generate_scaffold("opp-1", tmp_path, supabase_client=fake_db)
+    out = generate_scaffold("opp-1", tmp_path, supabase_client=fake_db, llm=_fake_llm)
 
     pkg = json.loads((out / "frontend/package.json").read_text())
     assert pkg["engines"]["node"] == "22.x"
