@@ -179,6 +179,18 @@ same goal without either problem.
   place) — a real, separate feature, deferred as a fast-follow rather than
   folded into an already-large pass.
 
+**Real BUILD-finding confidence batch (2026-07-21), 5 fresh anchor tools, 15 submissions — full Haiku pipeline (Dispatch + Verdict), not a hand-crafted or re-tested case:**
+- **HubSpot Sales Hub (3 submissions):** all rejected on math — reachable segments too small (148-2,000 accounts), net MRR topping out at $82-283/mo against $4,000-4,500 floors.
+- **Calendly (3 submissions):** 1 BUILD (below), 2 rejected on math.
+- **Square/Toast/Clover POS (3 submissions):** all rejected — one gap-verification catch (Square shipped bar-tab preauth March 2025, the claimed gap no longer exists), one evidence-staleness catch (cited pain point traced to a single 2017 review, not current), one real but too-small service-business opportunity (Clover cancellation help, $3,168 net MRR vs $4,500 floor).
+- **Mailchimp (3 submissions):** all rejected — one gap-verification catch (segmentation "5-condition limit" contradicted by current docs, Standard plan has unlimited), two math shortfalls. One (CRM augmentation layer) is a second live confirmation of the CONDITIONAL floor-check fix: model claimed `CONDITIONAL`, net_mrr_floor was $765 against a $4,000 floor with `timeline_classification: PASS` (not `CONDITIONAL`) — code correctly demoted to rejected before it could reach the DB.
+- **Zendesk (3 submissions):** all rejected on math — reachable segments overclaimed (86 submitted vs. 1,200 independently verified; 18-50 accounts), net MRR topping out at $187-936/mo.
+
+**The one BUILD — genuinely independent, not inherited from the earlier Sonnet-found opportunity:**
+Calendly recurring/series booking add-on ("one-click recurring appointment series booking for service professionals") — `existing_tool`: Calendly ($12-20/seat/mo, 4.7 stars, 2,641 reviews), `gap_type`: FEATURE_GAP (no native recurring booking), **net_mrr_floor $12,480 vs. $4,000 floor (3x margin)**, confidence **87/100**, timeline **STRONG, floor clears Month 1**. Passed the code-level floor re-verification (`status: READY_TO_BUILD`), not just the model's own claim.
+
+**Assessment:** 1/15 (6.7%) reached BUILD/CONDITIONAL — still below the pipeline health target of 20%+ across a rolling 10, but a real, high-margin, independently-found BUILD is a materially stronger confidence signal than the ambiguous Shopify re-test result. Combined with the Shopify case (2 BUILD-family results total across the full Haiku era so far, one clean, one ambiguous), there's real but not yet abundant evidence Haiku can find builds on its own, not just correctly reject. Worth running further batches to build a fuller track record rather than treating this one result as fully conclusive either way.
+
 **Haiku regression results (live, real cases, not canned) — genuinely
 mixed, reported honestly rather than rounded up to a clean pass:**
 - Wave Invoice Escalation → DO_NOT_BUILD, matches expected. Clean.
