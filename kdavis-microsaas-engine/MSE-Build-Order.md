@@ -138,6 +138,65 @@ After 22 real v2.0-v4.0 evaluations (19 SATURATED, 2 PARTIAL both failing MRR ma
 
 Other 5 submissions this batch: 1 rejected on PLATFORM_GAP-not-confirmed (Linnworks — HyperStock/WarehousePlus already fill it, free); 3 rejected on math alone (ShipStation, QuickBooks Online, FreshBooks — all had a real, confirmed gap but the reachable segment was too small once independently verified); 1 rejected on the FEATURE_GAP verification catching a stale premise again (Xero — shipped native W-9 collection August 2024). **Note: giving Dispatch web search reduced but did not eliminate the stale-premise failure mode** — 1/6 this batch vs. 4/4 the prior two batches, real improvement but not perfect; Verdict's independent re-verification remains the actual safety net.
 
+## Cost optimization pass (2026-07-19)
+
+Kelvin: "costs are way too high" — pasted a 6-phase cost-reduction spec.
+**Phase 1's diagnosis didn't match this codebase** — every Dispatch/Verdict
+call was already a single opportunity with a fresh `messages` list, no
+conversation history or batch accumulation ever carried between calls
+(confirmed by reading the actual code before touching anything). The real
+drivers: no prompt caching on the large, mostly-static system prompts;
+Sonnet on both agents; no output token cap. Skipped Phase 2 (Gemini Flash
+for Dispatch) after user confirmation — needs a GEMINI_API_KEY only Kelvin
+can provision, and adds an unapproved vendor; Haiku + caching covers the
+same goal without either problem.
+
+**Shipped (`f20faf0`, `053e417`):**
+- `core/llm_router.py`: `cache_control: ephemeral` on the system prompt for
+  both `analyze()` and `analyze_with_web_search()`; added `model=` param
+  (default Sonnet, unaffected for brief_generator/naming/digest_generator/
+  ceo routes); token-usage + estimated-cost logging; `max_tokens` reduced
+  16000→8000 (Verdict) / →10000 (Dispatch) — not down to a guessed
+  2000-3000, since 8192 already truncated a real Verdict call mid-
+  narration once this session.
+- Both agents now call Haiku instead of Sonnet.
+- Confidence score system added to Verdict (4 components, 0-25 each,
+  override rule: <45 forces DO_NOT_BUILD, 45-59 downgrades BUILD to
+  CONDITIONAL, never upgrades), enforced again at the code level.
+- **Real bug caught in regression testing**: the SCORE_INTERPRETATION
+  reference table's verdict-sounding labels ("60-74: CONDITIONAL") were
+  being read by the model as a second way to SET the verdict, contradicting
+  Step 3's own finding on a real case (floor_cleared=true,
+  timeline=STRONG, but verdict written as CONDITIONAL because confidence
+  landed at 69). Fixed (`053e417`) — SCORE_INTERPRETATION is now explicit
+  reference-only commentary; only the two stated override rules may touch
+  `verdict`.
+- MSE's own dashboard (`frontend/app/pipeline/page.tsx`) — confidence
+  meter with 4-component breakdown, color-coded to the spec's bands, 75%
+  threshold marker, Approve button soft-disabled below 75% with a warning.
+  TypeScript compiles clean. **Not built yet**: the "Ask More" follow-up
+  flow (re-query Verdict with a specific question, update the score in
+  place) — a real, separate feature, deferred as a fast-follow rather than
+  folded into an already-large pass.
+
+**Haiku regression results (live, real cases, not canned) — genuinely
+mixed, reported honestly rather than rounded up to a clean pass:**
+- Wave Invoice Escalation → DO_NOT_BUILD, matches expected. Clean.
+- Clio Trust Balance Alerts → DO_NOT_BUILD, matches expected. Clean.
+- Shopify Inventory Forecasting → expected BUILD. First Haiku pass hit the
+  SCORE_INTERPRETATION bug above (wrongly CONDITIONAL). Re-run after the
+  fix: Haiku's own live search this time found the specific claimed
+  feature ("ad-spend-aware reorder triggers") already exists in Inventory
+  Planner's Standard tier, and surfaced two specific budget competitors
+  (Forthcast $19.99/mo, Assisty $19/mo) not found in the original Sonnet
+  pass — a well-reasoned, specifically-cited DO_NOT_BUILD, not a
+  hallucination. Genuinely ambiguous whether this is Haiku doing MORE
+  thorough research than the original Sonnet pass, or ordinary run-to-run
+  variance in live web search (which this whole project has shown
+  repeatedly, independent of model). Does not cleanly confirm Haiku
+  matches Sonnet's research quality on this specific case — worth
+  watching on the next few real batches rather than treating as settled.
+
 **v5.0 calibration status (supersedes the old v2.0-v4.0 four-state CLEAR/PARTIAL/SATURATED/RESUBMIT checklist, which no longer applies under the retired competitor-absence gate):**
 - **BUILD → READY_TO_BUILD:** ✅ confirmed (above)
 - **CONDITIONAL → validated (floor clears at month 8-12, not 1-7):** ❌ not yet confirmed

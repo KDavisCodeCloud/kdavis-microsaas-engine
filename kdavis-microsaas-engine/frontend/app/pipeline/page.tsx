@@ -24,6 +24,87 @@ const DENSITY_COLOR: Record<string, string> = {
   red: "#e05d5d",
 };
 
+// Verdict v5.0 confidence score (2026-07-19) — lives inside verdict_v2_output,
+// same storage pattern as every other v3-v5 field (no dedicated column).
+// Distinct from the older top-level build_confidence_score, which is the
+// upstream Dispatch submission's own self-reported score, not Verdict's
+// independently-verified one.
+interface ConfidenceBreakdown {
+  pain_evidence?: number;
+  gap_verified?: number;
+  math_reliability?: number;
+  gtm_realism?: number;
+}
+
+const CONFIDENCE_BANDS = [
+  { min: 90, color: "#3fd17a", label: "STRONG BUILD" },
+  { min: 75, color: "#5a96ff", label: "BUILD" },
+  { min: 60, color: "#f5a623", label: "CONDITIONAL" },
+  { min: 45, color: "#ff8c00", label: "WEAK" },
+  { min: 0, color: "#ff4444", label: "DO NOT BUILD" },
+];
+
+function confidenceBand(score: number) {
+  return CONFIDENCE_BANDS.find((b) => score >= b.min) ?? CONFIDENCE_BANDS[CONFIDENCE_BANDS.length - 1];
+}
+
+const BREAKDOWN_LABELS: Record<string, string> = {
+  pain_evidence: "Pain Evidence",
+  gap_verified: "Gap Verified",
+  math_reliability: "Math Reliability",
+  gtm_realism: "GTM Realism",
+};
+
+function ConfidenceMeter({ score, breakdown }: { score: number; breakdown: ConfidenceBreakdown }) {
+  const band = confidenceBand(score);
+  return (
+    <div className="rounded-[8px] p-3.5" style={{ backgroundColor: "#10151b", border: "1px solid #1c222b" }}>
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-[10px] font-mono uppercase" style={{ color: "#5b6673" }}>Verdict Confidence</p>
+        <span className="text-[13px] font-bold font-mono" style={{ color: band.color }}>{score}%</span>
+      </div>
+
+      {/* Main bar with 75% build-threshold marker */}
+      <div className="relative w-full rounded-full mb-1.5" style={{ height: "6px", backgroundColor: "#1c222b" }}>
+        <div
+          className="h-full rounded-full transition-all"
+          style={{ width: `${score}%`, backgroundColor: band.color }}
+        />
+        <div
+          className="absolute top-0 bottom-0 w-px"
+          style={{ left: "75%", backgroundColor: "#3a4250" }}
+          title="75% build threshold"
+        />
+      </div>
+      <p className="text-[11px] font-mono font-semibold mb-3" style={{ color: band.color }}>{band.label}</p>
+
+      {/* Component breakdown */}
+      <div className="space-y-1.5">
+        {Object.entries(breakdown).map(([key, value]) => (
+          <div key={key} className="flex items-center gap-2">
+            <span className="text-[10px] font-mono w-28 shrink-0" style={{ color: "#5b6673" }}>
+              {BREAKDOWN_LABELS[key] ?? key}
+            </span>
+            <div className="flex-1 rounded-full" style={{ height: "4px", backgroundColor: "#1c222b" }}>
+              <div
+                className="h-full rounded-full"
+                style={{ width: `${((value ?? 0) / 25) * 100}%`, backgroundColor: band.color }}
+              />
+            </div>
+            <span className="text-[10px] font-mono w-10 text-right shrink-0" style={{ color: "#5b6673" }}>{value ?? 0}/25</span>
+          </div>
+        ))}
+      </div>
+
+      {score < 75 && (
+        <p className="text-[11px] mt-3" style={{ color: "#ff8c00" }}>
+          ⚠ Score below the 75% build threshold. Review the reasoning above before approving.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export default function PipelinePage() {
   const supabase = createClient();
   const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
@@ -167,7 +248,12 @@ export default function PipelinePage() {
                   : `No ${filter} opportunities.`}
               </p>
             ) : (
-              visible.map((opp, i) => (
+              visible.map((opp, i) => {
+                const confidenceScore = typeof opp.verdict_v2_output?.confidence_score === "number"
+                  ? (opp.verdict_v2_output.confidence_score as number)
+                  : null;
+                const belowConfidenceThreshold = confidenceScore !== null && confidenceScore < 75;
+                return (
                 <div key={opp.id}>
                   <button
                     onClick={() => setExpanded(expanded === opp.id ? null : opp.id)}
@@ -221,6 +307,13 @@ export default function PipelinePage() {
                         </div>
                       )}
 
+                      {typeof opp.verdict_v2_output?.confidence_score === "number" && (
+                        <ConfidenceMeter
+                          score={opp.verdict_v2_output.confidence_score as number}
+                          breakdown={(opp.verdict_v2_output.confidence_breakdown as ConfidenceBreakdown) ?? {}}
+                        />
+                      )}
+
                       <p className="text-[10px] font-mono" style={{ color: "#3a4250" }}>Added {new Date(opp.created_at).toLocaleDateString("en-US", { timeZone: "America/Phoenix" })}</p>
 
                       <div className="rounded-[8px] p-3.5 space-y-2.5" style={{ backgroundColor: "#10151b", border: "1px solid #1c222b" }}>
@@ -253,9 +346,15 @@ export default function PipelinePage() {
                         <div className="flex gap-2">
                           <button
                             onClick={() => submitReview(opp.id, "approved")}
-                            disabled={reviewState[opp.id] === "submitting"}
+                            disabled={reviewState[opp.id] === "submitting" || belowConfidenceThreshold}
+                            title={belowConfidenceThreshold ? "Confidence score below 75% — review the reasoning above before approving" : undefined}
                             className="px-4 py-2 rounded-[8px] text-[12px] font-bold"
-                            style={{ backgroundColor: "#6fce8f", color: "#0b0e13", opacity: reviewState[opp.id] === "submitting" ? 0.5 : 1 }}
+                            style={{
+                              backgroundColor: "#6fce8f",
+                              color: "#0b0e13",
+                              opacity: reviewState[opp.id] === "submitting" || belowConfidenceThreshold ? 0.5 : 1,
+                              cursor: belowConfidenceThreshold ? "not-allowed" : "pointer",
+                            }}
                           >
                             Approve → Build Queue
                           </button>
@@ -327,7 +426,7 @@ export default function PipelinePage() {
                     </div>
                   )}
                 </div>
-              ))
+              );})
             )}
           </SectionCard>
 
