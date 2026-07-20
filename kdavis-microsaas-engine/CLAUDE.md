@@ -31,7 +31,7 @@ Kelvin architects and designs. Claude Code executes. Kelvin validates all output
 - **Payments:** Stripe — dedicated MSE account only, never shared with other products
 - **Email:** Resend
 - **Languages:** Python, TypeScript, Bash
-- **Model routing:** Haiku for high-volume scraping, Sonnet for analysis — do not swap
+- **Model routing:** Haiku for high-volume scraping AND for the Dispatch/Verdict research swarm (`agents/orchestrator`, `agents/aggregator` — switched from Sonnet 2026-07-19 as a cost-optimization pass, verified via live regression tests against known cases). Sonnet remains the default everywhere else (brief generation, naming, retention digest, CEO dashboard routes) via `core/llm_router.py`'s `model=` parameter, which defaults to Sonnet — only the swarm agents pass `model=HAIKU` explicitly. Do not change either assignment without new regression testing.
 
 ---
 
@@ -44,7 +44,7 @@ Kelvin architects and designs. Claude Code executes. Kelvin validates all output
 5. DataSanitizationShield runs before any data embedding
 6. Hard $4K MRR floor enforced at DB constraint level on every product this factory ships
 7. 6 retention loops ship before any feature work on any product
-8. Haiku for scraping, Sonnet for analysis — do not swap models
+8. Haiku for scraping and for the Dispatch/Verdict swarm; Sonnet is the default everywhere else — see Model Routing above, do not swap without new regression testing
 
 ---
 
@@ -203,13 +203,17 @@ Responsibilities:
 
 ---
 
-## RULE: VERDICT AGENT v3.0 (2026-07-18, supersedes v2.0)
+## RULE: VERDICT AGENT v5.0 (2026-07-19, complete replacement of v2.0-v4.0)
 
-The aggregator (`agents/aggregator/agent.py`) is the Verdict gate — full rules in `agents/aggregator/prompt.md`. It is no longer a deterministic Python gate-checker; it genuinely researches every opportunity live via Sonnet + Anthropic's server-side `web_search` tool (`core.llm_router.analyze_with_web_search`, requires `anthropic>=0.40`). Competitor discovery is a HARD GATE before any MRR math runs — the agent must independently verify competitors exist or don't via live search, never assert either from memory.
+The aggregator (`agents/aggregator/agent.py`) is the Verdict gate — full rules in `agents/aggregator/prompt.md`. It is not a deterministic Python gate-checker; it genuinely researches every opportunity live via Haiku + Anthropic's server-side `web_search` tool (`core.llm_router.analyze_with_web_search`, requires `anthropic>=0.40`; switched from Sonnet 2026-07-19, see Model Routing above).
 
-**v2.0 → v3.0, 2026-07-18:** v2.0 ran 6 real opportunities and got 6 straight rejections (0 BUILD, 0 CONDITIONAL, 0 RESUBMIT) — the flat $4K floor and binary competitor gate (any competitor at all = death) were too tight. v3.0 replaces the binary CLEAR/EXISTS competitor check with a **three-state gate**: `CLEAR` (no competitor), `PARTIAL` (a competitor exists but only serves users already on some other broader platform — a genuine standalone segment can still BUILD with an approved differentiation thesis), `SATURATED` (a real standalone competitor — still a hard halt). It also replaces the flat $4,000 floor with a **price-adjusted floor**: $19-29/mo → $3,500, $39-59/mo → $4,000, $69-99/mo → $4,500, $100+/mo → $5,000 — computed independently in code (`agents/aggregator/agent.py`'s `_price_adjusted_floor`) from the model's own `proposed_price`, never trusted from the model's self-report alone, same principle as the $4K floor check it replaces. Also adds a `RESUBMIT` verdict (already existed in the DB as `needs_correction` status) and a required three-scenario MRR breakdown (floor/base/stretch) plus a time-to-floor classification.
+**Why v3.0/v4.0 were retired:** 22 real opportunities across v2.0-v4.0 (19 SATURATED, 2 PARTIAL that both failed on MRR math, 0 CLEAR, 0 genuine RESUBMIT) showed the competitor-absence gate (CLEAR/PARTIAL/SATURATED) killed an idea the instant ANY competitor existed, regardless of whether that competitor was serving its users well. v5.0 inverts the model: Dispatch (`agents/orchestrator/agent.py`) anchors every idea on a NAMED existing tool people are already using and complaining about (G2/Capterra/Reddit/forum reviews, 3+ reviews citing the same specific gap), and Verdict asks only whether that tool is failing enough of its users to build a $4K MRR business around the specific gap. There are only three legal verdicts now — `BUILD | CONDITIONAL | DO_NOT_BUILD` — `SATURATED` and `RESUBMIT` are retired entirely; a malformed submission is `DO_NOT_BUILD` with the missing element named as the reason.
 
-**v3.0's MRR figure lives nested** at `verdict_v2_output.scenarios.floor.final_mrr_floor`, not top-level like v2.0 — `node_write_pipeline` must read it from there (falls back to the legacy top-level key, then to the upstream vertical agent's figure, in that order). Getting this path wrong silently falls through to the unverified upstream number on every result — found and fixed same day as v3.0 shipped.
+**Three-step evaluation:** (1) is the pain still real after the existing tool launched, (2) why is the existing tool failing this ICP — `gap_type` is exactly one of `PRICE_GAP | PLATFORM_GAP | FEATURE_GAP | COMPLEXITY_GAP | SEGMENT_GAP`, (3) does the math clear the price-adjusted floor. `CONDITIONAL` differs from `BUILD` only in timing (floor clears month 8-12 vs. 1-7) — both require the floor to genuinely clear, never a "might clear later" escape hatch. The price-adjusted floor table itself is unchanged since v3.0: $19-29/mo → $3,500, $39-59/mo → $4,000, $69-99/mo → $4,500, $100+/mo → $5,000 — computed independently in code (`agents/aggregator/agent.py`'s `_price_adjusted_floor`) from the model's own `proposed_price`, never trusted from the model's self-report alone.
+
+**Confidence score (added 2026-07-19, same pass as the Haiku switch):** every Verdict output also includes a 0-100 confidence score across 4 components (pain evidence, gap verification, math reliability, GTM realism). A score below 45 forces `DO_NOT_BUILD` regardless of the three-step verdict; 45-59 downgrades a `BUILD` to `CONDITIONAL`; the score can only ever downgrade, never upgrade, and is enforced again at the code level, never trusted from the model's self-report alone — same principle as the floor check.
+
+**v5.0's MRR figure is a flat `verdict_v2_output.net_mrr_floor`** (no more three-scenario nesting from v3.0/v4.0) — `node_write_pipeline` reads it from there first, falling back through the older nested `scenarios.floor.final_mrr_floor` shape and then the legacy top-level key, in that order, in case an older-shaped response ever comes through.
 
 `opportunity_pipeline.human_review_status`/`human_review_comment`/`human_reviewed_by`/`human_reviewed_at` are Kelvin's own approve/reject/comment decision from the dashboard — kept deliberately separate from the agent's own `status`/`verdict_v2_output`. Comparing the two is the tuning signal for future prompt revisions. Do not conflate them into one field.
 

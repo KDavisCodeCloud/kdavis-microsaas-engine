@@ -13,6 +13,8 @@ os.environ.setdefault("RESEND_API_KEY", "placeholder-resend-key")
 os.environ.setdefault("STRIPE_SECRET_KEY", "sk_test_placeholder")
 os.environ.setdefault("STRIPE_WEBHOOK_SECRET", "whsec_test_placeholder")
 os.environ.setdefault("MARKETING_API_KEY", "test-marketing-api-key")
+os.environ.setdefault("RAILWAY_TOKEN", "test-railway-token")
+os.environ.setdefault("VERCEL_TOKEN", "test-vercel-token")
 os.environ.setdefault("ALLOWED_ORIGINS", "http://localhost:3000")
 os.environ.setdefault("APP_ENV", "test")
 
