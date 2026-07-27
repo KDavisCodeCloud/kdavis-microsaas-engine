@@ -22,10 +22,15 @@ final JSON object; the contract instructs it to end with one consolidated
 object covering every step's key fields.
 """
 import json
+import logging
 from pathlib import Path
 from typing import Callable, Optional
 
 from core.llm_router import HAIKU, analyze_with_web_search
+from rag.retriever import _retrieve_similar_outcomes_sync, format_rag_context_block
+from rag.embedder import embed_and_insert
+
+log = logging.getLogger(__name__)
 
 AGENT_ID = "aggregator-verdict-v5"
 
@@ -55,6 +60,13 @@ _PRICE_TIER_FLOORS = [
 ]
 _DEFAULT_FLOOR = 5000  # >= $100/mo, and the fallback when price is missing/None
 
+# Absolute hard MRR floor (2026-07-20, Kelvin's rule) — the lowest tier
+# floor in _PRICE_TIER_FLOORS above, reused as a universal minimum: nothing
+# in this factory is worth a dashboard row (or a full Verdict web-search
+# call) below what even the cheapest price band would require. See
+# _prefilter_reject and _evaluate's dashboard-visibility gate below.
+_HARD_MRR_FLOOR = 3500
+
 
 def _price_adjusted_floor(proposed_price: Optional[float]) -> int:
     if not proposed_price:
@@ -77,14 +89,92 @@ _VERDICT_TO_STATUS = {
 }
 
 
+def _prefilter_reject(opp: dict) -> Optional[dict]:
+    """
+    Cheap gate before spending a full Verdict web-search call (2026-07-20,
+    Kelvin's rule — tokens were being wasted on obvious misses). Dispatch's
+    own self-reported conservative_mrr_potential is the most favorable
+    number this idea will ever have — Verdict only ever independently
+    re-derives the same or a lower real number, never a higher one (see
+    this module's own header docs). If even Dispatch's own optimistic
+    estimate can't clear the $3,500 absolute floor, it is not worth a full
+    Verdict run. Returns None (no prefilter hit) if the submission should
+    proceed to the real evaluation.
+    """
+    try:
+        submitted_mrr = float(opp.get("conservative_mrr_potential") or 0)
+    except (TypeError, ValueError):
+        submitted_mrr = 0.0
+    if submitted_mrr >= _HARD_MRR_FLOOR:
+        return None
+
+    rejection_reason = (
+        f"Pre-filter: Dispatch's own submitted conservative_mrr_potential "
+        f"(${submitted_mrr:,.0f}) is below the ${_HARD_MRR_FLOOR:,.0f} absolute floor — "
+        f"killed before spending a Verdict web-search call."
+    )
+    # RAG write for prefilter rejections too — "all verdicts" per spec, not
+    # just ones that reached a real Verdict web-search call. Same
+    # non-blocking try/except as _evaluate's own RAG write.
+    try:
+        embed_and_insert({
+            "product_name":       opp.get("solution_concept", ""),
+            "vertical":           opp.get("vertical", ""),
+            "verdict":            "DO_NOT_BUILD",
+            "confidence_score":   None,
+            "projected_mrr_floor": int(submitted_mrr),
+            "primary_risk_flag":  "MRR floor, prefiltered",
+            "competitor_signals": opp.get("existing_tool"),
+            "pain_themes":        [opp.get("pain_point", "")] if opp.get("pain_point") else [],
+            "rationale":          rejection_reason,
+        })
+    except Exception as e:
+        log.warning("[%s] RAG outcome write failed on prefilter reject (non-blocking): %s", AGENT_ID, e)
+
+    return {
+        "opportunity_id":    opp.get("opportunity_id"),
+        "vertical":          opp.get("vertical", ""),
+        "solution_concept":  opp.get("solution_concept", ""),
+        "status":            "killed_below_floor",
+        "rejection_reason":  rejection_reason,
+        "verdict_v2_output": None,
+    }
+
+
 def run(raw_findings: list[dict], llm: Callable[..., str] = _default_llm) -> list[dict]:
     """Evaluate every opportunity card through the full v5.0 research pipeline."""
-    return [_evaluate(opp, llm) for opp in raw_findings]
+    return [_prefilter_reject(opp) or _evaluate(opp, llm) for opp in raw_findings]
 
 
 def _evaluate(opp: dict, llm: Callable[..., str]) -> dict:
+    # RAG retrieval is a soft input, never a gate (2026-07-27) -- any
+    # failure here (no embedding key configured, DB error, etc.) falls
+    # through to rag_context = "" and Verdict scores exactly as it did
+    # before this existed. Never allowed to raise into the main eval path.
+    try:
+        rag_query = {
+            "product_name": opp.get("solution_concept", ""),
+            "vertical": opp.get("vertical", ""),
+            "pain_themes": [opp.get("pain_point", "")] if opp.get("pain_point") else [],
+            "competitor_names": [c.get("name") for c in (opp.get("competitor_examples") or []) if c.get("name")],
+        }
+        similar = _retrieve_similar_outcomes_sync(rag_query, top_k=5)
+    except Exception as e:
+        log.warning("[%s] RAG retrieval failed, continuing without it: %s", AGENT_ID, e)
+        similar = []
+    rag_block = format_rag_context_block(similar)
+
+    # Spec requires the RAG block appear BEFORE Verdict's scoring
+    # instructions, not after -- prepended to the system prompt, not the
+    # user input. Note: this varies the system prompt per call whenever
+    # rag_block is non-empty, which defeats analyze_with_web_search's
+    # prompt-caching optimization (cache_control: ephemeral) for that call
+    # specifically -- an accepted, deliberate cost tradeoff for surfacing
+    # real factory history, not an oversight.
+    system_prompt = f"{rag_block}\n\n{SYSTEM_PROMPT}" if rag_block else SYSTEM_PROMPT
+
     user_input = json.dumps(opp, default=str)
-    raw_response = llm(SYSTEM_PROMPT, user_input)
+    raw_response = llm(system_prompt, user_input)
     result = _extract_trailing_json(raw_response)
 
     verdict = result.get("verdict", "DO_NOT_BUILD")
@@ -123,32 +213,99 @@ def _evaluate(opp: dict, llm: Callable[..., str]) -> dict:
             f"only the timing differs."
         )
 
-    # Confidence-score override (added 2026-07-19) — same "never trust the
-    # model's self-report alone" principle as the floor check above. The
-    # score can only ever downgrade a verdict, never upgrade one: a
-    # DO_NOT_BUILD from Steps 1-3 stays DO_NOT_BUILD regardless of score,
-    # so this only ever runs when status is still READY_TO_BUILD/validated
-    # at this point.
     confidence_score = result.get("confidence_score")
-    if status in ("READY_TO_BUILD", "validated") and confidence_score is not None:
-        if confidence_score < 45:
-            status = "rejected"
-            result["reason"] = (
-                f"Confidence override: score {confidence_score}/100 is below the 45 "
-                f"floor — verdict={verdict} demoted to DO_NOT_BUILD regardless of what "
-                f"Steps 1-3 concluded."
-            )
-        elif confidence_score < 60 and status == "READY_TO_BUILD":
-            status = "validated"
-            result["confidence_downgrade_note"] = (
-                f"Downgraded BUILD to CONDITIONAL — confidence score {confidence_score}/100 "
-                f"is below 60."
-            )
 
-    if status == "rejected":
+    # Dashboard-visibility gate (2026-07-20, Kelvin's rule — obvious misses
+    # were reaching the dashboard and wasting review time). Whatever the
+    # model's own verdict/floor-check/confidence landed on above, only
+    # three states are allowed to reach opportunity_pipeline from here:
+    # READY_TO_BUILD, validated (CONDITIONAL), or watch. This replaces the
+    # old confidence-override thresholds (hard-reject <45, downgrade <60)
+    # entirely — final_floor and confidence_score are now the only two
+    # numbers that decide status, purely at the code level, same "never
+    # trust the model's self-report alone" principle as the floor check
+    # above, just carried one step further than before.
+    #
+    # $3,500 is not a guessed number — it is _PRICE_TIER_FLOORS' own lowest
+    # tier floor (the cheapest price band this factory will ever build
+    # for), so "can this idea plausibly clear $3,500 under any realistic
+    # scenario" is already the most lenient bar anything in this system can
+    # be held to. Anything that fails even that is killed here — archived
+    # to opportunity_pipeline_rejections (by node_write_pipeline) for the
+    # tuning signal, never inserted into the live dashboard table.
+    #
+    # Anything that clears $3,500 must be shown, per Kelvin's "only 3
+    # states" rule — so a result that failed its own (possibly higher)
+    # price_adjusted_floor above, or scored below the CONDITIONAL
+    # confidence band, or came back DO_NOT_BUILD from the model itself for
+    # a qualitative reason, is not silently dropped; it becomes watch
+    # ("clears the money, but here's the specific risk to judge").
+    if final_floor < _HARD_MRR_FLOOR:
+        status = "killed_below_floor"
+        result["reason"] = (
+            f"Hard MRR gate: net_mrr_floor ${final_floor:,.0f} is below the absolute "
+            f"${_HARD_MRR_FLOOR:,.0f} floor under any realistic scenario — killed before "
+            f"reaching the dashboard, archived to the rejection log only."
+        )
+    # READY requires clearing THIS row's own price-tier floor (adjusted_floor,
+    # e.g. $5,000 for a $100+/mo idea) — not a flat $4,000. A flat check would
+    # wrongly pass a premium idea that only clears the cheapest tier's bar.
+    elif final_floor >= adjusted_floor and confidence_score is not None and confidence_score >= 75:
+        status = "READY_TO_BUILD"
+    # CONDITIONAL's $3,500-$4,000 band is deliberately the literal absolute
+    # range Kelvin specified, not this row's own adjusted_floor — it exists
+    # to flag inherently-cheap-tier ideas landing just under $4,000, not to
+    # give a premium-tier idea a pass for merely clearing the $3,500 floor.
+    elif (_HARD_MRR_FLOOR <= final_floor < 4000) or (
+        confidence_score is not None and 65 <= confidence_score <= 74
+    ):
+        status = "validated"
+        result["reason"] = result.get("reason") or (
+            f"CONDITIONAL: net_mrr_floor ${final_floor:,.0f} / confidence "
+            f"{confidence_score if confidence_score is not None else 'n/a'}/100 — in the "
+            f"judgment-call range, not a clean pass."
+        )
+    else:
+        status = "watch"
+        risk_note = result.get("reason") or (
+            f"verdict={verdict}" if verdict == "DO_NOT_BUILD" else "no reason returned"
+        )
+        result["reason"] = (
+            f"WATCH: clears the ${_HARD_MRR_FLOOR:,.0f} absolute floor (net_mrr_floor "
+            f"${final_floor:,.0f}) but doesn't clear its own criteria for READY or "
+            f"CONDITIONAL (confidence {confidence_score if confidence_score is not None else 'n/a'}/100). "
+            f"Specific risk: {risk_note}"
+        )
+
+    # watch surfaces its reason too — the whole point of the status is
+    # "clears the money, here's the specific risk to judge," so the risk
+    # must actually be visible on the dashboard, not just stored inside
+    # verdict_v2_output.
+    if status in ("killed_below_floor", "watch", "rejected"):
         rejection_reason = result.get("reason") or "Did not clear v5.0 gates — no reason returned."
     else:
         rejection_reason = None
+
+    # RAG write happens for EVERY verdict outcome (2026-07-27), not just
+    # BUILD/CONDITIONAL — a DO_NOT_BUILD is exactly as valuable a data point
+    # for future retrieval/calibration as a pass. Never allowed to raise or
+    # block this function's real return value; a failed write here costs
+    # this one row of future RAG context, nothing more.
+    rag_verdict = {"READY_TO_BUILD": "BUILD", "validated": "CONDITIONAL"}.get(status, "DO_NOT_BUILD")
+    try:
+        embed_and_insert({
+            "product_name":       result.get("solution_concept") or opp.get("solution_concept", ""),
+            "vertical":           result.get("vertical") or opp.get("vertical", ""),
+            "verdict":            rag_verdict,
+            "confidence_score":   confidence_score,
+            "projected_mrr_floor": int(final_floor) if final_floor is not None else None,
+            "primary_risk_flag":  rejection_reason or result.get("existing_tool", {}).get("name"),
+            "competitor_signals": result.get("existing_tool"),
+            "pain_themes":        [opp.get("pain_point", "")] if opp.get("pain_point") else [],
+            "rationale":          rejection_reason or result.get("reason") or "Cleared all v5.0 gates.",
+        })
+    except Exception as e:
+        log.warning("[%s] RAG outcome write failed (non-blocking): %s", AGENT_ID, e)
 
     return {
         "opportunity_id":    opp.get("opportunity_id"),
