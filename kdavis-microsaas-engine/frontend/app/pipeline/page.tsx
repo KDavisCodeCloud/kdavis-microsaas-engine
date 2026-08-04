@@ -404,17 +404,21 @@ export default function PipelinePage() {
                         <div className="flex gap-2">
                           <button
                             onClick={() => submitReview(opp.id, "approved")}
-                            disabled={reviewState[opp.id] === "submitting" || belowConfidenceThreshold}
+                            disabled={reviewState[opp.id] === "submitting" || belowConfidenceThreshold || opp.human_review_status === "approved"}
                             title={belowConfidenceThreshold ? "Confidence score below 75% — review the reasoning above before approving" : undefined}
                             className="px-4 py-2 rounded-[8px] text-[12px] font-bold"
                             style={{
-                              backgroundColor: "#6fce8f",
-                              color: "#0b0e13",
+                              backgroundColor: opp.human_review_status === "approved" ? "#2a3340" : "#6fce8f",
+                              color: opp.human_review_status === "approved" ? "#5b6673" : "#0b0e13",
                               opacity: reviewState[opp.id] === "submitting" || belowConfidenceThreshold ? 0.5 : 1,
-                              cursor: belowConfidenceThreshold ? "not-allowed" : "pointer",
+                              cursor: opp.human_review_status === "approved" ? "default" : belowConfidenceThreshold ? "not-allowed" : "pointer",
                             }}
                           >
-                            Approve → Build Queue
+                            {reviewState[opp.id] === "submitting"
+                              ? "Approving…"
+                              : opp.human_review_status === "approved"
+                              ? "✓ Approved"
+                              : "Approve → Build Queue"}
                           </button>
                           <button
                             onClick={() => submitReview(opp.id, "rejected")}
@@ -422,7 +426,7 @@ export default function PipelinePage() {
                             className="px-4 py-2 rounded-[8px] text-[12px] font-bold"
                             style={{ backgroundColor: "#e05d5d", color: "#0b0e13", opacity: reviewState[opp.id] === "submitting" ? 0.5 : 1 }}
                           >
-                            Reject &amp; Delete
+                            {reviewState[opp.id] === "submitting" ? "Rejecting…" : "Reject & Delete"}
                           </button>
                         </div>
                       </div>
