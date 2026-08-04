@@ -1,3 +1,4 @@
+import httpx
 import pytest
 
 import agents.factory.brief_generator as brief_generator
@@ -11,23 +12,40 @@ def _fake_llm(system, user):
     return f"# brief for {system[:10]}"
 
 
-class FakeResult:
-    def __init__(self, returncode=0, stdout="", stderr=""):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
+def _make_github_client(fail_on: str | None = None):
+    """
+    Fake GitHub API via httpx.MockTransport -- covers the real call
+    sequence _push_brief_branch makes (get base ref -> get base commit ->
+    create 2 blobs -> create tree -> create commit -> create ref) without
+    a real repo or network call. `fail_on` simulates one specific step
+    returning an error (e.g. "git/blobs") to test failure handling.
+    """
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        path = request.url.path
+        if fail_on and fail_on in path:
+            return httpx.Response(422, json={"message": f"simulated failure at {fail_on}"})
+        if path.endswith("/git/ref/heads/main"):
+            return httpx.Response(200, json={"object": {"sha": "base-sha-123"}})
+        if path.endswith("/git/commits/base-sha-123"):
+            return httpx.Response(200, json={"tree": {"sha": "base-tree-sha"}})
+        if path.endswith("/git/blobs"):
+            return httpx.Response(201, json={"sha": f"blob-sha-{len(calls)}"})
+        if path.endswith("/git/trees"):
+            return httpx.Response(201, json={"sha": "new-tree-sha"})
+        if path.endswith("/git/commits"):
+            return httpx.Response(201, json={"sha": "new-commit-sha"})
+        if path.endswith("/git/refs"):
+            return httpx.Response(201, json={"ref": request.url.path})
+        return httpx.Response(404, json={"message": f"unexpected path {path}"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    return client, calls
 
 
-class FakeRunner:
-    def __init__(self):
-        self.calls = []
-
-    def __call__(self, cmd, capture_output=True, text=True, cwd=None):
-        self.calls.append({"cmd": cmd, "cwd": cwd})
-        return FakeResult(0)
-
-
-def _seed_happy_path(fake_db):
+def _seed_happy_path(fake_db, verdict_v2_output=None):
     fake_db.responses["opportunity_pipeline"] = [{
         "solution_concept": "Freight Audit Copilot",
         "vertical": "Finance / Accounting / Bookkeeping",
@@ -35,6 +53,7 @@ def _seed_happy_path(fake_db):
         "mrr_calculation": "50 customers x $49",
         "conservative_mrr_potential": 2450,
         "build_confidence_score": 82,
+        "verdict_v2_output": verdict_v2_output,
         "retention_hooks": ["weekly savings report"],
         "source_urls": ["https://example.com"],
         "tier_structure": {"starter": 49},
@@ -52,31 +71,37 @@ def _seed_happy_path(fake_db):
 
 def test_refuses_without_triggered_by(fake_db, tmp_path):
     with pytest.raises(ValueError, match="triggered_by is required"):
-        generate_build_brief("opp-1", "", tmp_path, supabase_client=fake_db)
+        generate_build_brief("opp-1", "", supabase_client=fake_db)
 
 
-def test_happy_path_writes_branch_and_inserts_brief(monkeypatch, fake_db, tmp_path):
+def test_happy_path_pushes_branch_via_github_api_and_inserts_brief(monkeypatch, fake_db):
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token-123")
     _seed_happy_path(fake_db)
-    runner = FakeRunner()
+    client, calls = _make_github_client()
 
     result = generate_build_brief(
-        "opp-1", "kelvin", tmp_path, supabase_client=fake_db,
+        "opp-1", "kelvin", supabase_client=fake_db,
         llm_analyze=_fake_llm,
-        runner=runner,
+        http_client=client,
     )
 
     assert result == {"id": "brief-1", "product_slug": "freight-audit-copilot"}
 
-    branch_calls = [c["cmd"] for c in runner.calls if c["cmd"][:2] == ["git", "checkout"]]
-    assert ["git", "checkout", "-b", "brief/freight-audit-copilot"] in branch_calls
-    assert ["git", "checkout", "main"] in branch_calls
-    push_calls = [c["cmd"] for c in runner.calls if c["cmd"][:2] == ["git", "push"]]
-    assert push_calls == [["git", "push", "-u", "origin", "brief/freight-audit-copilot"]]
+    # the real call sequence: ref -> commit -> 2 blobs -> tree -> commit -> ref
+    paths = [c.url.path for c in calls]
+    assert paths == [
+        "/repos/KDavisCodeCloud/kdavis-microsaas-engine/git/ref/heads/main",
+        "/repos/KDavisCodeCloud/kdavis-microsaas-engine/git/commits/base-sha-123",
+        "/repos/KDavisCodeCloud/kdavis-microsaas-engine/git/blobs",
+        "/repos/KDavisCodeCloud/kdavis-microsaas-engine/git/blobs",
+        "/repos/KDavisCodeCloud/kdavis-microsaas-engine/git/trees",
+        "/repos/KDavisCodeCloud/kdavis-microsaas-engine/git/commits",
+        "/repos/KDavisCodeCloud/kdavis-microsaas-engine/git/refs",
+    ]
+    assert calls[0].headers["authorization"] == "Bearer test-token-123"
 
-    # Files are committed to the brief branch, then cleaned up locally so
-    # they don't sit as untracked cruft in main's working tree after checkout.
-    assert not (tmp_path / "BUILD_BRIEF_CLAUDE_CODE.md").exists()
-    assert not (tmp_path / "BUILD_BRIEF_CLAUDE_DESIGN.md").exists()
+    create_ref_body = calls[-1].content.decode()
+    assert "refs/heads/brief/freight-audit-copilot" in create_ref_body
 
     inserts = [c for c in fake_db.executed if c.table_name == "mse_build_briefs" and c.calls[0][0] == "insert"]
     assert inserts[0]._payload["product_slug"] == "freight-audit-copilot"
@@ -88,35 +113,66 @@ def test_happy_path_writes_branch_and_inserts_brief(monkeypatch, fake_db, tmp_pa
     assert audits[-1]._payload["metadata"]["triggered_by"] == "kelvin"
 
 
-def test_missing_opportunity_raises_and_logs_failure(fake_db, tmp_path):
+def test_verdict_score_prefers_v2_confidence_score_over_legacy_column(monkeypatch, fake_db):
+    # Real bug found and fixed 2026-08-04: every recent brief showed
+    # "0/100" on the dashboard because this read the older, always-0
+    # build_confidence_score column instead of Verdict v5.0's real score
+    # inside verdict_v2_output. This locks in the fix.
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token-123")
+    _seed_happy_path(fake_db, verdict_v2_output={"confidence_score": 91})
+    client, _ = _make_github_client()
+
+    generate_build_brief("opp-1", "kelvin", supabase_client=fake_db, llm_analyze=_fake_llm, http_client=client)
+
+    inserts = [c for c in fake_db.executed if c.table_name == "mse_build_briefs" and c.calls[0][0] == "insert"]
+    assert inserts[0]._payload["verdict_score"] == 91
+
+
+def test_verdict_score_falls_back_to_legacy_column_when_v2_output_missing(monkeypatch, fake_db):
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token-123")
+    _seed_happy_path(fake_db, verdict_v2_output=None)
+    client, _ = _make_github_client()
+
+    generate_build_brief("opp-1", "kelvin", supabase_client=fake_db, llm_analyze=_fake_llm, http_client=client)
+
+    inserts = [c for c in fake_db.executed if c.table_name == "mse_build_briefs" and c.calls[0][0] == "insert"]
+    assert inserts[0]._payload["verdict_score"] == 82
+
+
+def test_missing_opportunity_raises_and_logs_failure(fake_db):
     fake_db.responses["opportunity_pipeline"] = []
 
     with pytest.raises(RuntimeError, match="Brief generation failed"):
-        generate_build_brief("opp-missing", "kelvin", tmp_path, supabase_client=fake_db)
+        generate_build_brief("opp-missing", "kelvin", supabase_client=fake_db)
 
     audits = [c for c in fake_db.executed if c.table_name == "audit_log"]
     assert audits[-1]._payload["outcome"] == "lose"
     assert "not found" in audits[-1]._payload["metadata"]["error"]
 
 
-def test_git_failure_is_wrapped_and_logged(monkeypatch, fake_db, tmp_path):
+def test_github_api_failure_is_wrapped_and_logged(monkeypatch, fake_db):
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token-123")
     _seed_happy_path(fake_db)
-
-    def failing_runner(cmd, capture_output=True, text=True, cwd=None):
-        if cmd[:2] == ["git", "checkout"] and "-b" in cmd:
-            return FakeResult(1, stderr="branch already exists")
-        return FakeResult(0)
+    client, _ = _make_github_client(fail_on="git/blobs")
 
     with pytest.raises(RuntimeError, match="Brief generation failed"):
         generate_build_brief(
-            "opp-1", "kelvin", tmp_path, supabase_client=fake_db,
+            "opp-1", "kelvin", supabase_client=fake_db,
             llm_analyze=lambda system, user: "# brief",
-            runner=failing_runner,
+            http_client=client,
         )
 
     audits = [c for c in fake_db.executed if c.table_name == "audit_log"]
     assert audits[-1]._payload["outcome"] == "lose"
-    assert "branch already exists" in audits[-1]._payload["metadata"]["error"]
+    assert "GitHub API call failed" in audits[-1]._payload["metadata"]["error"]
+
+
+def test_push_brief_branch_requires_github_token(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    client, _ = _make_github_client()
+
+    with pytest.raises(RuntimeError, match="GITHUB_TOKEN is not set"):
+        brief_generator._push_brief_branch(client, "brief/x", {"a.md": "content"}, "commit message")
 
 
 class _SequencedQuery:
@@ -174,31 +230,3 @@ def test_palette_raises_if_no_fallback_row_exists():
 
     with pytest.raises(RuntimeError, match="No industry_color_map row"):
         _get_industry_palette(db, "Some Unseeded Vertical Name")
-
-
-def test_push_uses_plain_git_when_no_github_token(monkeypatch):
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    runner = FakeRunner()
-
-    brief_generator._push_branch(runner, "brief/x", brief_generator.Path("."))
-
-    assert runner.calls[0]["cmd"] == ["git", "push", "-u", "origin", "brief/x"]
-
-
-def test_push_uses_inline_auth_header_when_github_token_set(monkeypatch):
-    # No other code path in this repo ever pushes to git from a running
-    # process — Railway's deployed FastAPI has no ambient `gh`/git
-    # credentials, confirmed by a real "could not read Username" failure
-    # 2026-07-17. GITHUB_TOKEN must be used via an inline header, never a
-    # global git config rewrite (that would leak the token into
-    # .git/config on disk).
-    monkeypatch.setenv("GITHUB_TOKEN", "test-token-123")
-    runner = FakeRunner()
-
-    brief_generator._push_branch(runner, "brief/x", brief_generator.Path("."))
-
-    cmd = runner.calls[0]["cmd"]
-    assert cmd[0] == "git"
-    assert "credential.helper=" in cmd
-    assert any("Authorization: Basic" in c for c in cmd)
-    assert cmd[-4:] == ["push", "-u", "origin", "brief/x"]

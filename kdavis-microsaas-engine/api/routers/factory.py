@@ -15,7 +15,6 @@ from pydantic import BaseModel
 router = APIRouter(prefix="/factory", tags=["factory"])
 
 SCAFFOLD_OUTPUT_ROOT = Path("/tmp/mse-products")
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 class BuildRequest(BaseModel):
@@ -62,4 +61,4 @@ async def trigger_generate_brief(
 
 def _run_generate_brief(opportunity_id: str, triggered_by: str) -> None:
     from agents.factory.brief_generator import generate_build_brief
-    generate_build_brief(opportunity_id, triggered_by, REPO_ROOT)
+    generate_build_brief(opportunity_id, triggered_by)
