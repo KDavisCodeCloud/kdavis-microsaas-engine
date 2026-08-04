@@ -197,9 +197,24 @@ export default function PipelinePage() {
 
   useEffect(() => { fetchData(); fetchBriefs(); }, [fetchData, fetchBriefs]);
 
-  const visible = opportunities.filter((o) => filter === "all" || o.status === filter);
-  const ready = opportunities.filter((o) => o.status === "READY_TO_BUILD").length;
-  const validated = opportunities.filter((o) => o.status === "validated").length;
+  // An approved opportunity moves into the Build Queue tab exclusively and
+  // disappears from every other view (all/validated/needs_correction/watch)
+  // -- previously "Build Queue" just meant status === READY_TO_BUILD, so an
+  // opportunity sat there the instant Verdict passed it, before a human had
+  // reviewed it at all, and approving it visibly changed nothing. A rejected
+  // opportunity is already deleted server-side (see submitReview's confirm
+  // copy + the /review route), so it needs no equivalent filter here -- it's
+  // simply gone from `opportunities` after the next fetchData().
+  function tabMatches(o: Opportunity, f: string): boolean {
+    const approved = o.human_review_status === "approved";
+    if (f === "READY_TO_BUILD") return approved;
+    if (approved) return false;
+    return f === "all" || o.status === f;
+  }
+
+  const visible = opportunities.filter((o) => tabMatches(o, filter));
+  const ready = opportunities.filter((o) => o.human_review_status === "approved").length;
+  const validated = opportunities.filter((o) => o.status === "validated" && o.human_review_status !== "approved").length;
 
   // One brief per opportunity in practice (generate-brief is a one-shot
   // action per opportunity_id) -- lets each Build Queue card link
@@ -288,7 +303,7 @@ export default function PipelinePage() {
                 {filterLabel(f)}
                 {f !== "all" && (
                   <span className="ml-1.5" style={{ color: "#5b6673" }}>
-                    ({opportunities.filter((o) => o.status === f).length})
+                    ({opportunities.filter((o) => tabMatches(o, f)).length})
                   </span>
                 )}
               </button>
