@@ -178,9 +178,18 @@ export default function PipelinePage() {
       // directly, instead of forcing a click into a 10k+ char raw markdown
       // document just to answer "what is this" (real gap Kelvin hit
       // 2026-07-21 on Ninety Nine Comply).
-      .select("id, opportunity_id, product_name, product_slug, verdict_score, vertical, claude_code_brief, claude_design_brief, repo_branch, status, activated_monitoring, mrr_at_activation, mrr_sustained_days, created_at, opportunity_pipeline(pain_point, solution_concept, mrr_calculation, conservative_mrr_potential)")
+      .select("id, opportunity_id, product_name, product_slug, verdict_score, vertical, claude_code_brief, claude_design_brief, repo_branch, status, activated_monitoring, mrr_at_activation, mrr_sustained_days, created_at, opportunity_pipeline(pain_point, solution_concept, mrr_calculation, conservative_mrr_potential, human_review_status)")
       .order("created_at", { ascending: false });
-    setBriefs((data ?? []) as unknown as BuildBrief[]);
+    const rows = (data ?? []) as unknown as BuildBrief[];
+    // A brief is only "current" if the opportunity it was generated from
+    // is still around and still approved -- a brief generated before an
+    // opportunity was downgraded to watch/rejected (or whose opportunity
+    // was later deleted, leaving opportunity_id NULL via ON DELETE SET
+    // NULL) is dead weight, not something to review. This was showing 4
+    // briefs including two that were never actually approved (confirmed
+    // live 2026-08-04 against the real DB: one brief's opportunity never
+    // cleared review at all, one brief's opportunity no longer exists).
+    setBriefs(rows.filter((b) => briefOpportunity(b)?.human_review_status === "approved"));
     setBriefsLoading(false);
   }, [supabase]);
 

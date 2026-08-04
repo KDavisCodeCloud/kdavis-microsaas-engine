@@ -58,8 +58,16 @@ export interface BuildBrief {
   // document just to answer "what is this". Supabase returns this as an
   // array even for a to-one FK relationship unless the relationship is
   // explicitly disambiguated; both shapes are handled where this is used.
-  opportunity_pipeline: { pain_point: string | null; solution_concept: string; mrr_calculation: string | null; conservative_mrr_potential: number } | { pain_point: string | null; solution_concept: string; mrr_calculation: string | null; conservative_mrr_potential: number }[] | null;
+  opportunity_pipeline: BuildBriefOpportunity | BuildBriefOpportunity[] | null;
 }
+
+type BuildBriefOpportunity = {
+  pain_point: string | null;
+  solution_concept: string;
+  mrr_calculation: string | null;
+  conservative_mrr_potential: number;
+  human_review_status: string;
+};
 
 export interface AgentEvent {
   id: string;
