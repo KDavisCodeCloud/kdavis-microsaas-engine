@@ -2,7 +2,7 @@ import httpx
 import pytest
 
 import agents.factory.brief_generator as brief_generator
-from agents.factory.brief_generator import _get_industry_palette, generate_build_brief
+from agents.factory.brief_generator import _classify_vertical, _get_industry_palette, generate_build_brief
 from core.naming import NAME_SYSTEM_PROMPT
 
 
@@ -230,3 +230,43 @@ def test_palette_raises_if_no_fallback_row_exists():
 
     with pytest.raises(RuntimeError, match="No industry_color_map row"):
         _get_industry_palette(db, "Some Unseeded Vertical Name")
+
+
+# Real bug found and fixed 2026-08-05: opportunity_pipeline.vertical is
+# free text from the research swarm, never the exact seeded category name,
+# so the exact-match lookup missed for every one of the 6 live
+# opportunities checked -- the industry-specific palette had never
+# actually fired once; every brief silently got the generic 'open' one.
+
+@pytest.mark.parametrize("vertical, expected", [
+    ("Real Estate — Buyer's Agents at Independent Teams", "Real Estate / Property Management"),
+    ("Independent landlords and small property management companies (10-50 units)", "Real Estate / Property Management"),
+    ("Shopify DTC inventory forecasting — ad-spend-aware reorder recommendations", "E-commerce / Retail Ops"),
+    ("Solo therapists and small group practices (1-5 therapists)", "Healthcare / Medical Front Desk"),
+    ("Mid-market B2B SaaS companies (10-50 agents) using Intercom", None),
+])
+def test_classify_vertical_matches_real_live_opportunity_text(vertical, expected):
+    assert _classify_vertical(vertical) == expected
+
+
+def test_get_industry_palette_uses_classified_vertical_when_exact_match_misses():
+    db = _SequencedDB({
+        "Real Estate / Property Management": {
+            "vertical": "Real Estate / Property Management",
+            "primary_accent": "#2563eb",
+            "secondary_accent": "#16a34a",
+            "mood": "trusted/local",
+            "benchmark_brands": ["Zillow", "Redfin"],
+        },
+        "open": {
+            "vertical": "open",
+            "primary_accent": "#5a96ff",
+            "secondary_accent": "#f5a623",
+            "mood": "neutral/adaptable",
+            "benchmark_brands": [],
+        },
+    })
+
+    palette = _get_industry_palette(db, "Real Estate — Buyer's Agents at Independent Teams")
+
+    assert palette["vertical"] == "Real Estate / Property Management"

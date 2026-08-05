@@ -143,18 +143,51 @@ def _push_brief_branch(client: httpx.Client, branch: str, files: dict[str, str],
     )
 
 
+# opportunity_pipeline.vertical is free-text written by the research
+# swarm (e.g. "Real Estate — Buyer's Agents at Independent Teams"), not
+# constrained to industry_color_map's 6 seeded category names (e.g. "Real
+# Estate / Property Management") -- an exact-match lookup against it was
+# never going to hit. Confirmed live 2026-08-05: every one of the 6
+# current opportunities missed the exact match and silently fell back to
+# the generic 'open' palette, meaning the industry-specific design system
+# (a real CLAUDE.md requirement) had never actually fired once. Keyword
+# matching against each seeded category is a deterministic, no-cost
+# improvement over always-open -- not perfect (free text can't be mapped
+# to 6 buckets with full precision), but real estate/e-commerce/
+# healthcare-shaped text now actually reaches its real palette instead of
+# silently genericizing every brief.
+_VERTICAL_KEYWORDS: dict[str, list[str]] = {
+    "Healthcare / Medical Front Desk": ["healthcare", "medical", "therapist", "therapy", "clinic", "patient"],
+    "Legal / Professional Services": ["legal", "law firm", "attorney", "paralegal"],
+    "E-commerce / Retail Ops": ["e-commerce", "ecommerce", "shopify", " dtc ", "retail"],
+    "Real Estate / Property Management": ["real estate", "property management", "landlord", "buyer's agent", "realtor"],
+    "HR / Ops / People Management": ["human resources", "people management", "onboarding", "payroll", " hr "],
+    "Finance / Accounting / Bookkeeping": ["accounting", "bookkeeping", "invoice", "finance", "financial"],
+}
+
+
+def _classify_vertical(vertical: str) -> Optional[str]:
+    lowered = f" {vertical.lower()} "
+    for seeded_vertical, keywords in _VERTICAL_KEYWORDS.items():
+        if any(kw in lowered for kw in keywords):
+            return seeded_vertical
+    return None
+
+
 def _get_industry_palette(db, vertical: Optional[str]) -> dict:
-    palette = None
-    if vertical:
+    def _lookup(v: str) -> Optional[dict]:
         result = db.table("industry_color_map").select(
             "vertical,primary_accent,secondary_accent,mood,benchmark_brands"
-        ).eq("vertical", vertical).maybe_single().execute()
-        palette = result.data if result is not None else None
+        ).eq("vertical", v).maybe_single().execute()
+        return result.data if result is not None else None
+
+    palette = _lookup(vertical) if vertical else None
+    if not palette and vertical:
+        classified = _classify_vertical(vertical)
+        if classified:
+            palette = _lookup(classified)
     if not palette:
-        result = db.table("industry_color_map").select(
-            "vertical,primary_accent,secondary_accent,mood,benchmark_brands"
-        ).eq("vertical", FALLBACK_VERTICAL).maybe_single().execute()
-        palette = result.data if result is not None else None
+        palette = _lookup(FALLBACK_VERTICAL)
     if not palette:
         raise RuntimeError(
             f"No industry_color_map row for vertical '{vertical}' and no '{FALLBACK_VERTICAL}' "
