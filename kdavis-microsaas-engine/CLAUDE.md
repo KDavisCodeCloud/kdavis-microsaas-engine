@@ -1,7 +1,7 @@
 # CLAUDE.md — Micro SaaS Engine
 **Repo:** `kdavis-microsaas-engine`
 **Company:** THD Agentic Systems LLC
-**Owner:** Kelvin Davis (King Kelz)
+**Owner:** Kelvin Davis
 **Last updated:** 2026-07-04
 
 Claude Code reads this file automatically at the start of every session. Do not ask Kelvin for context that is already here. Read this file, read `MSE-Build-Order.md`, then start working the next unchecked item in the build order. No preamble.
@@ -28,7 +28,7 @@ Kelvin architects and designs. Claude Code executes. Kelvin validates all output
 - **Agents:** LangGraph
 - **Automation:** n8n (self-hosted)
 - **Auth:** Supabase Auth — JWT with `tenant_id` claim
-- **Payments:** Stripe — dedicated MSE account only, never shared with other products
+- **Payments:** Stripe — one dedicated MSE account (THD Agentic Systems LLC) shared across every MSE product, never a separate account per product and never shared with non-MSE products (Cloud Decoded, Decoded Holdings). Each product gets its own Stripe Product + Prices within that one account — see the Stripe Architecture rule below for the exact structure.
 - **Email:** Resend
 - **Languages:** Python, TypeScript, Bash
 - **Model routing:** Haiku for high-volume scraping AND for the Dispatch/Verdict research swarm (`agents/orchestrator`, `agents/aggregator` — switched from Sonnet 2026-07-19 as a cost-optimization pass, verified via live regression tests against known cases). Sonnet remains the default everywhere else (brief generation, naming, retention digest, CEO dashboard routes) via `core/llm_router.py`'s `model=` parameter, which defaults to Sonnet — only the swarm agents pass `model=HAIKU` explicitly. Do not change either assignment without new regression testing.
@@ -38,7 +38,7 @@ Kelvin architects and designs. Claude Code executes. Kelvin validates all output
 ## Architecture Rules — Non-Negotiable
 
 1. `tenant_id` on every table — RLS enforced, no exceptions
-2. Dedicated Stripe account for MSE — never Decoded Holdings, never Cloud Decoded
+2. One dedicated Stripe account for all of MSE — never Decoded Holdings, never Cloud Decoded, never a new account per product (see Stripe Architecture rule below)
 3. Every agent emits `POST /events` on every state change — CEO dashboard depends on this
 4. `get_supabase_for_request(jwt)` in all API routes touching tenant data — never service role in routes
 5. DataSanitizationShield runs before any data embedding
@@ -211,10 +211,81 @@ The aggregator (`agents/aggregator/agent.py`) is the Verdict gate — full rules
 
 **Three-step evaluation:** (1) is the pain still real after the existing tool launched, (2) why is the existing tool failing this ICP — `gap_type` is exactly one of `PRICE_GAP | PLATFORM_GAP | FEATURE_GAP | COMPLEXITY_GAP | SEGMENT_GAP`, (3) does the math clear the price-adjusted floor. `CONDITIONAL` differs from `BUILD` only in timing (floor clears month 8-12 vs. 1-7) — both require the floor to genuinely clear, never a "might clear later" escape hatch. The price-adjusted floor table itself is unchanged since v3.0: $19-29/mo → $3,500, $39-59/mo → $4,000, $69-99/mo → $4,500, $100+/mo → $5,000 — computed independently in code (`agents/aggregator/agent.py`'s `_price_adjusted_floor`) from the model's own `proposed_price`, never trusted from the model's self-report alone.
 
-**Confidence score (added 2026-07-19, same pass as the Haiku switch):** every Verdict output also includes a 0-100 confidence score across 4 components (pain evidence, gap verification, math reliability, GTM realism). A score below 45 forces `DO_NOT_BUILD` regardless of the three-step verdict; 45-59 downgrades a `BUILD` to `CONDITIONAL`; the score can only ever downgrade, never upgrade, and is enforced again at the code level, never trusted from the model's self-report alone — same principle as the floor check.
+**Confidence score (added 2026-07-19, same pass as the Haiku switch):** every Verdict output also includes a 0-100 confidence score across 4 components (pain evidence, gap verification, math reliability, GTM realism). As of 2026-07-20 this score no longer maps to the model's own BUILD/CONDITIONAL/DO_NOT_BUILD verdict at all — see the RULE below, which replaced the original 45/60 override thresholds with a stricter, purely code-level classification. The model's own verdict label is informational context only; it is never authoritative for `status`, same "never trust the model's self-report alone" principle as the floor check, just carried one step further.
 
 **v5.0's MRR figure is a flat `verdict_v2_output.net_mrr_floor`** (no more three-scenario nesting from v3.0/v4.0) — `node_write_pipeline` reads it from there first, falling back through the older nested `scenarios.floor.final_mrr_floor` shape and then the legacy top-level key, in that order, in case an older-shaped response ever comes through.
 
 `opportunity_pipeline.human_review_status`/`human_review_comment`/`human_reviewed_by`/`human_reviewed_at` are Kelvin's own approve/reject/comment decision from the dashboard — kept deliberately separate from the agent's own `status`/`verdict_v2_output`. Comparing the two is the tuning signal for future prompt revisions. Do not conflate them into one field.
 
 The MRR floor must never be enforced by inflating a below-floor number up to look like it passed — enforce it only by rejecting. (`node_write_pipeline` did exactly this via `max(mrr, 4000)` until it was found and fixed 2026-07-17 — watch for this pattern recurring anywhere else in the pipeline.) The floor itself is now per-row (`opportunity_pipeline.price_adjusted_floor`, migration 016), not a single hardcoded constant — both the aggregator's own code-level check and the dashboard's approve-route check must read the row's own floor, not assume $4,000.
+
+---
+
+## RULE: HARD MRR GATE — ONLY THREE STATES REACH THE DASHBOARD (2026-07-20)
+
+Kelvin's diagnosis: obvious misses were reaching the dashboard and wasting review time, and tokens were being wasted running full Verdict web-search calls on ideas that never had a chance. Two consecutive real Haiku batches landed at 1/15 (6.7%) BUILD/CONDITIONAL, and a large share of those 15 were single-digit-to-low-hundreds MRR ceilings that should never have consumed a review click.
+
+**Two gates, in `agents/aggregator/agent.py`:**
+
+1. **Pre-Verdict prefilter (`_prefilter_reject`)** — before spending a Verdict web-search call, checks Dispatch's own self-reported `conservative_mrr_potential`. If even Dispatch's own (most favorable) number can't clear the **$3,500 absolute floor**, the submission is killed before the LLM call ever runs.
+2. **Post-Verdict dashboard-visibility gate (in `_evaluate`)** — after Verdict's independently-researched `net_mrr_floor` and `confidence_score` come back, exactly one of four outcomes applies, purely numerically, regardless of what the model's own verdict/reason said:
+   - `net_mrr_floor < $3,500` → `killed_below_floor`. Never inserted into `opportunity_pipeline`. `node_write_pipeline` diverts it straight to `opportunity_pipeline_rejections` (the same archive table the manual reject-button flow already uses) — full reasoning preserved for tuning, zero dashboard/review cost.
+   - `net_mrr_floor >= price_adjusted_floor` (this row's own tier floor, e.g. $5,000 for a $100+/mo idea — **not** a flat $4,000) **and** `confidence_score >= 75` → `READY_TO_BUILD`.
+   - `net_mrr_floor` in `[$3,500, $4,000)` (the literal absolute band, not tier-adjusted) **or** `confidence_score` in `[65, 74]` → `validated` (CONDITIONAL) — the judgment-call band.
+   - Anything else that still clears $3,500 (failed its own tier floor, confidence below 65, or the model itself said DO_NOT_BUILD for a qualitative reason despite the money clearing) → `watch`. This is the one genuinely new status Dispatch/Verdict now produce live — the DB column already supported it (migration 002) but nothing wrote to it until now. The specific risk is always written into `rejection_reason` so it's visible on the dashboard, not just buried in `verdict_v2_output`.
+
+**`$3,500` is not a guessed number** — it's `_PRICE_TIER_FLOORS`' own lowest tier floor (the cheapest price band this factory ever builds for), reused as the universal minimum viability bar. Nothing below what even the cheapest tier would require is worth a dashboard row.
+
+**Applied retroactively 2026-07-20:** 15 pre-existing rows below $3,500 (the real-batch results already logged in `MSE-Build-Order.md`) were archived to `opportunity_pipeline_rejections` and deleted from `opportunity_pipeline`. Two READY_TO_BUILD opportunities that predated the confidence-score system (no recorded score, so unverifiable against the new `>=75` bar) were re-run through a real Verdict call rather than guessed at: "Campaign Aware Replenishment" (Shopify) came back confidence 61 → `watch`; "Ninety Nine Comply" (contractor 1099 compliance) came back `net_mrr_floor: None`/confidence 20 → `killed_below_floor`, deleted (its `mse_build_briefs` row survives with `opportunity_id` set to `NULL` via the existing `ON DELETE SET NULL` FK — the brief content isn't destroyed, just decoupled from a now-gone opportunity).
+
+**Prompt-side companion rule (`agents/orchestrator/prompt.md`, same date):** before scoring any opportunity, Dispatch must answer three questions internally — who is the exact buyer, what specific manual workflow is being replaced, and why the incumbent hasn't shipped this natively (naming one of: regulatory complexity, different customer segment, technical architecture constraint, or intentional product decision). If the third question can't be answered with a specific structural reason, the idea is discarded before it reaches Verdict at all. This targets the same root cause as the MRR gate from the other direction — category-level ideas without a durable, named reason for the gap's existence are exactly what's been dying on Verdict's math checks.
+
+---
+
+## RULE: STRIPE ARCHITECTURE FOR MSE PRODUCTS (2026-08-06)
+
+**Decision:** all MSE products share the one dedicated MSE Stripe account (THD Agentic Systems LLC, workspace "Micro Saas Decoded", `acct_1TpLcKLIpoJRr7Tc`, created 2026-07-20). Each product gets its own isolated Products and Price IDs within that account. Revenue consolidates into the existing bank account. No new Stripe accounts are created per product — this was already the standing rule (see Architecture Rules #2 above); this section formalizes the concrete object structure and naming convention every product must follow.
+
+**Stripe object structure per product:**
+
+```
+Stripe Account (THD Agentic Systems LLC)
+├── Product: Showing Signal
+│   ├── Price: Solo Agent        — $97/mo   — price_showingsignal_solo
+│   ├── Price: Independent Team  — $197/mo  — price_showingsignal_team
+│   └── Price: Brokerage         — $397/mo  — price_showingsignal_brokerage
+├── Product: [Next MSE Product]
+│   ├── Price: [Tier 1]
+│   └── Price: [Tier 2]
+└── ...
+```
+
+**Naming convention, every MSE product:**
+- Stripe Product name: `[Product Name]` — human-readable, appears on receipts
+- Stripe Price lookup key: `[productslug]_[tier]` — machine-readable, used in env config
+- Stripe metadata on every Product: `{ "mse_product": "[productslug]", "entity": "THD Agentic Systems LLC" }`
+
+**What Claude Code does per product, at scaffold time** — add to the product's `.env` and Railway config:
+
+```bash
+STRIPE_SECRET_KEY=sk_live_...          # shared — same key across all MSE products
+STRIPE_WEBHOOK_SECRET=whsec_...        # product-specific — one webhook endpoint per product
+STRIPE_PRICE_SOLO=price_...            # product-specific Price ID (tier name varies per product)
+STRIPE_PRICE_TEAM=price_...            # product-specific Price ID
+STRIPE_PRICE_BROKERAGE=price_...       # product-specific Price ID (if 3-tier)
+```
+
+`STRIPE_SECRET_KEY` is the same value across every MSE product — Claude Code never generates a new one, it receives it from the environment and uses it. `STRIPE_WEBHOOK_SECRET` is product-specific because each product registers its own webhook endpoint in Stripe (`https://api.[productdomain].com/billing/webhook`) — Stripe generates a unique `whsec_` per registered endpoint. Env var suffixes (`_SOLO`/`_TEAM`/`_BROKERAGE` etc.) follow that product's own real tier names, not a fixed generic list — `core/plans.py`'s `stripe_price_id()` pattern (build `STRIPE_PRICE_{TIER}` from the tier name) is the reference implementation, first applied in Showing Signal.
+
+**What Claude Code never does:**
+- Never creates a new Stripe account
+- Never creates a new bank account or payout destination
+- Never stores raw Stripe keys in source code or committed files
+- Never shares a Supabase project between products — Stripe consolidation does not change Supabase isolation (unchanged, see Architecture Rules #1)
+- Never hardcodes Price IDs — always reads from environment variables
+
+**Supabase rule — unchanged:** each MSE product still gets its own isolated Supabase project regardless of Stripe consolidation. RLS policies and JWT hooks are project-scoped (cross-product leakage risk if shared), and billing state/tenant rows/event logs are product-specific with no shared schema. One Stripe account, one Supabase project per product, always.
+
+**Owner-only blocking action, per product:** creating the Product + Price objects in the Stripe dashboard (or Claude Code doing it via API in the setup script, when explicitly authorized) and registering the webhook endpoint — Claude Code does not create Stripe accounts or generate live secret keys/Price IDs on its own initiative, per the existing "no autonomous outbound" / HITL design (see `MSE-Build-Order.md`). Once the owner drops the Price IDs and webhook secret into the product's env config, Claude Code wires the checkout session creation endpoint and the `checkout.session.completed`/subscription-lifecycle webhook handler.
+
+**Showing Signal is the reference implementation of this pattern** (2026-08-06): Product "Showing Signal", tiers `solo`/`team`/`brokerage` mapping to Solo Agent $97/mo, Independent Team $197/mo, Brokerage $397/mo, lookup keys `showingsignal_solo`/`showingsignal_team`/`showingsignal_brokerage`, webhook at `/billing/webhook`. The three Price IDs and the webhook secret are the only owner-only blocking action remaining on Showing Signal's Stripe side — see `showing-signal/CLAUDE.md`'s Build Status section.
