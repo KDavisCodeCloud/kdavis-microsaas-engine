@@ -7,7 +7,7 @@ import { TopBar } from "@/components/shell/TopBar";
 import { SectionCard } from "@/components/ui/SectionCard";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ProgressBar } from "@/components/ui/ProgressBar";
-import type { Opportunity, BuildBrief } from "@/lib/types";
+import type { Opportunity, BuildBrief, BuildTask } from "@/lib/types";
 
 const STATUS_FILTER_OPTIONS = ["all", "READY_TO_BUILD", "validated", "needs_correction", "watch", "rejected"];
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -105,6 +105,54 @@ function ConfidenceMeter({ score, breakdown }: { score: number; breakdown: Confi
   );
 }
 
+// Read-only reflection of team.thdstack.com's build checklist -- mark
+// complete + notes happen there; this dashboard just shows live progress
+// (Realtime-subscribed, see the build_tasks channel in PipelinePage below).
+function BuildProgress({ tasks }: { tasks: BuildTask[] }) {
+  const completed = tasks.filter((t) => t.status === "completed").length;
+  const percent = tasks.length === 0 ? 0 : Math.round((completed / tasks.length) * 100);
+
+  return (
+    <div className="rounded-[8px] p-3.5" style={{ backgroundColor: "#10151b", border: "1px solid #1c222b" }}>
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-[10px] font-mono uppercase" style={{ color: "#5b6673" }}>
+          Build Progress <span style={{ color: "#3a4250" }}>· team.thdstack.com</span>
+        </p>
+        <span className="text-[12px] font-bold font-mono" style={{ color: "#5eead4" }}>{percent}%</span>
+      </div>
+      <div className="relative w-full rounded-full mb-2.5" style={{ height: "5px", backgroundColor: "#1c222b" }}>
+        <div className="h-full rounded-full transition-all" style={{ width: `${percent}%`, backgroundColor: "#5eead4" }} />
+      </div>
+      <div className="space-y-1">
+        {tasks.map((t) => (
+          <div key={t.id} className="flex items-center gap-2 min-w-0">
+            <span
+              className="shrink-0 text-[11px]"
+              style={{ color: t.status === "completed" ? "#5eead4" : "#3a4250" }}
+            >
+              {t.status === "completed" ? "✓" : "○"}
+            </span>
+            <span
+              className="text-[11.5px] truncate-text min-w-0"
+              style={{
+                color: t.status === "completed" ? "#5b6673" : "#aab4bd",
+                textDecoration: t.status === "completed" ? "line-through" : "none",
+              }}
+            >
+              {t.title}
+            </span>
+            {t.status === "completed" && t.completed_by && (
+              <span className="text-[10px] font-mono shrink-0 ml-auto" style={{ color: "#3a4250" }}>
+                {t.completed_by}
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function PipelinePage() {
   const supabase = createClient();
   const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
@@ -126,6 +174,28 @@ export default function PipelinePage() {
   const [briefDoc, setBriefDoc] = useState<"code" | "design">("code");
   const [briefGenState, setBriefGenState] = useState<Record<string, "idle" | "queuing" | "queued" | "error">>({});
   const [briefGenError, setBriefGenError] = useState<Record<string, string>>({});
+
+  // Read-only reflection of team.thdstack.com's build checklist -- marking
+  // a task complete happens there, this just shows live progress via the
+  // same Realtime channel pattern already used for mse_build_briefs.
+  const [buildTasks, setBuildTasks] = useState<BuildTask[]>([]);
+
+  const fetchBuildTasks = useCallback(async () => {
+    const { data } = await supabase
+      .from("build_tasks")
+      .select("id, opportunity_id, task_type, title, status, notes, completed_by, completed_at, sort_order")
+      .order("sort_order", { ascending: true });
+    setBuildTasks((data ?? []) as BuildTask[]);
+  }, [supabase]);
+
+  useEffect(() => {
+    fetchBuildTasks();
+    const channel = supabase
+      .channel("pipeline-build-tasks")
+      .on("postgres_changes", { event: "*", schema: "public", table: "build_tasks" }, () => fetchBuildTasks())
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [supabase, fetchBuildTasks]);
 
   const fetchData = useCallback(async () => {
     const { data } = await supabase
@@ -230,6 +300,13 @@ export default function PipelinePage() {
   // straight to its own brief instead of making Kelvin scroll down and
   // match titles by hand in the separate Build Briefs list.
   const briefByOpportunityId = new Map(briefs.filter((b) => b.opportunity_id).map((b) => [b.opportunity_id as string, b]));
+
+  const buildTasksByOpportunityId = new Map<string, BuildTask[]>();
+  for (const t of buildTasks) {
+    const list = buildTasksByOpportunityId.get(t.opportunity_id) ?? [];
+    list.push(t);
+    buildTasksByOpportunityId.set(t.opportunity_id, list);
+  }
 
   function scrollToBrief(briefId: string) {
     setExpandedBrief(briefId);
@@ -454,6 +531,10 @@ export default function PipelinePage() {
                           </button>
                         </div>
                       </div>
+
+                      {opp.human_review_status === "approved" && buildTasksByOpportunityId.has(opp.id) && (
+                        <BuildProgress tasks={buildTasksByOpportunityId.get(opp.id)!} />
+                      )}
 
                       {opp.status === "READY_TO_BUILD" && (
                         <div className="rounded-[8px] p-3.5" style={{ backgroundColor: "#10151b", border: "1px solid #1c222b" }}>

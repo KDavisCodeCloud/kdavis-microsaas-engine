@@ -69,6 +69,22 @@ type BuildBriefOpportunity = {
   human_review_status: string;
 };
 
+// build_tasks (migration 20260806000019) -- the per-product build
+// checklist team.thdstack.com writes to (mark complete + notes). This
+// dashboard reads it read-only: the actual doing/checking-off happens on
+// the team dashboard, this just reflects live progress.
+export interface BuildTask {
+  id: string;
+  opportunity_id: string;
+  task_type: "standard" | "custom";
+  title: string;
+  status: "pending" | "in_progress" | "completed";
+  notes: string | null;
+  completed_by: string | null;
+  completed_at: string | null;
+  sort_order: number;
+}
+
 export interface AgentEvent {
   id: string;
   agent_name: string;
