@@ -26,6 +26,11 @@ async def tenant_context_middleware(request: Request, call_next):
         "/marketing/research", "/marketing/campaign",
         "/marketing/apollo-list", "/marketing/dm-sequences", "/marketing/seo-content",
         "/marketing/send-sequences",
+        # Real CAN-SPAM unsubscribe link a human clicks from their own
+        # inbox -- no session of any kind exists at that point, and the
+        # HMAC token in the URL (core/email_compliance.py) is what actually
+        # authenticates the request, not a bearer token or JWT.
+        "/marketing/unsubscribe",
     }
     if request.url.path in PUBLIC_PATHS:
         return await call_next(request)

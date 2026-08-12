@@ -14,10 +14,15 @@ given no existing router actually had one.
 """
 
 import hmac
+import html
 import os
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+
+from core.email_compliance import suppress_email, verify_unsubscribe_token
+from core.supabase_client import get_supabase
 
 router = APIRouter(prefix="/marketing", tags=["marketing"])
 
@@ -31,6 +36,36 @@ def _require_api_key(authorization: str | None) -> None:
     provided = authorization.removeprefix("Bearer ").strip()
     if not hmac.compare_digest(provided, expected):
         raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+_UNSUB_PAGE = """<!doctype html><html><head><meta charset="utf-8">
+<title>Unsubscribed</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1.5rem;color:#111">
+<h1 style="font-size:1.25rem">You're unsubscribed.</h1>
+<p>{email} won't receive any further emails from us.</p>
+</body></html>"""
+
+_UNSUB_INVALID_PAGE = """<!doctype html><html><head><meta charset="utf-8">
+<title>Invalid link</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1.5rem;color:#111">
+<h1 style="font-size:1.25rem">This unsubscribe link isn't valid.</h1>
+<p>If you're trying to stop receiving emails from us, reply to any email you received and we'll remove you manually.</p>
+</body></html>"""
+
+
+@router.get("/unsubscribe", response_class=HTMLResponse)
+async def unsubscribe(email: str, token: str):
+    """One-click CAN-SPAM unsubscribe — public, no auth, since a real human
+    clicks this from their own inbox with no session of any kind. Token is
+    an HMAC of the email (core/email_compliance.py), not a stored
+    per-send value, so this works regardless of which email/campaign the
+    link came from."""
+    if not verify_unsubscribe_token(email, token):
+        return HTMLResponse(_UNSUB_INVALID_PAGE, status_code=400)
+
+    db = get_supabase()
+    suppress_email(db, email, reason="unsubscribed")
+    return HTMLResponse(_UNSUB_PAGE.format(email=html.escape(email)))
 
 
 class ResearchRequest(BaseModel):

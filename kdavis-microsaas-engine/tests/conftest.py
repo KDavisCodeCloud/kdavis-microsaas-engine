@@ -13,6 +13,9 @@ os.environ.setdefault("RESEND_API_KEY", "placeholder-resend-key")
 os.environ.setdefault("STRIPE_SECRET_KEY", "sk_test_placeholder")
 os.environ.setdefault("STRIPE_WEBHOOK_SECRET", "whsec_test_placeholder")
 os.environ.setdefault("MARKETING_API_KEY", "test-marketing-api-key")
+os.environ.setdefault("UNSUBSCRIBE_SECRET", "test-unsubscribe-secret")
+os.environ.setdefault("MARKETING_API_BASE_URL", "https://mse-api-production-f8bd.up.railway.app")
+os.environ.setdefault("COMPLIANCE_MAILING_ADDRESS", "THD Agentic Systems LLC, [test address]")
 os.environ.setdefault("RAILWAY_TOKEN", "test-railway-token")
 os.environ.setdefault("VERCEL_TOKEN", "test-vercel-token")
 os.environ.setdefault("ALLOWED_ORIGINS", "http://localhost:3000")
@@ -36,6 +39,7 @@ class FakeQuery:
         self._payload = None
         self._filters = []
         self._single = False
+        self._count_requested = False
 
     def insert(self, payload):
         self.calls.append(("insert", payload))
@@ -58,6 +62,7 @@ class FakeQuery:
 
     def select(self, *args, **kwargs):
         self.calls.append(("select", args, kwargs))
+        self._count_requested = kwargs.get("count") == "exact"
         return self
 
     def order(self, *args, **kwargs):
@@ -70,6 +75,11 @@ class FakeQuery:
 
     def lte(self, key, value):
         self.calls.append(("lte", key, value))
+        self._filters.append((key, value))
+        return self
+
+    def gte(self, key, value):
+        self.calls.append(("gte", key, value))
         self._filters.append((key, value))
         return self
 
@@ -97,6 +107,8 @@ class FakeQuery:
                     )
         self.store.executed.append(self)
         result_data = self.store.responses.get(self.table_name, [])
+        if self._count_requested:
+            return type("Result", (), {"data": result_data, "count": len(result_data)})()
         if getattr(self, "_single", False):
             # Real supabase-py's .maybe_single().execute() returns bare
             # None (not a Response object with .data=None) when zero rows

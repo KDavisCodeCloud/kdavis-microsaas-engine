@@ -13,6 +13,17 @@ touch_1/touch_2 were written by MKT-O2 as short DM-style copy, not
 email-formatted (no separate subject line) — this agent supplies a plain,
 generic subject rather than truncating the DM body into one, since a
 truncated mid-sentence snippet reads as broken, not as a real subject.
+
+2026-08-12: CAN-SPAM compliance guard added (core/email_compliance.py) —
+this agent previously sent real commercial email with no unsubscribe
+mechanism and no suppression check, both legally required. Every send now
+(a) skips a lead already in mse_email_suppressions before touching Resend
+at all, and (b) has the physical mailing address + one-click unsubscribe
+link appended to the body. A daily send cap (MARKETING_DAILY_SEND_CAP,
+default 200) is a safety measure, not a legal requirement — stops a bad
+batch or a runaway retry loop from sending far more mail in one day than
+intended; remaining sequences simply stay in their current status for the
+next hourly run to pick up, same as any other skip here.
 """
 import os
 from datetime import datetime, timedelta, timezone
@@ -20,6 +31,7 @@ from typing import Any, Optional
 
 import resend
 
+from core.email_compliance import append_compliance_footer, daily_send_cap, is_suppressed, sends_today
 from core.sanitization import DataSanitizationShield
 from core.supabase_client import get_supabase
 
@@ -80,16 +92,30 @@ def run_send_touch_1(supabase_client: Optional[Any] = None, resend_client: Optio
     sequences = db.table("mse_dm_sequences").select("*").eq("status", "approved_hitl").execute().data or []
     _emit_event(db, "sequence_send_touch1_started", {"count": len(sequences)})
 
-    sent, failed = 0, []
+    cap = daily_send_cap()
+    sent_count = sends_today(db)
+
+    sent, failed, skipped = 0, [], []
     for seq in sequences:
         try:
+            if sent_count >= cap:
+                skipped.append(seq["id"])
+                _write_audit(db, "lose", seq.get("product_id", ""), {"sequence_id": seq["id"], "touch": 1, "skipped": "daily_cap"})
+                continue
+
             lead = _get_lead(db, seq["lead_id"])
             if not lead or not lead.get("email"):
                 raise ValueError(f"No email on file for lead {seq['lead_id']}")
 
+            if is_suppressed(db, lead["email"]):
+                skipped.append(seq["id"])
+                db.table("mse_dm_sequences").update({"status": "suppressed"}).eq("id", seq["id"]).execute()
+                _write_audit(db, "lose", seq["product_id"], {"sequence_id": seq["id"], "touch": 1, "skipped": "suppressed"})
+                continue
+
             first_name = lead.get("first_name") or ""
             subject = f"Quick question, {first_name}".strip() if first_name else "Quick question"
-            body = DataSanitizationShield.clean(seq["touch_1"])
+            body = append_compliance_footer(DataSanitizationShield.clean(seq["touch_1"]), lead["email"])
             _send_email(resend_client, lead["email"], subject, body)
 
             db.table("mse_dm_sequences").update({
@@ -97,13 +123,14 @@ def run_send_touch_1(supabase_client: Optional[Any] = None, resend_client: Optio
                 "touch_1_sent_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", seq["id"]).execute()
             sent += 1
+            sent_count += 1
             _write_audit(db, "win", seq["product_id"], {"sequence_id": seq["id"], "touch": 1})
         except Exception as exc:
             failed.append(seq["id"])
             _write_audit(db, "lose", seq.get("product_id", ""), {"sequence_id": seq["id"], "touch": 1, "error": str(exc)})
 
-    _emit_event(db, "sequence_send_touch1_completed", {"sent": sent, "failed": len(failed)})
-    return {"sent": sent, "failed": failed}
+    _emit_event(db, "sequence_send_touch1_completed", {"sent": sent, "failed": len(failed), "skipped": len(skipped)})
+    return {"sent": sent, "failed": failed, "skipped": skipped}
 
 
 def run_send_touch_2(supabase_client: Optional[Any] = None, resend_client: Optional[Any] = None) -> dict:
@@ -123,16 +150,34 @@ def run_send_touch_2(supabase_client: Optional[Any] = None, resend_client: Optio
     )
     _emit_event(db, "sequence_send_touch2_started", {"count": len(sequences)})
 
-    sent, failed = 0, []
+    cap = daily_send_cap()
+    sent_count = sends_today(db)
+
+    sent, failed, skipped = 0, [], []
     for seq in sequences:
         try:
+            if sent_count >= cap:
+                skipped.append(seq["id"])
+                _write_audit(db, "lose", seq.get("product_id", ""), {"sequence_id": seq["id"], "touch": 2, "skipped": "daily_cap"})
+                continue
+
             lead = _get_lead(db, seq["lead_id"])
             if not lead or not lead.get("email"):
                 raise ValueError(f"No email on file for lead {seq['lead_id']}")
 
+            # A lead can unsubscribe in the 3-day gap between touch_1 and
+            # touch_2 -- re-checking here, not just at touch_1, is the
+            # whole point of a suppression check rather than a one-time
+            # gate.
+            if is_suppressed(db, lead["email"]):
+                skipped.append(seq["id"])
+                db.table("mse_dm_sequences").update({"status": "suppressed"}).eq("id", seq["id"]).execute()
+                _write_audit(db, "lose", seq["product_id"], {"sequence_id": seq["id"], "touch": 2, "skipped": "suppressed"})
+                continue
+
             first_name = lead.get("first_name") or ""
             subject = f"Following up, {first_name}".strip() if first_name else "Following up"
-            body = DataSanitizationShield.clean(seq["touch_2"])
+            body = append_compliance_footer(DataSanitizationShield.clean(seq["touch_2"]), lead["email"])
             _send_email(resend_client, lead["email"], subject, body)
 
             db.table("mse_dm_sequences").update({
@@ -140,13 +185,14 @@ def run_send_touch_2(supabase_client: Optional[Any] = None, resend_client: Optio
                 "touch_2_sent_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", seq["id"]).execute()
             sent += 1
+            sent_count += 1
             _write_audit(db, "win", seq["product_id"], {"sequence_id": seq["id"], "touch": 2})
         except Exception as exc:
             failed.append(seq["id"])
             _write_audit(db, "lose", seq.get("product_id", ""), {"sequence_id": seq["id"], "touch": 2, "error": str(exc)})
 
-    _emit_event(db, "sequence_send_touch2_completed", {"sent": sent, "failed": len(failed)})
-    return {"sent": sent, "failed": failed}
+    _emit_event(db, "sequence_send_touch2_completed", {"sent": sent, "failed": len(failed), "skipped": len(skipped)})
+    return {"sent": sent, "failed": failed, "skipped": skipped}
 
 
 def run_sequence_sender(supabase_client: Optional[Any] = None, resend_client: Optional[Any] = None) -> dict:

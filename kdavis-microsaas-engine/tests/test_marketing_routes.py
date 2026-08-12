@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from api.main import app
 from api.middleware.tenant_context import tenant_context_middleware
+from core.email_compliance import generate_unsubscribe_token
 import api.routers.marketing as marketing_router
 
 client = TestClient(app)
@@ -67,3 +68,58 @@ def test_marketing_routes_reject_missing_auth_header():
         json={"product_id": "p1", "campaign_build_id": "c1", "research_report": {}},
     )
     assert resp.status_code == 401
+
+
+# ── GET /marketing/unsubscribe — public, no auth of any kind (a real human
+# clicks this from their own inbox) ──────────────────────────────────────
+
+def test_unsubscribe_is_a_public_path_source():
+    import inspect
+    source = inspect.getsource(tenant_context_middleware)
+    assert "/marketing/unsubscribe" in source
+
+
+def test_unsubscribe_with_valid_token_suppresses_and_returns_200(fake_db, monkeypatch):
+    monkeypatch.setattr(marketing_router, "get_supabase", lambda: fake_db)
+    token = generate_unsubscribe_token("lead@example.com")
+
+    resp = client.get(f"/marketing/unsubscribe?email=lead@example.com&token={token}")
+
+    assert resp.status_code == 200
+    assert "unsubscribed" in resp.text.lower()
+    upserts = [c for c in fake_db.executed if c.table_name == "mse_email_suppressions" and c.calls[0][0] == "upsert"]
+    assert upserts[0]._payload == {"email": "lead@example.com", "reason": "unsubscribed"}
+
+
+def test_unsubscribe_with_valid_token_requires_no_auth_header_at_all(fake_db, monkeypatch):
+    """The whole point of this endpoint — a recipient with zero session of
+    any kind must be able to use it."""
+    monkeypatch.setattr(marketing_router, "get_supabase", lambda: fake_db)
+    token = generate_unsubscribe_token("lead@example.com")
+
+    resp = client.get(f"/marketing/unsubscribe?email=lead@example.com&token={token}")
+    assert resp.status_code == 200
+
+
+def test_unsubscribe_rejects_invalid_token_and_does_not_suppress(fake_db, monkeypatch):
+    monkeypatch.setattr(marketing_router, "get_supabase", lambda: fake_db)
+
+    resp = client.get("/marketing/unsubscribe?email=lead@example.com&token=forged-token")
+
+    assert resp.status_code == 400
+    upserts = [c for c in fake_db.executed if c.table_name == "mse_email_suppressions"]
+    assert upserts == []
+
+
+def test_unsubscribe_escapes_email_in_html_response(fake_db, monkeypatch):
+    """Regression guard: the email in the response body was interpolated
+    into raw HTML unescaped when this was first written -- a crafted
+    email/token pair could inject markup into the confirmation page."""
+    monkeypatch.setattr(marketing_router, "get_supabase", lambda: fake_db)
+    malicious_email = "<script>alert(1)</script>@example.com"
+    token = generate_unsubscribe_token(malicious_email)
+
+    resp = client.get(f"/marketing/unsubscribe?email={malicious_email}&token={token}")
+
+    assert "<script>" not in resp.text
+    assert "&lt;script&gt;" in resp.text
