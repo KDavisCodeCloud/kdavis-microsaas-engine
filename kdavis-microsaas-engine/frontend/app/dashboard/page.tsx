@@ -7,14 +7,22 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { AgentRosterCard } from "@/components/ui/AgentRosterCard";
 import { ResearchTrigger } from "@/components/ui/ResearchTrigger";
 
+// Real marketing factory agent build status — replaces a stale, never-built
+// "Week 1-7 research swarm" placeholder (Market Sizing/Competitor Depth/ICP
+// Validation/Retention Hook/MRR Math agents never existed as real files;
+// this reflects what's actually in agents/marketing/ and agents/orchestrator/
+// as of 2026-08-12, verified against the live codebase, not a roadmap guess.
 const AGENT_CADENCE = [
-  { week: 1, name: "Orchestrator + Aggregator", status: "complete", date: "2026-07-04" },
-  { week: 2, name: "Market Sizing Agent",        status: "pending",  date: "2026-07-10" },
-  { week: 3, name: "Competitor Depth Agent",     status: "pending",  date: "2026-07-17" },
-  { week: 4, name: "ICP Validation Agent",       status: "pending",  date: "2026-07-24" },
-  { week: 5, name: "Retention Hook Agent",       status: "pending",  date: "2026-07-31" },
-  { week: 6, name: "MRR Math Agent",             status: "pending",  date: "2026-08-07" },
-  { week: 7, name: "Full Swarm Integration",     status: "pending",  date: "2026-08-14" },
+  { week: 1, name: "Dispatch + Verdict v5.0 (orchestrator/aggregator)", status: "complete", date: "2026-07-19" },
+  { week: 2, name: "MKT-ORCH Campaign Orchestrator",       status: "complete", date: "2026-07-23" },
+  { week: 3, name: "MKT-R1 Research Core",                 status: "complete", date: "2026-07-23" },
+  { week: 4, name: "MKT-O1 Apollo List Builder",           status: "flagged",  date: "blocked: Apollo key on Free plan, no API access" },
+  { week: 5, name: "MKT-O2 Cold DM Sequence Writer",       status: "complete", date: "2026-07-23" },
+  { week: 6, name: "MKT-O3 Email Sequence Loader",         status: "flagged",  date: "blocked: Systeme.io has no campaigns API yet" },
+  { week: 7, name: "MKT-O4 Outreach Monitor",              status: "complete", date: "2026-07-23" },
+  { week: 8, name: "MKT-O5 Sequence Sender + CAN-SPAM guard", status: "complete", date: "2026-08-12" },
+  { week: 9, name: "MKT-S1 SEO Content Factory",           status: "complete", date: "2026-07-23" },
+  { week: 10, name: "MKT-V1 Content Multiplier",           status: "complete", date: "2026-08-12" },
 ];
 
 export default async function DashboardPage() {
