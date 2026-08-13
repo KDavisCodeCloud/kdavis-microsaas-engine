@@ -11,12 +11,13 @@ Reads the approved product's research_report.json, runs select_channels()
 to decide which channels apply, creates a campaign_builds row, and fans
 out to the downstream agents: MKT-O1 (Apollo List Builder), MKT-O2 (Cold
 DM Sequence Writer), MKT-O3 (Email Sequence Loader), MKT-S1 (SEO Content
-Factory), and optionally MKT-V1 (Content Multiplier). None of those five
-are built yet (Wave 2/3 per Marketing-Engine-Agent-Specs.md /
-Campaign-Orchestrator-and-Strategy-Specs.md) — each fires via a dynamic
-import attempt and logs a graceful "not yet built — pending" stub instead
-of failing, matching agents/orchestrator/agent.py's existing
-ModuleNotFoundError fallback pattern for vertical intel agents.
+Factory), and MKT-V1 (Content Multiplier, gated on reddit/facebook_groups
+being in the product's icp_channels). All five are built as of 2026-08-12.
+Each still fires via a dynamic import attempt with a graceful "not yet
+built — pending" fallback on ModuleNotFoundError (matching
+agents/orchestrator/agent.py's existing pattern for vertical intel
+agents) so a future downstream agent can be added to _DOWNSTREAM_AGENTS
+ahead of actually being built, same as these five originally were.
 """
 
 from typing import Any, Callable, Optional

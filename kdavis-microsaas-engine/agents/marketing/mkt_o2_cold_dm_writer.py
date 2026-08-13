@@ -5,7 +5,10 @@ Writes a 2-touch cold DM sequence per lead using exact pain language from
 research_report. Framing: "make more money" + a dollar amount — never "save
 time." Every sequence lands in mse_dm_sequences with status='pending_hitl'
 — this agent never sends anything. A human approves in the HITL queue;
-approval unlocks the separate sender, which doesn't exist yet.
+approval unlocks MKT-O5 (agents/marketing/mkt_o5_sequence_sender.py), the
+separate sender, which sends via Resend with the CAN-SPAM compliance guard
+(core/email_compliance.py — suppression checks, mailing address, one-click
+unsubscribe) wired in as of 2026-08-12.
 """
 
 import json

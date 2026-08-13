@@ -3,8 +3,11 @@ MKT-O4 Outreach Monitor.
 
 Scans mse_apollo_leads for a product's cold-outreach leads and buckets
 them into no_reply / replied / bounced. Read-only — never sends
-anything, never writes back to a lead. A separate, not-yet-built sender
-is what actually moves mse_dm_sequences rows out of pending_hitl.
+anything, never writes back to a lead. MKT-O5
+(agents/marketing/mkt_o5_sequence_sender.py) is the separate sender that
+actually moves mse_dm_sequences rows out of pending_hitl — built as of
+2026-08-12, with the CAN-SPAM compliance guard (core/email_compliance.py)
+wired in.
 
 Schema notes (checked before writing —
 supabase/migrations/20260709000006_outreach_engine.sql):

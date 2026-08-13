@@ -8,6 +8,22 @@ activates. Every sequence lands in mse_email_sequences with
 status='pending_hitl' (or 'loaded_unactivated' once the systeme.io call
 succeeds); a human approves and activates it manually in systeme.io. Matches
 MKT-O2's draft-only precedent — this agent has no sender/activation path.
+
+CONFIRMED BLOCKER (2026-08-12): _SystemeIOClient.create_unactivated_campaign's
+POST /campaigns call 404s against the live API with a real, verified key —
+this is not a wrong path to fix. Verified directly: GET /api/contacts,
+/api/tags, /api/webhooks, and /api/funnels all return 200 against the live
+account; GET/POST /api/campaigns and every plausible variant (email_campaigns,
+sequences, email_sequences, automations, campaign, newsletters) return 404.
+Systeme.io's public API does not currently expose campaign/sequence creation
+at all — this isn't something this codebase can fix by correcting a URL.
+Until Systeme.io ships that endpoint (or Kelvin confirms a different, real
+path), run_o3_email_sequence_loader will draft the sequence and persist it to
+mse_email_sequences correctly, but the systeme.io load step will always raise
+SystemeIOError and the campaign_builds row will always land on
+email_sequence_status='failed' — by design (never fails silently), not a bug
+in this agent. The drafted sequence is still fully usable: copy it into
+systeme.io by hand until the API supports this.
 """
 
 import json
