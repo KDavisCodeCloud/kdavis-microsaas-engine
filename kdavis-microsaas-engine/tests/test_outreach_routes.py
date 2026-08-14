@@ -52,12 +52,35 @@ def test_approve_sequence_updates_pending_row(monkeypatch, fake_db):
     assert resp.status_code == 200
     assert resp.json() == {"status": "approved_hitl", "id": "seq-1"}
 
-    seq_updates = [c for c in fake_db.executed if c.table_name == "mse_dm_sequences"]
+    # approve now does a SELECT (to read lead_source) before the UPDATE --
+    # narrow to the update call specifically rather than assuming index 0.
+    seq_updates = [c for c in fake_db.executed if c.table_name == "mse_dm_sequences" and c.calls[0][0] == "update"]
     assert seq_updates[0]._payload["status"] == "approved_hitl"
     assert ("status", "pending_hitl") in seq_updates[0]._filters
 
     events = [c for c in fake_db.executed if c.table_name == "agent_events"]
     assert events[0]._payload["verdict"] == "pass"
+
+
+def test_approve_linkedin_sequence_uses_approved_manual_status(monkeypatch, fake_db):
+    # LinkedIn-sourced sequences must never reach 'approved_hitl' --
+    # mkt_o5_sequence_sender.py polls that exact status and would try to
+    # email a lead with no email on file. 'approved_manual' is the
+    # LinkedIn-only terminal state instead.
+    fake_db.responses["mse_dm_sequences"] = [{"id": "seq-2", "status": "pending_hitl", "lead_source": "linkedin_engager"}]
+    monkeypatch.setattr(outreach_router, "get_supabase", lambda: fake_db)
+
+    resp = client.post(
+        "/outreach/dm-sequences/seq-2/approve",
+        json={"resolved_by": "kelvin"},
+        headers=_auth_header(),
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "approved_manual", "id": "seq-2"}
+
+    seq_updates = [c for c in fake_db.executed if c.table_name == "mse_dm_sequences" and c.calls[0][0] == "update"]
+    assert seq_updates[0]._payload["status"] == "approved_manual"
 
 
 def test_approve_sequence_404_when_not_pending(monkeypatch, fake_db):

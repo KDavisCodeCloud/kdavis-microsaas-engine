@@ -1,8 +1,29 @@
+import hmac
 import os
 import jwt
 from fastapi import Request, HTTPException
 
 _jwk_client = None
+
+
+def require_marketing_api_key(authorization: str | None) -> None:
+    """
+    Shared secret auth for internal/n8n-triggered marketing routes that
+    have no tenant JWT to check (api/routers/marketing.py,
+    api/routers/linkedin_intake.py) — extracted out of marketing.py so a
+    second router doesn't need a private cross-module import of its
+    `_require_api_key`. Any router using this must also be added to
+    tenant_context_middleware's PUBLIC_PATHS (api/middleware/tenant_context.py),
+    since this repo's default is to require a Supabase JWT on every path.
+    """
+    expected = os.environ.get("MARKETING_API_KEY")
+    if not expected:
+        raise HTTPException(status_code=503, detail="MARKETING_API_KEY not configured")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    provided = authorization.removeprefix("Bearer ").strip()
+    if not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="Invalid API key")
 
 
 def _get_jwk_client() -> "jwt.PyJWKClient":

@@ -69,6 +69,10 @@ class FakeQuery:
         self.calls.append(("order", args, kwargs))
         return self
 
+    def limit(self, count):
+        self.calls.append(("limit", count))
+        return self
+
     def eq(self, key, value):
         self._filters.append((key, value))
         return self

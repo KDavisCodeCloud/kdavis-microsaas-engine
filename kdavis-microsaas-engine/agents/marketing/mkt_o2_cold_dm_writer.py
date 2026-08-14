@@ -9,6 +9,16 @@ approval unlocks MKT-O5 (agents/marketing/mkt_o5_sequence_sender.py), the
 separate sender, which sends via Resend with the CAN-SPAM compliance guard
 (core/email_compliance.py — suppression checks, mailing address, one-click
 unsubscribe) wired in as of 2026-08-12.
+
+lead_source (2026-08-14): Apollo.io is suspended, so LinkedIn manual
+outreach (agents/marketing/mkt_li_intake.py, mse_linkedin_leads) is now
+the active first-customer channel alongside it. This writer handles all
+three sources — "apollo" (unchanged behavior, campaign_build_id required),
+"linkedin_manual" (same standard sequence, no campaign_build_id), and
+"linkedin_engager" (a lead who already liked/commented on one of Kelvin's
+posts — the opener references that interaction directly, a warmer touch
+than a cold one). Every source still only ever writes status='pending_hitl'
+rows; this agent never sends anything regardless of source.
 """
 
 import json
@@ -40,6 +50,35 @@ Rules, non-negotiable:
 - End with a low-friction call to action (one question, not a meeting ask)
 - No hype words, no "I noticed you...", no generic flattery
 - touch_1 leads with the pain signal; touch_2 leads with the specific dollar value prop"""
+
+# linkedin_engager leads already interacted with a real post -- touch_1
+# should open by naming that interaction (task spec's own template:
+# "Saw your [like/comment] on my post about [topic] — since you're
+# [title] at [company], wanted to reach out directly..."), not restart
+# cold. Everything else (pain framing, dollar amount, low-friction CTA)
+# stays identical to the standard sequence.
+_ENGAGER_SYSTEM_PROMPT = f"""You are MKT-O2, writing a 2-touch cold outreach DM sequence for one LinkedIn
+lead who already engaged (liked or commented) with one of Kelvin's posts. Return ONLY a single JSON
+object — no prose, no markdown fences — matching exactly this schema:
+
+{{
+  "touch_1": str,
+  "touch_2": str
+}}
+
+touch_1 = opening DM, max {TOUCH_1_MAX_CHARS} chars. MUST open by naming their specific interaction, in
+this shape: "Saw your [like/comment] on my post about [topic] — since you're [title] at [company], wanted
+to reach out directly..." — write it naturally from the real interaction_type/post_topic/title/company
+given below, never the literal bracket placeholders.
+touch_2 = follow-up sent 3 days later, max {TOUCH_2_MAX_CHARS} chars.
+
+Rules, non-negotiable:
+- Frame around "make more money" + a specific dollar amount — never "save time"
+- Name a specific pain from the research below, not a generic problem
+- End with a low-friction call to action (one question, not a meeting ask)
+- No hype words, no generic flattery
+- touch_1 leads with the interaction reference then the pain signal; touch_2 leads with the specific
+  dollar value prop"""
 
 
 def _analyze(system: str, user: str, anthropic_client=None, max_tokens: int = 1024) -> str:
@@ -80,18 +119,26 @@ def _write_audit(db, outcome: str, product_id: str, metadata: dict) -> None:
     }).execute()
 
 
-def _write_dm_for_lead(lead: dict, research_context: dict, anthropic_client=None) -> dict:
+def _write_dm_for_lead(lead: dict, research_context: dict, lead_source: str = "apollo", anthropic_client=None) -> dict:
     safe_lead = DataSanitizationShield.clean({
         "first_name": lead.get("first_name"),
         "title": lead.get("title"),
         "company": lead.get("company"),
     })
+
+    if lead_source == "linkedin_engager":
+        system_prompt = _ENGAGER_SYSTEM_PROMPT
+        safe_lead["interaction_type"] = DataSanitizationShield.clean(lead.get("interaction_type") or "engaged with")
+        safe_lead["post_topic"] = DataSanitizationShield.clean(lead.get("interaction_note") or "a recent post")
+    else:
+        system_prompt = _SYSTEM_PROMPT
+
     user_prompt = (
         f"Lead:\n{json.dumps(safe_lead, indent=2)}\n\n"
         f"Pain language and proof signals from research:\n{json.dumps(research_context, indent=2)}\n\n"
         "Write the 2-touch sequence now."
     )
-    raw = _analyze(_SYSTEM_PROMPT, user_prompt, anthropic_client=anthropic_client)
+    raw = _analyze(system_prompt, user_prompt, anthropic_client=anthropic_client)
     parsed = json.loads(_strip_fences(raw))
     if not isinstance(parsed, dict) or "touch_1" not in parsed or "touch_2" not in parsed:
         raise ValueError(f"MKT-O2 expected {{touch_1, touch_2}}, got: {raw[:200]}")
@@ -106,19 +153,27 @@ def run_o2_cold_dm_writer(
     product_id: str,
     research_report: dict,
     leads: list[dict],
-    campaign_build_id: str,
+    campaign_build_id: Optional[str] = None,
+    lead_source: str = "apollo",
     supabase_client: Optional[Any] = None,
     anthropic_client: Optional[Any] = None,
 ) -> dict:
     """
-    Writes a 2-touch cold DM sequence for each lead. Never sends anything —
-    every row lands with status='pending_hitl'. Raises on any failure —
-    never fails silently. Returns {status, sequences_written}.
+    Writes a 2-touch cold DM sequence for each lead, all from the same
+    lead_source ("apollo" | "linkedin_manual" | "linkedin_engager"). Never
+    sends anything — every row lands with status='pending_hitl'. Raises on
+    any failure — never fails silently. Returns {status, sequences_written}.
+
+    campaign_build_id is only meaningful for lead_source="apollo" (every
+    apollo lead comes from a MKT-ORCH campaign run) — None for either
+    LinkedIn source, and campaign_builds.dm_sequence_status is only
+    touched when a campaign_build_id is actually given.
     """
     db = supabase_client if supabase_client is not None else get_supabase()
 
     _emit_event(db, "dm_sequence_write_started", {
-        "product_id": product_id, "campaign_build_id": campaign_build_id, "lead_count": len(leads),
+        "product_id": product_id, "campaign_build_id": campaign_build_id,
+        "lead_source": lead_source, "lead_count": len(leads),
     })
 
     research_context = DataSanitizationShield.clean({
@@ -129,39 +184,92 @@ def run_o2_cold_dm_writer(
     rows: list[dict] = []
     try:
         for lead in leads:
-            sequence = _write_dm_for_lead(lead, research_context, anthropic_client=anthropic_client)
-            rows.append({
-                "lead_id": lead["id"],
+            sequence = _write_dm_for_lead(lead, research_context, lead_source=lead_source, anthropic_client=anthropic_client)
+            row = {
                 "product_id": product_id,
                 "campaign_build_id": campaign_build_id,
+                "lead_source": lead_source,
                 "touch_1": sequence["touch_1"],
                 "touch_2": sequence["touch_2"],
-            })
+            }
+            if lead_source == "apollo":
+                row["lead_id"] = lead["id"]
+            else:
+                row["linkedin_lead_id"] = lead["id"]
+            rows.append(row)
 
         if rows:
             insert_result = db.table("mse_dm_sequences").insert(rows).execute()
             if not insert_result.data:
                 raise RuntimeError("Insert into mse_dm_sequences returned no data")
 
-        db.table("campaign_builds").update(
-            {"dm_sequence_status": "ready_for_hitl"}
-        ).eq("id", campaign_build_id).execute()
+        if campaign_build_id:
+            db.table("campaign_builds").update(
+                {"dm_sequence_status": "ready_for_hitl"}
+            ).eq("id", campaign_build_id).execute()
 
     except Exception as exc:
         _write_audit(db, "lose", product_id, {
-            "campaign_build_id": campaign_build_id, "error": str(exc), "sequences_written": len(rows),
+            "campaign_build_id": campaign_build_id, "lead_source": lead_source,
+            "error": str(exc), "sequences_written": len(rows),
         })
-        db.table("campaign_builds").update({"dm_sequence_status": "failed"}).eq("id", campaign_build_id).execute()
+        if campaign_build_id:
+            db.table("campaign_builds").update({"dm_sequence_status": "failed"}).eq("id", campaign_build_id).execute()
         raise RuntimeError(f"MKT-O2 DM sequence write failed for product {product_id}: {exc}") from exc
 
     _write_audit(db, "win", product_id, {
-        "campaign_build_id": campaign_build_id, "sequences_written": len(rows),
+        "campaign_build_id": campaign_build_id, "lead_source": lead_source, "sequences_written": len(rows),
     })
     _emit_event(db, "dm_sequence_write_completed", {
-        "product_id": product_id, "campaign_build_id": campaign_build_id, "sequences_written": len(rows),
+        "product_id": product_id, "campaign_build_id": campaign_build_id,
+        "lead_source": lead_source, "sequences_written": len(rows),
     })
 
     return {"status": "ready_for_hitl", "sequences_written": len(rows)}
+
+
+def run_o2_for_linkedin_leads(
+    product_id: str,
+    research_report: dict,
+    supabase_client: Optional[Any] = None,
+    anthropic_client: Optional[Any] = None,
+) -> dict:
+    """
+    Entry point for LinkedIn-sourced leads — n8n/linkedin_outreach_workflow.json
+    calls this once per product with pending mse_linkedin_leads rows.
+    Processes linkedin_engager leads before linkedin_manual (they already
+    showed real interest by liking/commenting — higher priority than a
+    cold CSV lead, per this session's explicit instruction), each source
+    written via run_o2_cold_dm_writer above.
+    """
+    db = supabase_client if supabase_client is not None else get_supabase()
+
+    total_written = 0
+    by_source: dict[str, int] = {}
+    for source in ("linkedin_engager", "linkedin_manual"):
+        leads = (
+            db.table("mse_linkedin_leads")
+            .select("*")
+            .eq("product_id", product_id)
+            .eq("status", "pending_dm")
+            .eq("source", source)
+            .order("created_at")
+            .execute()
+            .data
+            or []
+        )
+        if not leads:
+            by_source[source] = 0
+            continue
+        result = run_o2_cold_dm_writer(
+            product_id=product_id, research_report=research_report, leads=leads,
+            campaign_build_id=None, lead_source=source,
+            supabase_client=db, anthropic_client=anthropic_client,
+        )
+        total_written += result["sequences_written"]
+        by_source[source] = result["sequences_written"]
+
+    return {"status": "ready_for_hitl", "sequences_written": total_written, "by_source": by_source}
 
 
 def run(research_report: dict, campaign_build: dict) -> dict:

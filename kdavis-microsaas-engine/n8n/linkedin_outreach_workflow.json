@@ -1,0 +1,185 @@
+{
+  "id": "linkedin-outreach-001",
+  "name": "LinkedIn Outreach — Daily 8am MST",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "pinData": {},
+  "nodes": [
+    {
+      "id": "cron-trigger",
+      "name": "8am MST",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 15 * * *"
+            }
+          ]
+        }
+      },
+      "position": [200, 300]
+    },
+    {
+      "id": "get-engager-leads",
+      "name": "Get Engager Leads Pending DM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.API_BASE_URL }}/marketing/linkedin/leads?status=pending_dm&source=linkedin_engager",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.MARKETING_API_KEY }}"
+            }
+          ]
+        }
+      },
+      "position": [420, 200]
+    },
+    {
+      "id": "get-manual-leads",
+      "name": "Get Manual Leads Pending DM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.API_BASE_URL }}/marketing/linkedin/leads?status=pending_dm&source=linkedin_manual",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.MARKETING_API_KEY }}"
+            }
+          ]
+        }
+      },
+      "position": [420, 400]
+    },
+    {
+      "id": "trigger-mkt-o2",
+      "name": "Trigger MKT-O2 for LinkedIn Leads",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.API_BASE_URL }}/marketing/linkedin/dm-sequences",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.MARKETING_API_KEY }}"
+            }
+          ]
+        }
+      },
+      "position": [640, 300]
+    },
+    {
+      "id": "wait-for-o2",
+      "name": "Wait For MKT-O2 (background task)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "parameters": {
+        "amount": 90,
+        "unit": "seconds"
+      },
+      "position": [860, 300]
+    },
+    {
+      "id": "get-approved-ready",
+      "name": "Get Approved Ready-To-Paste Count",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "mse_dm_sequences",
+        "filterType": "string",
+        "filterString": "status=eq.approved_manual"
+      },
+      "position": [1080, 200]
+    },
+    {
+      "id": "get-pending-wife-review",
+      "name": "Get Pending Wife Review Count",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "mse_dm_sequences",
+        "filterType": "string",
+        "filterString": "status=eq.pending_hitl"
+      },
+      "position": [1080, 400]
+    },
+    {
+      "id": "build-digest",
+      "name": "Build Digest Body",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "parameters": {
+        "functionCode": "const engagerCount = $('Get Engager Leads Pending DM').first().json.leads.length;\nconst manualCount = $('Get Manual Leads Pending DM').first().json.leads.length;\nconst approvedCount = $('Get Approved Ready-To-Paste Count').all().length;\nconst pendingReviewCount = $('Get Pending Wife Review Count').all().length;\n\nconst body = [\n  `${engagerCount} engager leads queued for DM`,\n  `${manualCount} manual leads queued for DM`,\n  `${approvedCount} sequences approved and ready to paste`,\n  `${pendingReviewCount} sequences pending wife review`,\n].join('\\n');\n\nreturn [{ json: { subject: 'LinkedIn Outreach — Daily Digest', body } }];"
+      },
+      "position": [1300, 300]
+    },
+    {
+      "id": "send-digest",
+      "name": "Send Digest via Resend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.RESEND_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ from: 'outreach@' + $env.PRODUCT_DOMAIN, to: $env.KELVIN_EMAIL, subject: $json.subject, text: $json.body }) }}"
+      },
+      "position": [1520, 300]
+    }
+  ],
+  "connections": {
+    "8am MST": {
+      "main": [
+        [
+          { "node": "Get Engager Leads Pending DM", "type": "main", "index": 0 },
+          { "node": "Get Manual Leads Pending DM", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Get Engager Leads Pending DM": {"main": [[{"node": "Trigger MKT-O2 for LinkedIn Leads", "type": "main", "index": 0}]]},
+    "Get Manual Leads Pending DM": {"main": [[{"node": "Trigger MKT-O2 for LinkedIn Leads", "type": "main", "index": 0}]]},
+    "Trigger MKT-O2 for LinkedIn Leads": {"main": [[{"node": "Wait For MKT-O2 (background task)", "type": "main", "index": 0}]]},
+    "Wait For MKT-O2 (background task)": {
+      "main": [
+        [
+          { "node": "Get Approved Ready-To-Paste Count", "type": "main", "index": 0 },
+          { "node": "Get Pending Wife Review Count", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Get Approved Ready-To-Paste Count": {"main": [[{"node": "Build Digest Body", "type": "main", "index": 0}]]},
+    "Get Pending Wife Review Count": {"main": [[{"node": "Build Digest Body", "type": "main", "index": 0}]]},
+    "Build Digest Body": {"main": [[{"node": "Send Digest via Resend", "type": "main", "index": 0}]]}
+  }
+}

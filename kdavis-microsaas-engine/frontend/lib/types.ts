@@ -119,11 +119,36 @@ export interface ApolloLead {
   created_at: string;
 }
 
+// mse_linkedin_leads (2026-08-14, supabase/migrations/20260814000023_linkedin_leads.sql)
+// -- Apollo.io is suspended, LinkedIn manual outreach is the active
+// first-customer channel. Separate from ApolloLead: no email at all,
+// carries source (linkedin_manual | linkedin_engager) and, for engager
+// leads, which post they interacted with.
+export interface LinkedInLead {
+  id: string;
+  product_id: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  title: string | null;
+  company: string | null;
+  linkedin_url: string;
+  location: string | null;
+  source: "linkedin_manual" | "linkedin_engager";
+  source_post_url: string | null;
+  interaction_type: string | null;
+  interaction_note: string | null;
+  status: "pending_dm" | "contacted";
+  contacted_at: string | null;
+  created_at: string;
+}
+
 export interface DmSequence {
   id: string;
-  lead_id: string;
+  lead_id: string | null;
+  linkedin_lead_id: string | null;
+  lead_source: "apollo" | "linkedin_manual" | "linkedin_engager";
   product_id: string;
-  campaign_build_id: string;
+  campaign_build_id: string | null;
   touch_1: string;
   touch_2: string;
   status: string;
@@ -131,6 +156,7 @@ export interface DmSequence {
   hitl_approved_at: string | null;
   created_at: string;
   mse_apollo_leads: ApolloLead | null;
+  mse_linkedin_leads: LinkedInLead | null;
 }
 
 export const MSE_VERTICALS = [

@@ -13,29 +13,17 @@ minimal standard version of "same API key pattern as existing routers"
 given no existing router actually had one.
 """
 
-import hmac
 import html
-import os
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
+from api.middleware.auth import require_marketing_api_key as _require_api_key
 from core.email_compliance import suppress_email, verify_unsubscribe_token
 from core.supabase_client import get_supabase
 
 router = APIRouter(prefix="/marketing", tags=["marketing"])
-
-
-def _require_api_key(authorization: str | None) -> None:
-    expected = os.environ.get("MARKETING_API_KEY")
-    if not expected:
-        raise HTTPException(status_code=503, detail="MARKETING_API_KEY not configured")
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-    provided = authorization.removeprefix("Bearer ").strip()
-    if not hmac.compare_digest(provided, expected):
-        raise HTTPException(status_code=401, detail="Invalid API key")
 
 
 _UNSUB_PAGE = """<!doctype html><html><head><meta charset="utf-8">
