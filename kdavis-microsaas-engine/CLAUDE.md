@@ -29,6 +29,7 @@ Kelvin architects and designs. Claude Code executes. Kelvin validates all output
 - **Automation:** n8n (self-hosted)
 - **Auth:** Supabase Auth — JWT with `tenant_id` claim
 - **Payments:** Stripe — one dedicated MSE account (THD Agentic Systems LLC) shared across every MSE product, never a separate account per product and never shared with non-MSE products (Cloud Decoded, Decoded Holdings). Each product gets its own Stripe Product + Prices within that one account — see the Stripe Architecture rule below for the exact structure.
+- **Domains:** one shared parent domain, `thdstack.com` (registered at Namecheap), every product is a subdomain of it (`[productslug].thdstack.com`) — never its own apex domain. See the Domain Architecture rule below for the exact per-product setup steps.
 - **Email:** Resend
 - **Languages:** Python, TypeScript, Bash
 - **Model routing:** Haiku for high-volume scraping AND for the Dispatch/Verdict research swarm (`agents/orchestrator`, `agents/aggregator` — switched from Sonnet 2026-07-19 as a cost-optimization pass, verified via live regression tests against known cases). Sonnet remains the default everywhere else (brief generation, naming, retention digest, CEO dashboard routes) via `core/llm_router.py`'s `model=` parameter, which defaults to Sonnet — only the swarm agents pass `model=HAIKU` explicitly. Do not change either assignment without new regression testing.
@@ -39,6 +40,7 @@ Kelvin architects and designs. Claude Code executes. Kelvin validates all output
 
 1. `tenant_id` on every table — RLS enforced, no exceptions
 2. One dedicated Stripe account for all of MSE — never Decoded Holdings, never Cloud Decoded, never a new account per product (see Stripe Architecture rule below)
+2a. One shared parent domain (`thdstack.com`) for all of MSE — every product is `[productslug].thdstack.com`, never its own apex domain (see Domain Architecture rule below)
 3. Every agent emits `POST /events` on every state change — CEO dashboard depends on this
 4. `get_supabase_for_request(jwt)` in all API routes touching tenant data — never service role in routes
 5. DataSanitizationShield runs before any data embedding
@@ -183,9 +185,26 @@ Full system prompts and Supabase table templates (`product_health_metrics`, `inc
 
 ---
 
-## RULE: CUSTOMER-FACING DOCS (docs.[productdomain].com)
+## RULE: DOMAIN ARCHITECTURE FOR MSE PRODUCTS (2026-08-09)
 
-Every MSE product ships with a dedicated docs subdomain at launch — not internal documentation, the customer's own reference for everything they can see, do, and troubleshoot. Full content template (every page, every section, content rules) is in `docs/customer-docs-sop-template.md`. Stack: Nextra (preferred) or Mintlify, deployed as a separate Vercel project, CNAME to `docs.[productdomain].com`.
+**Decision:** every MSE product is a subdomain of the one shared parent domain **`thdstack.com`** — never its own apex domain. `[productslug].thdstack.com` (e.g. `showingsignal.thdstack.com`), not `[productslug].com`. This mirrors the Stripe Architecture rule's shape exactly: one shared account-level resource (there, the Stripe account; here, the parent domain) with per-product isolation underneath it (there, Product+Prices; here, a subdomain + its own Vercel project).
+
+**Registrar and DNS, stated plainly because this got confused once already:** `thdstack.com` is registered at Namecheap. Its nameservers have moved between Namecheap's own (BasicDNS) and Vercel's (`ns1`/`ns2.vercel-dns.com`) at different points — as of Showing Signal's launch (2026-08-08/09) they are back on **Namecheap's own nameservers**, confirmed against three independent resolvers including the authoritative `.com` registry itself, not just Vercel's own dashboard (which had stale cached state claiming otherwise). Always verify current nameservers with `dig +short NS thdstack.com @8.8.8.8` before assuming which side is authoritative — don't trust a cached dashboard view.
+
+**Per-product setup, every time (Showing Signal is the reference implementation):**
+1. `vercel project link --project [productslug] --yes` from the product's `frontend/` directory (or `vercel link --project` if the CLI prompts) — creates a dedicated Vercel project per product, not a shared one.
+2. Set the product's `NEXT_PUBLIC_*` env vars on that Vercel project (`vercel env add ... production`).
+3. `vercel --prod` to deploy.
+4. `vercel domains add [productslug].thdstack.com [productslug]` to attach the subdomain to that project.
+5. `vercel domains inspect [productslug].thdstack.com` to get the exact record Vercel wants — as of this writing that's a plain `A` record to `76.76.21.21` (since thdstack.com's nameservers are Namecheap's, not Vercel's — if that ever flips back to Vercel's nameservers, no DNS-provider-side record is needed at all, Vercel's own zone handles it automatically).
+6. **Owner-only action:** add that `A` record in Namecheap → Domain List → thdstack.com → Advanced DNS, Host = the product slug (e.g. `showingsignal`), Value = `76.76.21.21`. Claude Code has no Namecheap API access and cannot do this step itself.
+7. Update the product's backend `ALLOWED_ORIGINS` (CORS) to include both the Vercel-provided `*.vercel.app` URL and the final `[productslug].thdstack.com` domain — the former is live and testable immediately, before DNS propagates.
+
+**What Claude Code never does:** never creates a new apex domain/registration per product, never assumes Vercel's nameservers are authoritative without checking live DNS first, never skips straight to reporting a domain "live" without curling it directly (see kdavis-microsaas-engine/showing-signal's own dated feedback memory on verifying deploys before declaring done).
+
+## RULE: CUSTOMER-FACING DOCS (docs.[productslug].thdstack.com)
+
+Every MSE product ships with a dedicated docs subdomain at launch — not internal documentation, the customer's own reference for everything they can see, do, and troubleshoot. Full content template (every page, every section, content rules) is in `docs/customer-docs-sop-template.md`. Stack: Nextra (preferred) or Mintlify, deployed as a separate Vercel project, following the same Domain Architecture rule above: `docs.[productslug].thdstack.com`, not a bare `docs.[productslug].com` (superseded 2026-08-09 — see the Domain Architecture rule for why every MSE product sits under the shared `thdstack.com` parent instead of its own apex domain).
 
 ---
 
@@ -239,6 +258,28 @@ Kelvin's diagnosis: obvious misses were reaching the dashboard and wasting revie
 **Applied retroactively 2026-07-20:** 15 pre-existing rows below $3,500 (the real-batch results already logged in `MSE-Build-Order.md`) were archived to `opportunity_pipeline_rejections` and deleted from `opportunity_pipeline`. Two READY_TO_BUILD opportunities that predated the confidence-score system (no recorded score, so unverifiable against the new `>=75` bar) were re-run through a real Verdict call rather than guessed at: "Campaign Aware Replenishment" (Shopify) came back confidence 61 → `watch`; "Ninety Nine Comply" (contractor 1099 compliance) came back `net_mrr_floor: None`/confidence 20 → `killed_below_floor`, deleted (its `mse_build_briefs` row survives with `opportunity_id` set to `NULL` via the existing `ON DELETE SET NULL` FK — the brief content isn't destroyed, just decoupled from a now-gone opportunity).
 
 **Prompt-side companion rule (`agents/orchestrator/prompt.md`, same date):** before scoring any opportunity, Dispatch must answer three questions internally — who is the exact buyer, what specific manual workflow is being replaced, and why the incumbent hasn't shipped this natively (naming one of: regulatory complexity, different customer segment, technical architecture constraint, or intentional product decision). If the third question can't be answered with a specific structural reason, the idea is discarded before it reaches Verdict at all. This targets the same root cause as the MRR gate from the other direction — category-level ideas without a durable, named reason for the gap's existence are exactly what's been dying on Verdict's math checks.
+
+---
+
+## RULE: PIPELINE HEALTH AUTO-RECALIBRATION (2026-08-15)
+
+Formalizes and automates what the HARD MRR GATE rule above left as a narrative target ("20%+ BUILD+CONDITIONAL across a rolling 10, tracked in `MSE-Build-Order.md`, not enforced in any prompt"). Verdict and Dispatch are both stateless per-call LLM invocations with no memory of prior submissions — `agents/aggregator/pipeline_health.py` is that memory now, and it runs automatically, not just when someone happens to notice the rate is low.
+
+**Two new Step 2.5 hard-stop checks, `agents/aggregator/prompt.md`:** every opportunity whose solution concept depends on integrating with a third-party platform's API must clear three checks before Step 3's math — `THIRD_PARTY_APPROVAL_GATE` (does shipping require platform-owner approval that could block launch), `MID_ACQUISITION_PLATFORM` (is the target platform currently being acquired/in ownership transition), `API_CANNOT_PERFORM_CORE_ACTION` (does the platform's current API actually support the action the concept needs). **These three are permanent — never loosened, by any recalibration, for any reason.** Enforced twice: the model self-reports via new `verdict_v2_output` boolean fields, and `agents/aggregator/agent.py`'s `_evaluate()` independently re-checks those fields and forces `status = "rejected"` regardless of what the money said, same "never trust the model's self-report alone" principle as the MRR floor check. A soft, fourth field (`integration_dependency_count`) is tracked alongside these but is *not* a hard stop — see recalibration below.
+
+**The monitor, `agents/aggregator/pipeline_health.py`:** after every research run (new `check_pipeline_health` node in `agents/orchestrator/agent.py`'s LangGraph, between `write_pipeline` and `summarize`), computes the real rolling-10-submission build rate from `opportunity_pipeline` + `opportunity_pipeline_rejections` merged by timestamp. If that rate is below **10%**:
+
+1. First checks whether the *research pool* looks exhausted (fewer real submissions than the 10-window, or the same handful of anchor tools repeating) — if so, that's the trigger regardless of rejection-reason breakdown.
+2. Otherwise, computes the rejection-reason distribution across the window (`MRR_FLOOR | INTEGRATION_DEPENDENCY | API_CAPABILITY | THIRD_PARTY_APPROVAL_GATE | MID_ACQUISITION_PLATFORM | PAIN_NOT_CONFIRMED | GAP_NOT_IDENTIFIED | OTHER`, attributed via Verdict's own sequential step structure — whichever step failed first). A category must be killing **over 40%** of the window to count as dominant.
+
+**Defined recalibrations (auto-applied, logged, never requiring a HITL click — Kelvin's explicit choice for this rule):**
+- `API_CAPABILITY` dominant → Dispatch is instructed to expand research toward "read-only reporting" concepts that don't need write/action capability the target API lacks. Does not loosen the hard stop — stops feeding Verdict ideas that predictably fail it.
+- `INTEGRATION_DEPENDENCY` dominant → Verdict's soft criterion recalibrates: one required integration to a widely-adopted platform (Stripe, Gmail, Slack, or equivalent) becomes CONDITIONAL instead of DO_NOT_BUILD. Two+ integrations, or one to a niche platform, still DO_NOT_BUILD. Never touches the three hard stops above.
+- `MRR_FLOOR` dominant → Verdict is instructed to research current market pricing more thoroughly before rejecting on price alone. Does not loosen the $3,500 absolute floor or any price-adjusted floor value — improves the research feeding into that unchanged floor.
+- Research pool exhausted → Dispatch is instructed to add Reddit (elevated beyond its current "Secondary" framing), AppSumo, and job-posting sources for that run — an explicit, temporary exception to "search ONLY these sources."
+- `THIRD_PARTY_APPROVAL_GATE` and `MID_ACQUISITION_PLATFORM` dominant → **no action defined, by design.** Logged to `mse_pipeline_recalibrations` (`target='none'`) for visibility only. These are two of the three permanent hard stops named above — this rule does not let pipeline health pressure ever loosen them, even indirectly.
+
+**Mechanism, not a self-modifying prompt file:** a recalibration is a row in `mse_pipeline_recalibrations` (migration `20260815000026`), not an edit to `prompt.md` on disk. `agents/aggregator/agent.py` and `agents/orchestrator/agent.py` each read the active row for their side (`target='verdict'` / `target='dispatch'`) via `get_active_recalibration_text()` and prepend it to that call's system prompt at runtime — same "soft input, never a gate" treatment as the existing RAG-context block, so a DB read failure never blocks a real evaluation. Fully reversible (deactivate the row), fully logged (the row itself is the log), no redeploy needed either direction. A fresh trigger for the same target replaces whatever was previously active there — never stacks.
 
 ---
 

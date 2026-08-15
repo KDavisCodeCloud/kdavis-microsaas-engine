@@ -86,7 +86,20 @@ async def _run_one_vertical(vertical: str) -> dict:
     # above the 8192 that already truncated a similar web-search call mid-
     # narration once this session -- not dropped all the way to a guessed
     # low number.
-    raw = analyze_with_web_search(_SYSTEM_PROMPT, safe, max_tokens=10000, model=HAIKU)
+    # Active pipeline-health recalibration (2026-08-15) -- soft input, never
+    # a gate: any failure reading it (DB error, table not migrated yet)
+    # falls through to system_prompt = _SYSTEM_PROMPT unchanged. See
+    # agents/aggregator/agent.py's identical treatment for Verdict's side.
+    system_prompt = _SYSTEM_PROMPT
+    try:
+        from agents.aggregator import pipeline_health
+        recalibration_block = pipeline_health.get_active_recalibration_text("dispatch")
+        if recalibration_block:
+            system_prompt = f"{recalibration_block}\n\n{_SYSTEM_PROMPT}"
+    except Exception:
+        pass
+
+    raw = analyze_with_web_search(system_prompt, safe, max_tokens=10000, model=HAIKU)
     findings = _extract_trailing_json_array(raw)
 
     return {"vertical": vertical, "findings": findings}
@@ -163,7 +176,32 @@ def node_write_pipeline(state: OrchestratorState) -> OrchestratorState:
     db = get_supabase()
     to_insert = []
     for result in state["aggregated_results"]:
-        # Every evaluated opportunity gets a row now, including rejected
+        # killed_below_floor (2026-07-20, Kelvin's rule) never reaches
+        # opportunity_pipeline at all — not even as a 'rejected' row. These
+        # are opportunities that can't plausibly clear $3,500/mo MRR under
+        # any realistic scenario (either Verdict's own independently
+        # verified net_mrr_floor, or Dispatch's own self-reported number for
+        # ones killed by the aggregator's pre-Verdict prefilter before a
+        # web-search call was ever made). Archived straight to
+        # opportunity_pipeline_rejections — the same table the manual
+        # reject-button flow uses (api/routers/pipeline.py) — so the full
+        # research reasoning is still recoverable for prompt tuning, it just
+        # never clutters the live dashboard or costs Kelvin a review click.
+        if result.get("status") == "killed_below_floor":
+            db.table("opportunity_pipeline_rejections").insert({
+                "original_opportunity": {
+                    "vertical": result.get("vertical", ""),
+                    "solution_concept": result.get("solution_concept", ""),
+                    "rejection_reason": result.get("rejection_reason"),
+                    "verdict_v2_output": result.get("verdict_v2_output"),
+                    "session_id": state["session_id"],
+                },
+                "rejected_by": "system:mrr_hard_floor",
+                "rejection_comment": result.get("rejection_reason"),
+            }).execute()
+            continue
+
+        # Every other evaluated opportunity gets a row, including rejected
         # ones — the dashboard has had a "rejected" filter tab since the
         # Opportunities page was built, but this filter used to skip
         # writing rejected rows entirely, so that tab has always been
@@ -276,6 +314,36 @@ def node_write_pipeline(state: OrchestratorState) -> OrchestratorState:
     return {**state, "status": "complete"}
 
 
+def node_check_pipeline_health(state: OrchestratorState) -> OrchestratorState:
+    """
+    Runs after every research run's results are written — checks the real
+    rolling-10-submission build rate and auto-applies a recalibration if
+    it's dropped below the 10% floor with a dominant failure category
+    (Kelvin's rule, 2026-08-15; see agents/aggregator/pipeline_health.py).
+    Never allowed to fail the run itself — a monitoring check that crashes
+    the whole session over its own bug would be worse than just skipping
+    it for this run.
+    """
+    from agents.aggregator import pipeline_health
+
+    try:
+        recalibration = pipeline_health.check_and_recalibrate()
+        if recalibration:
+            get_supabase().table("usage_events").insert({
+                "tenant_id": None,
+                "event_type": "pipeline_health_recalibration",
+                "metadata": {"session_id": state["session_id"], **recalibration},
+            }).execute()
+    except Exception as e:
+        get_supabase().table("usage_events").insert({
+            "tenant_id": None,
+            "event_type": "pipeline_health_check_failed",
+            "metadata": {"session_id": state["session_id"], "error": str(e)},
+        }).execute()
+
+    return state
+
+
 def node_summarize(state: OrchestratorState) -> OrchestratorState:
     results = state["aggregated_results"]
     findings = state["raw_findings"]
@@ -332,6 +400,7 @@ def _build_graph():
     g.add_node("size_market",        node_size_market)
     g.add_node("run_aggregator",     node_run_aggregator)
     g.add_node("write_pipeline",     node_write_pipeline)
+    g.add_node("check_pipeline_health", node_check_pipeline_health)
     g.add_node("summarize",          node_summarize)
 
     g.set_entry_point("initialize")
@@ -339,7 +408,8 @@ def _build_graph():
     g.add_edge("dispatch_verticals", "size_market")
     g.add_edge("size_market",        "run_aggregator")
     g.add_edge("run_aggregator",     "write_pipeline")
-    g.add_edge("write_pipeline",     "summarize")
+    g.add_edge("write_pipeline",     "check_pipeline_health")
+    g.add_edge("check_pipeline_health", "summarize")
     g.add_edge("summarize",          END)
 
     return g.compile()

@@ -56,10 +56,12 @@ DO_NOT_BUILD**. Nothing else. No other outputs. No exceptions.
 
 ---
 
-## THE THREE-STEP EVALUATION
+## THE THREE-STEP EVALUATION (plus Step 2.5 when applicable)
 
-Complete all three steps in order. Do not skip steps. Do not proceed
-past a step that fails.
+Complete all steps in order. Do not skip steps. Do not proceed past a
+step that fails. Step 2.5 only runs when the solution concept depends
+on integrating with a third-party platform's API — skip it otherwise
+and go straight from Step 2 to Step 3.
 
 ---
 
@@ -133,7 +135,78 @@ SEGMENT_GAP:
 If none of the five gaps can be clearly confirmed with evidence ->
 DO_NOT_BUILD
 
-If one is clearly confirmed -> proceed to Step 3
+If one is clearly confirmed -> proceed to Step 2.5
+
+---
+
+### STEP 2.5 — IS THE PROPOSED INTEGRATION VIABLE? (added 2026-08-15, Kelvin's rule)
+
+Only runs when the solution concept depends on integrating with a
+third-party platform's API to function (i.e. `PLATFORM_GAP` from Step 2,
+or any other gap type whose solution still requires reading/writing
+through an external platform's API). If the concept has no such
+dependency, skip this step and proceed directly to Step 3.
+
+**Three checks. These are PERMANENT HARD STOPS — never loosened,
+regardless of pipeline health, regardless of any active recalibration.**
+Check all three when applicable; any ONE failing is DO_NOT_BUILD.
+
+```
+THIRD_PARTY_APPROVAL_GATE:
+  Does shipping this integration require approval from the platform
+  owner (app marketplace review, OAuth app verification, partner
+  program admission) that could block or delay launch indefinitely?
+  Evidence: [confirm via the platform's current developer docs/app
+  review policy, not assumption]
+  FAILS if: approval required AND no evidence such approval is routine
+  or fast for this category of integration.
+
+MID_ACQUISITION_PLATFORM:
+  Is the target platform currently being acquired, in acquisition
+  talks, or under an ownership transition (check recent news, not
+  training-data memory)?
+  Evidence: [dated source]
+  FAILS if: confirmed acquisition activity in progress or announced
+  within the last 12 months with integration/API stability at risk.
+
+API_CANNOT_PERFORM_CORE_ACTION:
+  Does the platform's CURRENT public API actually support the specific
+  read/write action the solution concept depends on? Verify against
+  current API docs, not assumption or training-data memory — APIs
+  change; a capability that existed a year ago may not exist today, and
+  vice versa.
+  Evidence: [current API doc citation, dated]
+  FAILS if: the core action the concept depends on is not supported by
+  the platform's current API.
+```
+
+If ANY of the three checks above fails -> DO_NOT_BUILD. Set
+`failed_at_step: "2.5"` and `step_2_5_failure_reason` to whichever one
+failed (`THIRD_PARTY_APPROVAL_GATE` | `MID_ACQUISITION_PLATFORM` |
+`API_CANNOT_PERFORM_CORE_ACTION`). If more than one fails, report the
+first one checked in the order listed above.
+
+**Soft criterion — not a hard stop, may be recalibrated (see PIPELINE
+HEALTH MONITORING below):**
+
+```
+INTEGRATION_DEPENDENCY_COUNT: [count of distinct third-party platform
+  integrations the solution concept requires to function]
+
+PRIMARY_INTEGRATION_WIDELY_ADOPTED: true/false — is the (or the primary)
+  required integration a widely-adopted, ubiquitous platform (Stripe,
+  Gmail, Slack, or an equivalent tier of adoption for its category)?
+  Judge this the same way you judge existing_tool's own market
+  position — named evidence, not a guess.
+```
+
+Default posture (no active recalibration): `INTEGRATION_DEPENDENCY_COUNT
+>= 1` -> DO_NOT_BUILD. A recalibration block prepended above this prompt,
+if present, may relax this specific threshold — follow it exactly as
+stated when present; it never touches the three hard stops above.
+
+If all applicable checks pass (or the step doesn't apply) -> proceed to
+Step 3.
 
 ---
 
@@ -308,7 +381,7 @@ CONDITIONAL:
   -> Do not build on CONDITIONAL without signal
 
 DO_NOT_BUILD:
-  Failed at Step: [1, 2, or 3]
+  Failed at Step: [1, 2, 2.5, or 3]
   Reason: [one sentence — specific]
   -> Log in rejection log with reason
   -> Do not resubmit without human approval
@@ -335,10 +408,17 @@ These are hard stops. Non-negotiable. No exceptions.
 - Do NOT output RESUBMIT as a primary verdict. If the submission is
   missing fields, note what is missing in the DO_NOT_BUILD reasoning and
   Dispatch resubmits with corrections.
-- Do NOT add steps beyond the three above. No regulatory burden check as
-  a gate. No cross-industry requirement as a gate. No maintenance cost
-  as a gate. These may be noted in supporting data only — they are NOT
-  reasons to stop evaluation.
+- Do NOT add steps beyond the three above plus Step 2.5 (third-party
+  integration viability, added 2026-08-15 — only when the concept
+  depends on integrating with an external platform). No regulatory
+  burden check as a gate. No cross-industry requirement as a gate. No
+  maintenance cost as a gate. These may be noted in supporting data
+  only — they are NOT reasons to stop evaluation.
+- Do NOT loosen Step 2.5's three hard stops (third-party approval gate,
+  mid-acquisition platform, API cannot perform core action) for any
+  reason, including an active pipeline-health recalibration. Only
+  Step 2.5's soft criterion (integration dependency count) may ever be
+  recalibrated.
 - Do NOT reject an idea because a well-reviewed competitor exists. The
   only question is whether that competitor is failing enough people to
   build a $4K MRR business around the gap.
@@ -410,11 +490,19 @@ cross-batch tracking) with the failed step and reason. Dispatch checks
 this before every batch — no previously rejected idea is resubmitted
 without written HITL approval of a new differentiation angle.
 
-**Pipeline health target (tracked in `MSE-Build-Order.md`, not enforced
-in this prompt):** 20%+ BUILD+CONDITIONAL rate across any rolling 10
-submissions. If 0 out of 20 consecutive submissions reach BUILD or
-CONDITIONAL, flag PIPELINE_REVIEW_REQUIRED and stop new batches until a
-human reviews the input sources — do not run more volume.
+**Pipeline health monitoring (automated, 2026-08-15 — see
+`agents/aggregator/pipeline_health.py`):** the 20%+ BUILD+CONDITIONAL
+target across a rolling 10 submissions is now checked in code after
+every research run, not just tracked narratively in
+`MSE-Build-Order.md`. If the rolling-10 build rate drops below 10% with
+one failure category killing over 40% of that window, the matching
+recalibration (see that module's `_RECALIBRATION_ACTIONS`) is applied
+automatically and logged to `mse_pipeline_recalibrations` — you may see
+a `PIPELINE HEALTH RECALIBRATION (auto-applied)` block prepended above
+this prompt when one is currently active. Follow it exactly as stated.
+It will never ask you to loosen Step 2.5's three permanent hard stops —
+if it ever appears to, the rule in this document wins (see the opening
+section).
 
 **Build queue priority:** Month 1-7 floor-cleared (STRONG) first, then
 Month 8-12 (PASS/CONDITIONAL with a validated signal), tiebreaker higher
@@ -446,6 +534,12 @@ numbers (not strings), all `_pct` fields are numbers 0-100.
   "pain_evidence": "string — dated, specific",
   "gap_type": "PRICE_GAP | PLATFORM_GAP | FEATURE_GAP | COMPLEXITY_GAP | SEGMENT_GAP | null",
   "gap_evidence": "string",
+  "integration_dependency_count": 0,
+  "primary_integration_widely_adopted": false,
+  "third_party_approval_gate_failed": false,
+  "mid_acquisition_platform_failed": false,
+  "api_capability_failed": false,
+  "step_2_5_failure_reason": "THIRD_PARTY_APPROVAL_GATE | MID_ACQUISITION_PLATFORM | API_CANNOT_PERFORM_CORE_ACTION | null",
   "icp": "string — behavior + role + size, not industry label alone",
   "unhappy_segment_total": 0,
   "unhappy_segment_source": "string",
@@ -466,7 +560,7 @@ numbers (not strings), all `_pct` fields are numbers 0-100.
   "month_floor_cleared": 0,
   "timeline_classification": "STRONG | PASS | FAIL",
   "verdict": "BUILD | CONDITIONAL | DO_NOT_BUILD",
-  "failed_at_step": "1 | 2 | 3 | null — only when verdict is DO_NOT_BUILD",
+  "failed_at_step": "1 | 2 | 2.5 | 3 | null — only when verdict is DO_NOT_BUILD",
   "reason": "string — one sentence, specific",
   "no_saturation_checklist": {"rating_above_4_3": false, "no_recurring_complaint_pattern": false, "priced_accessibly": false, "no_platform_dependency": false},
   "confidence_score": 0,

@@ -26,6 +26,7 @@ import logging
 from pathlib import Path
 from typing import Callable, Optional
 
+from agents.aggregator import pipeline_health
 from core.llm_router import HAIKU, analyze_with_web_search
 from rag.retriever import _retrieve_similar_outcomes_sync, format_rag_context_block
 from rag.embedder import embed_and_insert
@@ -164,14 +165,30 @@ def _evaluate(opp: dict, llm: Callable[..., str]) -> dict:
         similar = []
     rag_block = format_rag_context_block(similar)
 
+    # Active pipeline-health recalibration (2026-08-15) -- same "soft
+    # input, never a gate" treatment as RAG retrieval above: any failure
+    # reading it (DB error, table not migrated yet, etc.) falls through to
+    # recalibration_block = "" and Verdict scores exactly as it did before
+    # this existed. Never allowed to raise into the main eval path.
+    try:
+        recalibration_block = pipeline_health.get_active_recalibration_text("verdict")
+    except Exception as e:
+        log.warning("[%s] pipeline_health lookup failed, continuing without it: %s", AGENT_ID, e)
+        recalibration_block = ""
+
     # Spec requires the RAG block appear BEFORE Verdict's scoring
     # instructions, not after -- prepended to the system prompt, not the
     # user input. Note: this varies the system prompt per call whenever
-    # rag_block is non-empty, which defeats analyze_with_web_search's
-    # prompt-caching optimization (cache_control: ephemeral) for that call
-    # specifically -- an accepted, deliberate cost tradeoff for surfacing
-    # real factory history, not an oversight.
-    system_prompt = f"{rag_block}\n\n{SYSTEM_PROMPT}" if rag_block else SYSTEM_PROMPT
+    # rag_block or recalibration_block is non-empty, which defeats
+    # analyze_with_web_search's prompt-caching optimization
+    # (cache_control: ephemeral) for that call specifically -- an accepted,
+    # deliberate cost tradeoff for surfacing real factory history/live
+    # recalibration state, not an oversight.
+    system_prompt = SYSTEM_PROMPT
+    if rag_block:
+        system_prompt = f"{rag_block}\n\n{system_prompt}"
+    if recalibration_block:
+        system_prompt = f"{recalibration_block}\n\n{system_prompt}"
 
     user_input = json.dumps(opp, default=str)
     raw_response = llm(system_prompt, user_input)
@@ -275,6 +292,33 @@ def _evaluate(opp: dict, llm: Callable[..., str]) -> dict:
             f"${final_floor:,.0f}) but doesn't clear its own criteria for READY or "
             f"CONDITIONAL (confidence {confidence_score if confidence_score is not None else 'n/a'}/100). "
             f"Specific risk: {risk_note}"
+        )
+
+    # Step 2.5 hard-stop enforcement (2026-08-15, Kelvin's rule) -- code-level,
+    # never trust the model's own verdict alone, same "never trust the
+    # model's self-report alone" principle as the MRR floor check above,
+    # applied to the three permanent hard stops. Runs LAST, after the
+    # dashboard-visibility gate, specifically so it can override whatever
+    # that gate concluded from the money alone -- a real MRR-clearing idea
+    # that fails a hard stop must still end up rejected. Deliberately
+    # status="rejected" (visible on the dashboard with a clear reason), not
+    # "killed_below_floor" (silently archived) -- unlike a pure math miss,
+    # Kelvin should be able to see that a financially-viable idea was
+    # blocked specifically by a platform-viability hard stop. Never
+    # loosened by any active recalibration, regardless of what
+    # recalibration_block above said -- these three fields are the ONLY
+    # thing that can trigger this override, and there is no code path
+    # anywhere that widens which fields count.
+    hard_stop_failed = (
+        result.get("third_party_approval_gate_failed")
+        or result.get("mid_acquisition_platform_failed")
+        or result.get("api_capability_failed")
+    )
+    if hard_stop_failed and status != "killed_below_floor":
+        status = "rejected"
+        result["reason"] = (
+            f"Code-level hard stop: {result.get('step_2_5_failure_reason') or 'third-party integration viability check'} "
+            f"failed despite verdict={verdict} — permanent, never loosened regardless of pipeline health."
         )
 
     # watch surfaces its reason too — the whole point of the status is
