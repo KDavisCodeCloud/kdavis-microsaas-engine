@@ -1,153 +1,47 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { useState } from "react";
 import { DashboardShell } from "@/components/shell/DashboardShell";
 import { TopBar } from "@/components/shell/TopBar";
 import { SectionCard } from "@/components/ui/SectionCard";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ProgressBar } from "@/components/ui/ProgressBar";
-import { MSE_VERTICALS, type SessionSummary } from "@/lib/types";
+import { MSE_VERTICALS } from "@/lib/types";
+import { useRuns, useElapsedSeconds } from "@/lib/runs/RunsContext";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-
-type RunState = "idle" | "running" | "polling" | "complete" | "error";
-
-type SessionOpportunity = {
-  id: string;
-  vertical: string;
-  solution_concept: string;
-  conservative_mrr_potential: number;
-  build_confidence_score: number | null;
-  status: string;
-};
-
-function summarizeOpportunities(verticalsRequested: string[], opportunities: SessionOpportunity[]): SessionSummary {
-  const byStatus = (s: string) => opportunities.filter((o) => o.status === s).length;
-  const top = [...opportunities].sort((a, b) => (b.build_confidence_score ?? 0) - (a.build_confidence_score ?? 0))[0];
-  const readyToBuild = opportunities.filter((o) => o.status === "READY_TO_BUILD");
-  const firstBuild = [...readyToBuild].sort((a, b) => (b.build_confidence_score ?? 0) - (a.build_confidence_score ?? 0))[0];
-  return {
-    session_id: "",
-    verticals_scanned: verticalsRequested.length,
-    ready_to_build: readyToBuild.length,
-    validated_pending_review: byStatus("validated"),
-    watch_list: byStatus("watch"),
-    rejected: byStatus("rejected"),
-    top_opportunity: top?.solution_concept ?? null,
-    recommended_first_build: firstBuild?.solution_concept ?? null,
-  };
-}
+const RUN_LABEL = "Research Swarm";
+const EST_SECONDS = 180;
 
 export default function ResearchPage() {
-  const supabase = createClient();
   const [selected, setSelected] = useState<string[]>([]);
-  const [state, setState] = useState<RunState>("idle");
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [summary, setSummary] = useState<SessionSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [elapsed, setElapsed] = useState(0);
-  const [runVerticals, setRunVerticals] = useState<string[]>([]);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const elapsedRef = useRef(0);
+  const { getRunByLabel, startRun } = useRuns();
+
+  // Sourced from RunsContext (mounted once at the root layout), not local
+  // state -- this is what makes the run survive navigating to another tab
+  // and back. See frontend/lib/runs/RunsContext.tsx's module docstring.
+  const run = getRunByLabel(RUN_LABEL);
+  const isRunning = run?.status === "queued" || run?.status === "running";
+  const elapsed = useElapsedSeconds(run?.startedAt ?? Date.now(), isRunning);
 
   function toggleVertical(v: string) {
-    setSelected((prev) => prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]);
+    setSelected((prev) => (prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]));
   }
-
   function selectAll() { setSelected([...MSE_VERTICALS]); }
   function selectNone() { setSelected([]); }
 
-  // Poll session when we have an ID. /research/session/{id} returns
-  // {session_id, opportunities, session_summary}. session_summary is only
-  // present once the orchestrator's completion event lands in usage_events
-  // — until then it's null and we show a live-updating preview derived
-  // from opportunities instead. A fixed time ceiling is a fallback safety
-  // net in case that completion event is ever missed for some reason,
-  // not the primary "is it done" signal anymore.
-  const POLL_TIMEOUT_SECONDS = 210;
-  useEffect(() => {
-    if (!sessionId || state !== "polling") return;
-    const poll = setInterval(async () => {
-      try {
-        const { data: { session } } = await supabase.auth.getSession();
-        if (!session) return;
-
-        const res = await fetch(`${API_BASE}/research/session/${sessionId}`, {
-          headers: { Authorization: `Bearer ${session.access_token}` },
-        });
-        if (res.ok) {
-          const data = await res.json();
-          const opportunities = (data.opportunities ?? []) as SessionOpportunity[];
-
-          if (data.session_summary) {
-            setSummary(data.session_summary as SessionSummary);
-            setState("complete");
-            clearInterval(poll);
-            if (timerRef.current) clearInterval(timerRef.current);
-            return;
-          }
-
-          setSummary(summarizeOpportunities(runVerticals, opportunities));
-
-          if (elapsedRef.current >= POLL_TIMEOUT_SECONDS) {
-            setState("complete");
-            clearInterval(poll);
-            if (timerRef.current) clearInterval(timerRef.current);
-          }
-        }
-      } catch { /* keep polling */ }
-    }, 5000);
-    return () => clearInterval(poll);
-  }, [sessionId, state, runVerticals, supabase]);
-
-  // Elapsed timer
-  useEffect(() => {
-    if (state === "running" || state === "polling") {
-      timerRef.current = setInterval(() => setElapsed((e) => { elapsedRef.current = e + 1; return e + 1; }), 1000);
-    } else {
-      if (timerRef.current) clearInterval(timerRef.current);
-      if (state === "idle") { setElapsed(0); elapsedRef.current = 0; }
-    }
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
-  }, [state]);
-
   async function runSwarm() {
-    setState("running");
     setError(null);
-    setSummary(null);
-    setElapsed(0);
-    elapsedRef.current = 0;
     const verticals = selected.length > 0 ? selected : [...MSE_VERTICALS];
-    setRunVerticals(verticals);
-
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) throw new Error("Not signed in");
-
-      const res = await fetch(`${API_BASE}/research/run`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
-        body: JSON.stringify({ verticals }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail ?? "Run failed");
-
-      // /research/run always returns a session_id and queues the swarm in
-      // the background — there's no synchronous mode, results only ever
-      // arrive via polling /research/session/{id}.
-      if (data.session_id) {
-        setSessionId(data.session_id);
-        setState("polling");
-      }
-    } catch (e: unknown) {
+      await startRun(RUN_LABEL, verticals);
+    } catch (e) {
       setError(e instanceof Error ? e.message : "Unknown error");
-      setState("error");
     }
   }
 
-  const isRunning = state === "running" || state === "polling";
-  const activeVerticals = selected.length > 0 ? selected : [...MSE_VERTICALS];
+  const activeVerticals = run?.verticals ?? (selected.length > 0 ? selected : [...MSE_VERTICALS]);
+  const summary = run?.summary;
 
   return (
     <DashboardShell>
@@ -219,10 +113,10 @@ export default function ResearchPage() {
             >
               {isRunning
                 ? "Swarm Running…"
-                : `Run ${selected.length === 0 ? "Full Swarm" : `${activeVerticals.length} Vertical${activeVerticals.length > 1 ? "s" : ""}`}`}
+                : `Run ${selected.length === 0 ? "Full Swarm" : `${selected.length} Vertical${selected.length > 1 ? "s" : ""}`}`}
             </button>
-            {state === "complete" && <StatusBadge status="complete" />}
-            {state === "error" && <StatusBadge status="error" />}
+            {run?.status === "complete" && <StatusBadge status="complete" />}
+            {run?.status === "error" && <StatusBadge status="error" />}
           </div>
 
           {/* Live status while running */}
@@ -230,7 +124,8 @@ export default function ResearchPage() {
             <SectionCard title="Swarm in Progress">
               <div className="space-y-3">
                 <p className="text-[12px]" style={{ color: "#aab4bd" }}>
-                  Running {activeVerticals.length} verticals in parallel via Sonnet. Pipeline results appear when complete.
+                  Running {activeVerticals.length} vertical{activeVerticals.length > 1 ? "s" : ""} in parallel via Sonnet.
+                  Navigate away if you like — this keeps running and the status bar stays visible until it&apos;s done.
                 </p>
                 {activeVerticals.map((v) => (
                   <div key={v} className="flex items-center gap-3 min-w-0">
@@ -239,7 +134,7 @@ export default function ResearchPage() {
                   </div>
                 ))}
                 <div className="pt-2">
-                  <ProgressBar value={(elapsed / 180) * 100} accent="#6fce8f" height={4} />
+                  <ProgressBar value={(elapsed / EST_SECONDS) * 100} accent="#6fce8f" height={4} />
                   <p className="text-[10px] font-mono mt-1" style={{ color: "#5b6673" }}>
                     Est. ~3 min · {elapsed}s elapsed
                   </p>
@@ -249,17 +144,22 @@ export default function ResearchPage() {
           )}
 
           {/* Error state */}
-          {state === "error" && error && (
+          {run?.status === "error" && (
+            <SectionCard title="Error">
+              <p className="text-[12px] font-mono" style={{ color: "#e05d5d" }}>{run.error}</p>
+              <p className="text-[11px] font-mono mt-2" style={{ color: "#5b6673" }}>
+                Make sure the MSE API is running and you&apos;re authenticated.
+              </p>
+            </SectionCard>
+          )}
+          {error && (
             <SectionCard title="Error">
               <p className="text-[12px] font-mono" style={{ color: "#e05d5d" }}>{error}</p>
-              <p className="text-[11px] font-mono mt-2" style={{ color: "#5b6673" }}>
-                Make sure the MSE API is running on {API_BASE} and you&apos;re authenticated.
-              </p>
             </SectionCard>
           )}
 
           {/* Results */}
-          {state === "complete" && summary && (
+          {run?.status === "complete" && summary && (
             <SectionCard title="Session Results">
               <div className="grid gap-4 mb-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))" }}>
                 {[
@@ -275,6 +175,11 @@ export default function ResearchPage() {
                   </div>
                 ))}
               </div>
+              {summary.ready_to_build + summary.validated_pending_review + summary.watch_list + summary.rejected === 0 && (
+                <p className="text-[12px] font-mono mb-3" style={{ color: "#8b96a3" }}>
+                  No opportunities cleared the $3,500/mo MRR floor this run — nothing worth reviewing was found, which is normal (historical hit rate is roughly 1 in 15).
+                </p>
+              )}
               {summary.recommended_first_build && (
                 <div className="rounded-[8px] p-3.5" style={{ backgroundColor: "#10151b", border: "1px solid #6fce8f44" }}>
                   <p className="text-[11px] font-mono uppercase mb-1" style={{ color: "#5b6673" }}>Recommended First Build</p>

@@ -1,14 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { DashboardShell } from "@/components/shell/DashboardShell";
 import { TopBar } from "@/components/shell/TopBar";
 import { SectionCard } from "@/components/ui/SectionCard";
 import { AgentRosterCard } from "@/components/ui/AgentRosterCard";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+import { useRuns } from "@/lib/runs/RunsContext";
 
 // Must match api/routers/research.py's VALID_VERTICALS exactly -- these
 // strings are what actually gets POSTed to /research/run.
@@ -40,12 +39,7 @@ const CADENCE = [
   { week: 7,  agent: "Scout + Integration", date: "2026-08-14", status: "pending",  notes: "E-commerce + full swarm integration test" },
 ];
 
-type RunStatus = "queued" | "running" | "complete" | "error";
-type RunState = { status: RunStatus; sessionId?: string; opportunityCount?: number; error?: string };
 type LastRun = { at: string; count: number };
-
-const POLL_INTERVAL_MS = 5000;
-const POLL_TIMEOUT_MS = 10 * 60 * 1000; // a full swarm run can genuinely take several minutes
 
 function formatLastRun(iso: string): string {
   const diffMs = Date.now() - new Date(iso).getTime();
@@ -59,9 +53,8 @@ function formatLastRun(iso: string): string {
 
 export default function AgentsPage() {
   const supabase = createClient();
-  const [runs, setRuns] = useState<Record<string, RunState>>({});
+  const { runs, startRun, getRunByLabel } = useRuns();
   const [lastRuns, setLastRuns] = useState<Record<string, LastRun>>({});
-  const pollTimers = useRef<Record<string, ReturnType<typeof setInterval>>>({});
 
   const fetchLastRuns = useCallback(async () => {
     const { data } = await supabase
@@ -89,89 +82,46 @@ export default function AgentsPage() {
 
   useEffect(() => { fetchLastRuns(); }, [fetchLastRuns]);
 
-  // Stop every in-flight poll on unmount -- otherwise a fetch fires
-  // against an unmounted component after navigating away mid-run.
+  // Whenever any tracked run flips to complete, refresh "last run" data --
+  // covers a run that finished while the user was on a different tab.
   useEffect(() => {
-    return () => { Object.values(pollTimers.current).forEach(clearInterval); };
-  }, []);
-
-  function startPolling(key: string, sessionId: string) {
-    const startedAt = Date.now();
-    if (pollTimers.current[key]) clearInterval(pollTimers.current[key]);
-
-    pollTimers.current[key] = setInterval(async () => {
-      if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
-        clearInterval(pollTimers.current[key]);
-        setRuns((r) => ({ ...r, [key]: { status: "error", sessionId, error: "Timed out waiting for the run to finish — check the CEO dashboard event feed" } }));
-        return;
-      }
-      try {
-        const { data: { session } } = await supabase.auth.getSession();
-        if (!session) return;
-        const res = await fetch(`${API_BASE}/research/session/${sessionId}`, {
-          headers: { Authorization: `Bearer ${session.access_token}` },
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data?.detail ?? `API error ${res.status}`);
-
-        if (data.session_summary) {
-          clearInterval(pollTimers.current[key]);
-          setRuns((r) => ({ ...r, [key]: { status: "complete", sessionId, opportunityCount: (data.opportunities ?? []).length } }));
-          fetchLastRuns();
-        }
-      } catch (e) {
-        clearInterval(pollTimers.current[key]);
-        setRuns((r) => ({ ...r, [key]: { status: "error", sessionId, error: e instanceof Error ? e.message : "Unknown error" } }));
-      }
-    }, POLL_INTERVAL_MS);
-  }
+    if (runs.some((r) => r.status === "complete")) fetchLastRuns();
+  }, [runs, fetchLastRuns]);
 
   async function handleRun(agent: AgentDef) {
-    const key = agent.name;
-    setRuns((r) => ({ ...r, [key]: { status: "queued" } }));
-
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) throw new Error("Not signed in");
-
-      const res = await fetch(`${API_BASE}/research/run`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
-        body: JSON.stringify({ verticals: agent.vertical ? [agent.vertical] : [] }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.detail?.message ?? data?.detail ?? `API error ${res.status}`);
-
-      const sessionId = data.session_id as string;
-      setRuns((r) => ({ ...r, [key]: { status: "running", sessionId } }));
-      startPolling(key, sessionId);
-    } catch (e) {
-      setRuns((r) => ({ ...r, [key]: { status: "error", error: e instanceof Error ? e.message : "Unknown error" } }));
+      await startRun(agent.name, agent.vertical ? [agent.vertical] : []);
+    } catch {
+      // startRun's failure is surfaced via the run's own "error" status,
+      // read back through getRunByLabel below -- no local error state needed here.
     }
   }
 
   function cardProps(agent: AgentDef) {
-    const run = runs[agent.name];
+    const run = getRunByLabel(agent.name);
     const last = lastRuns[agent.vertical ?? "__all__"];
 
     const status: string = run?.status ?? (last ? "complete" : "pending");
-    const lastRunText = run?.sessionId
-      ? undefined // the live run/output line below covers this instead
+    const lastRunText = run
+      ? undefined // the live output line below covers this instead
       : last
         ? `${formatLastRun(last.at)} · ${last.count} opportunit${last.count === 1 ? "y" : "ies"} total`
         : "never run";
 
     let output: string | undefined;
     if (run?.status === "queued") output = "Queuing session…";
-    else if (run?.status === "running") output = "Dispatch running — Verdict evaluates each finding as it lands";
-    else if (run?.status === "complete") output = `This run: ${run.opportunityCount ?? 0} opportunit${run.opportunityCount === 1 ? "y" : "ies"} written to the pipeline`;
+    else if (run?.status === "running") output = "Dispatch running — Verdict evaluates each finding as it lands. Safe to leave this tab.";
+    else if (run?.status === "complete" && run.summary) {
+      const found = run.summary.ready_to_build + run.summary.validated_pending_review + run.summary.watch_list + run.summary.rejected;
+      output = found > 0 ? `This run: ${found} opportunit${found === 1 ? "y" : "ies"} written — check Opportunities` : "This run: no opportunities cleared the threshold";
+    }
 
     const busy = run?.status === "queued" || run?.status === "running";
 
     return {
       status,
       lastRun: lastRunText,
-      output: output ?? undefined,
+      output,
       error: run?.status === "error" ? run.error : null,
       action: agent.runnable
         ? {
