@@ -1,18 +1,33 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { createClient } from "@/lib/supabase/client";
 import { DashboardShell } from "@/components/shell/DashboardShell";
 import { TopBar } from "@/components/shell/TopBar";
 import { SectionCard } from "@/components/ui/SectionCard";
 import { AgentRosterCard } from "@/components/ui/AgentRosterCard";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 
-const AGENT_ROSTER = [
-  { name: "Dispatch (Orchestrator)", status: "active",  focus: "Fans out to all 6 verticals via asyncio.gather",  lastRun: "last session",  output: "LangGraph StateGraph, 5 nodes" },
-  { name: "Verdict (Aggregator)",    status: "active",  focus: "7-gate quality filter, READY_TO_BUILD stamp",     lastRun: "last session",  output: "Gate 1: MRR ≥$4K · Gate 7: score threshold" },
-  { name: "Ledger",                  status: "pending", focus: "Finance / Accounting vertical intel",              lastRun: null,            output: "Week 6 — builds 2026-08-07" },
-  { name: "Anchor",                  status: "pending", focus: "Real Estate / Property Mgmt vertical intel",       lastRun: null,            output: "Week 4 — builds 2026-07-24" },
-  { name: "Comply",                  status: "pending", focus: "Legal / Professional Services vertical intel",     lastRun: null,            output: "Week 3 — builds 2026-07-17" },
-  { name: "Runway",                  status: "pending", focus: "HR / Ops / People Mgmt vertical intel",           lastRun: null,            output: "Week 5 — builds 2026-07-31" },
-  { name: "Pulse",                   status: "pending", focus: "Healthcare / Medical Front Desk vertical intel",   lastRun: null,            output: "Week 2 — builds 2026-07-10" },
-  { name: "Scout",                   status: "pending", focus: "E-commerce / Retail Ops vertical intel",          lastRun: null,            output: "Week 7 — builds 2026-08-14" },
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
+// Must match api/routers/research.py's VALID_VERTICALS exactly -- these
+// strings are what actually gets POSTed to /research/run.
+type AgentDef = {
+  name: string;
+  vertical: string | null; // null = Dispatch (full swarm) / Verdict (no button, runs inline)
+  focus: string;
+  runnable: boolean;
+};
+
+const AGENT_DEFS: AgentDef[] = [
+  { name: "Dispatch (Orchestrator)", vertical: null, focus: "Fans out to all 6 verticals via asyncio.gather", runnable: true },
+  { name: "Verdict (Aggregator)", vertical: null, focus: "7-gate quality filter, READY_TO_BUILD stamp — runs automatically inside Dispatch, not independently triggerable", runnable: false },
+  { name: "Ledger", vertical: "Finance / Accounting / Bookkeeping", focus: "Finance / Accounting vertical intel", runnable: true },
+  { name: "Anchor", vertical: "Real Estate / Property Management", focus: "Real Estate / Property Mgmt vertical intel", runnable: true },
+  { name: "Comply", vertical: "Legal / Professional Services", focus: "Legal / Professional Services vertical intel", runnable: true },
+  { name: "Runway", vertical: "HR / Ops / People Management", focus: "HR / Ops / People Mgmt vertical intel", runnable: true },
+  { name: "Pulse", vertical: "Healthcare / Medical Front Desk", focus: "Healthcare / Medical Front Desk vertical intel", runnable: true },
+  { name: "Scout", vertical: "E-commerce / Retail Ops", focus: "E-commerce / Retail Ops vertical intel", runnable: true },
 ];
 
 const CADENCE = [
@@ -25,7 +40,149 @@ const CADENCE = [
   { week: 7,  agent: "Scout + Integration", date: "2026-08-14", status: "pending",  notes: "E-commerce + full swarm integration test" },
 ];
 
+type RunStatus = "queued" | "running" | "complete" | "error";
+type RunState = { status: RunStatus; sessionId?: string; opportunityCount?: number; error?: string };
+type LastRun = { at: string; count: number };
+
+const POLL_INTERVAL_MS = 5000;
+const POLL_TIMEOUT_MS = 10 * 60 * 1000; // a full swarm run can genuinely take several minutes
+
+function formatLastRun(iso: string): string {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const mins = Math.round(diffMs / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
 export default function AgentsPage() {
+  const supabase = createClient();
+  const [runs, setRuns] = useState<Record<string, RunState>>({});
+  const [lastRuns, setLastRuns] = useState<Record<string, LastRun>>({});
+  const pollTimers = useRef<Record<string, ReturnType<typeof setInterval>>>({});
+
+  const fetchLastRuns = useCallback(async () => {
+    const { data } = await supabase
+      .from("opportunity_pipeline")
+      .select("vertical, created_at")
+      .order("created_at", { ascending: false })
+      .limit(500);
+    if (!data) return;
+
+    const byVertical: Record<string, LastRun> = {};
+    let globalLatest: string | null = null;
+    let globalCount = 0;
+    for (const row of data as { vertical: string; created_at: string }[]) {
+      globalCount += 1;
+      if (!globalLatest) globalLatest = row.created_at;
+      if (!byVertical[row.vertical]) {
+        byVertical[row.vertical] = { at: row.created_at, count: 1 };
+      } else {
+        byVertical[row.vertical].count += 1;
+      }
+    }
+    if (globalLatest) byVertical.__all__ = { at: globalLatest, count: globalCount };
+    setLastRuns(byVertical);
+  }, [supabase]);
+
+  useEffect(() => { fetchLastRuns(); }, [fetchLastRuns]);
+
+  // Stop every in-flight poll on unmount -- otherwise a fetch fires
+  // against an unmounted component after navigating away mid-run.
+  useEffect(() => {
+    return () => { Object.values(pollTimers.current).forEach(clearInterval); };
+  }, []);
+
+  function startPolling(key: string, sessionId: string) {
+    const startedAt = Date.now();
+    if (pollTimers.current[key]) clearInterval(pollTimers.current[key]);
+
+    pollTimers.current[key] = setInterval(async () => {
+      if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+        clearInterval(pollTimers.current[key]);
+        setRuns((r) => ({ ...r, [key]: { status: "error", sessionId, error: "Timed out waiting for the run to finish — check the CEO dashboard event feed" } }));
+        return;
+      }
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session) return;
+        const res = await fetch(`${API_BASE}/research/session/${sessionId}`, {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.detail ?? `API error ${res.status}`);
+
+        if (data.session_summary) {
+          clearInterval(pollTimers.current[key]);
+          setRuns((r) => ({ ...r, [key]: { status: "complete", sessionId, opportunityCount: (data.opportunities ?? []).length } }));
+          fetchLastRuns();
+        }
+      } catch (e) {
+        clearInterval(pollTimers.current[key]);
+        setRuns((r) => ({ ...r, [key]: { status: "error", sessionId, error: e instanceof Error ? e.message : "Unknown error" } }));
+      }
+    }, POLL_INTERVAL_MS);
+  }
+
+  async function handleRun(agent: AgentDef) {
+    const key = agent.name;
+    setRuns((r) => ({ ...r, [key]: { status: "queued" } }));
+
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error("Not signed in");
+
+      const res = await fetch(`${API_BASE}/research/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ verticals: agent.vertical ? [agent.vertical] : [] }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.detail?.message ?? data?.detail ?? `API error ${res.status}`);
+
+      const sessionId = data.session_id as string;
+      setRuns((r) => ({ ...r, [key]: { status: "running", sessionId } }));
+      startPolling(key, sessionId);
+    } catch (e) {
+      setRuns((r) => ({ ...r, [key]: { status: "error", error: e instanceof Error ? e.message : "Unknown error" } }));
+    }
+  }
+
+  function cardProps(agent: AgentDef) {
+    const run = runs[agent.name];
+    const last = lastRuns[agent.vertical ?? "__all__"];
+
+    const status: string = run?.status ?? (last ? "complete" : "pending");
+    const lastRunText = run?.sessionId
+      ? undefined // the live run/output line below covers this instead
+      : last
+        ? `${formatLastRun(last.at)} · ${last.count} opportunit${last.count === 1 ? "y" : "ies"} total`
+        : "never run";
+
+    let output: string | undefined;
+    if (run?.status === "queued") output = "Queuing session…";
+    else if (run?.status === "running") output = "Dispatch running — Verdict evaluates each finding as it lands";
+    else if (run?.status === "complete") output = `This run: ${run.opportunityCount ?? 0} opportunit${run.opportunityCount === 1 ? "y" : "ies"} written to the pipeline`;
+
+    const busy = run?.status === "queued" || run?.status === "running";
+
+    return {
+      status,
+      lastRun: lastRunText,
+      output: output ?? undefined,
+      error: run?.status === "error" ? run.error : null,
+      action: agent.runnable
+        ? {
+            label: busy ? "Running…" : agent.vertical ? "Run Now" : "Run Full Swarm",
+            onClick: () => handleRun(agent),
+            disabled: busy,
+          }
+        : undefined,
+    };
+  }
+
   return (
     <DashboardShell>
       <TopBar title="Agents" />
@@ -34,8 +191,8 @@ export default function AgentsPage() {
           {/* Agent Roster */}
           <SectionCard title="Agent Roster">
             <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}>
-              {AGENT_ROSTER.map((a) => (
-                <AgentRosterCard key={a.name} {...a} />
+              {AGENT_DEFS.map((a) => (
+                <AgentRosterCard key={a.name} name={a.name} focus={a.focus} {...cardProps(a)} />
               ))}
             </div>
           </SectionCard>
