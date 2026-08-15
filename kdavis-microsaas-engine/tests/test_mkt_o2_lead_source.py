@@ -122,6 +122,68 @@ def test_linkedin_engager_uses_engager_prompt_and_references_interaction():
     assert "AI agent guardrails" in user_prompt
 
 
+def test_lead_finder_source_uses_lead_finder_lead_id_and_standard_prompt():
+    fake_db = FakeSupabase(responses={
+        "mse_dm_sequences": [{"id": "seq-1"}],
+        "mse_leads": [{"id": "lf-lead-1"}],
+    })
+    anthropic_client = FakeAnthropic(responses=[SEQUENCE_JSON])
+    leads = [{"id": "lf-lead-1", "first_name": "Alex", "title": "Broker", "company": "Sun Realty"}]
+
+    result = run_o2_cold_dm_writer(
+        product_id="prod-1", research_report=_research_report(), leads=leads,
+        campaign_build_id=None, lead_source="lead_finder",
+        supabase_client=fake_db, anthropic_client=anthropic_client,
+    )
+
+    assert result == {"status": "ready_for_hitl", "sequences_written": 1}
+    inserts = [c for c in fake_db.executed if c.table_name == "mse_dm_sequences" and c.calls[0][0] == "insert"]
+    row = inserts[0]._payload[0]
+    assert row["lead_finder_lead_id"] == "lf-lead-1"
+    assert "lead_id" not in row
+    assert "linkedin_lead_id" not in row
+    assert row["lead_source"] == "lead_finder"
+
+    # lead_finder's two-stage lifecycle: mse_leads.status advances to
+    # 'pending_email' once a sequence has been drafted for it.
+    lead_updates = [c for c in fake_db.executed if c.table_name == "mse_leads" and c.calls[0][0] == "update"]
+    assert lead_updates[0]._payload == {"status": "pending_email"}
+    assert ("id", "lf-lead-1") in lead_updates[0]._filters
+
+    # lead_finder uses the standard system prompt -- no engager-specific fields.
+    system_prompt = anthropic_client.messages.calls[0]["system"]
+    assert "already engaged" not in system_prompt
+
+
+def test_run_o2_for_linkedin_leads_pulls_lead_finder_leads_filtered_to_verified_email(monkeypatch):
+    # Same FakeSupabase limitation noted above -- .eq("email_status",
+    # "verified") isn't actually enforced by the fake, so this proves the
+    # query issues that filter (the thing MKT-O2's own code is responsible
+    # for), not that unverified rows get excluded end-to-end.
+    fake_db = FakeSupabase(responses={
+        "mse_linkedin_leads": [],
+        "mse_leads": [{"id": "lf-lead-1", "product_id": "prod-1", "status": "pending_dm", "email_status": "verified"}],
+    })
+    calls: list[str] = []
+
+    def fake_writer(*, product_id, research_report, leads, campaign_build_id, lead_source, supabase_client, anthropic_client=None):
+        calls.append(lead_source)
+        return {"sequences_written": len(leads)}
+
+    monkeypatch.setattr(mkt_o2_module, "run_o2_cold_dm_writer", fake_writer)
+
+    result = mkt_o2_module.run_o2_for_linkedin_leads(
+        product_id="prod-1", research_report=_research_report(), supabase_client=fake_db,
+    )
+
+    assert calls == ["lead_finder"]
+    assert result["by_source"] == {"linkedin_engager": 0, "linkedin_manual": 0, "lead_finder": 1}
+
+    lead_finder_select = [c for c in fake_db.executed if c.table_name == "mse_leads" and c.calls[0][0] == "select"][0]
+    assert ("email_status", "verified") in lead_finder_select._filters
+    assert ("status", "pending_dm") in lead_finder_select._filters
+
+
 def test_run_o2_for_linkedin_leads_processes_engagers_before_manual(monkeypatch):
     # tests/conftest.py's FakeSupabase doesn't apply .eq() filters when
     # producing a select's result_data (see test_mkt_li_intake.py's module
@@ -147,4 +209,6 @@ def test_run_o2_for_linkedin_leads_processes_engagers_before_manual(monkeypatch)
     )
 
     assert calls == ["linkedin_engager", "linkedin_manual"]
-    assert result["by_source"] == {"linkedin_engager": 1, "linkedin_manual": 1}
+    # lead_finder is 0 here since mse_leads isn't seeded in this test --
+    # run_o2_for_linkedin_leads now also checks it (2026-08-14).
+    assert result["by_source"] == {"linkedin_engager": 1, "linkedin_manual": 1, "lead_finder": 0}

@@ -12,13 +12,24 @@ unsubscribe) wired in as of 2026-08-12.
 
 lead_source (2026-08-14): Apollo.io is suspended, so LinkedIn manual
 outreach (agents/marketing/mkt_li_intake.py, mse_linkedin_leads) is now
-the active first-customer channel alongside it. This writer handles all
-three sources — "apollo" (unchanged behavior, campaign_build_id required),
+the active first-customer channel alongside it. This writer handles four
+sources — "apollo" (unchanged behavior, campaign_build_id required),
 "linkedin_manual" (same standard sequence, no campaign_build_id), and
 "linkedin_engager" (a lead who already liked/commented on one of Kelvin's
 posts — the opener references that interaction directly, a warmer touch
 than a cold one). Every source still only ever writes status='pending_hitl'
 rows; this agent never sends anything regardless of source.
+
+lead_source="lead_finder" (2026-08-14, agents/marketing/mkt_lead_finder.py):
+self-hosted-scraped-and-verified leads (mse_leads). Unlike the LinkedIn
+sources, these get real emails auto-sent by MKT-O5 once approved — see
+api/routers/outreach.py's approve endpoint for why lead_finder routes to
+'approved_hitl' (MKT-O5's actual send trigger) rather than 'approved_manual'.
+After a lead_finder sequence is successfully queued, this writer advances
+that lead's mse_leads.status from 'pending_dm' to 'pending_email' — a
+two-stage lifecycle mse_apollo_leads/mse_linkedin_leads don't have, since
+those tables never distinguish "sequence drafted, not yet sent" from
+"nothing drafted yet."
 """
 
 import json
@@ -160,14 +171,15 @@ def run_o2_cold_dm_writer(
 ) -> dict:
     """
     Writes a 2-touch cold DM sequence for each lead, all from the same
-    lead_source ("apollo" | "linkedin_manual" | "linkedin_engager"). Never
-    sends anything — every row lands with status='pending_hitl'. Raises on
-    any failure — never fails silently. Returns {status, sequences_written}.
+    lead_source ("apollo" | "linkedin_manual" | "linkedin_engager" |
+    "lead_finder"). Never sends anything — every row lands with
+    status='pending_hitl'. Raises on any failure — never fails silently.
+    Returns {status, sequences_written}.
 
     campaign_build_id is only meaningful for lead_source="apollo" (every
-    apollo lead comes from a MKT-ORCH campaign run) — None for either
-    LinkedIn source, and campaign_builds.dm_sequence_status is only
-    touched when a campaign_build_id is actually given.
+    apollo lead comes from a MKT-ORCH campaign run) — None for every
+    other source, and campaign_builds.dm_sequence_status is only touched
+    when a campaign_build_id is actually given.
     """
     db = supabase_client if supabase_client is not None else get_supabase()
 
@@ -194,6 +206,8 @@ def run_o2_cold_dm_writer(
             }
             if lead_source == "apollo":
                 row["lead_id"] = lead["id"]
+            elif lead_source == "lead_finder":
+                row["lead_finder_lead_id"] = lead["id"]
             else:
                 row["linkedin_lead_id"] = lead["id"]
             rows.append(row)
@@ -202,6 +216,14 @@ def run_o2_cold_dm_writer(
             insert_result = db.table("mse_dm_sequences").insert(rows).execute()
             if not insert_result.data:
                 raise RuntimeError("Insert into mse_dm_sequences returned no data")
+
+        if lead_source == "lead_finder":
+            # Two-stage lifecycle unique to mse_leads (see module
+            # docstring): a sequence now exists for each of these leads,
+            # advance them out of "nothing drafted yet" so MKT-O2's own
+            # next run doesn't redraft a sequence that already exists.
+            for lead in leads:
+                db.table("mse_leads").update({"status": "pending_email"}).eq("id", lead["id"]).execute()
 
         if campaign_build_id:
             db.table("campaign_builds").update(
@@ -235,12 +257,22 @@ def run_o2_for_linkedin_leads(
     anthropic_client: Optional[Any] = None,
 ) -> dict:
     """
-    Entry point for LinkedIn-sourced leads — n8n/linkedin_outreach_workflow.json
-    calls this once per product with pending mse_linkedin_leads rows.
-    Processes linkedin_engager leads before linkedin_manual (they already
-    showed real interest by liking/commenting — higher priority than a
-    cold CSV lead, per this session's explicit instruction), each source
-    written via run_o2_cold_dm_writer above.
+    Entry point for every non-Apollo lead source —
+    n8n/linkedin_outreach_workflow.json calls this once per product with
+    pending mse_linkedin_leads rows; POST /marketing/linkedin/dm-sequences
+    (api/routers/linkedin_intake.py) is its HTTP trigger. Despite the
+    name (kept for backward compatibility — this function predates
+    lead_finder), it now also processes mse_leads rows from
+    agents/marketing/mkt_lead_finder.py (source="lead_finder").
+
+    Priority order: linkedin_engager first (already showed real interest
+    by liking/commenting — the warmest lead type), then linkedin_manual,
+    then lead_finder last (cold, self-sourced leads — lowest priority of
+    the three). lead_finder leads are additionally filtered to
+    email_status="verified" — MKT-O2 never drafts a sequence for a lead
+    whose email hasn't been confirmed deliverable, since that sequence
+    would otherwise sit in mse_dm_sequences with nothing MKT-O5 can safely
+    send to. Each source written via run_o2_cold_dm_writer above.
     """
     db = supabase_client if supabase_client is not None else get_supabase()
 
@@ -268,6 +300,28 @@ def run_o2_for_linkedin_leads(
         )
         total_written += result["sequences_written"]
         by_source[source] = result["sequences_written"]
+
+    lead_finder_leads = (
+        db.table("mse_leads")
+        .select("*")
+        .eq("product_id", product_id)
+        .eq("status", "pending_dm")
+        .eq("email_status", "verified")
+        .order("created_at")
+        .execute()
+        .data
+        or []
+    )
+    if lead_finder_leads:
+        result = run_o2_cold_dm_writer(
+            product_id=product_id, research_report=research_report, leads=lead_finder_leads,
+            campaign_build_id=None, lead_source="lead_finder",
+            supabase_client=db, anthropic_client=anthropic_client,
+        )
+        total_written += result["sequences_written"]
+        by_source["lead_finder"] = result["sequences_written"]
+    else:
+        by_source["lead_finder"] = 0
 
     return {"status": "ready_for_hitl", "sequences_written": total_written, "by_source": by_source}
 

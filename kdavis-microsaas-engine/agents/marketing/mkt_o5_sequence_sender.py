@@ -9,6 +9,14 @@ dashboard's manual outreach queue instead (api/routers/outreach.py) for a
 human to message natively; automating that channel carries real ToS/ban
 risk with no official API to do it safely. Decided 2026-07-16.
 
+lead_finder leads (2026-08-14, agents/marketing/mkt_lead_finder.py) DO
+reach this agent — unlike LinkedIn leads, they have a real, SMTP-verified
+email and are meant to be auto-sent same as apollo leads.
+outreach.py's approve endpoint already routes lead_source="lead_finder"
+sequences to 'approved_hitl' (this agent's actual query target); the only
+change needed here is _get_lead() knowing to look in mse_leads (via
+mse_dm_sequences.lead_finder_lead_id) when a sequence has no lead_id.
+
 touch_1/touch_2 were written by MKT-O2 as short DM-style copy, not
 email-formatted (no separate subject line) — this agent supplies a plain,
 generic subject rather than truncating the DM body into one, since a
@@ -75,11 +83,17 @@ def _send_email(resend_client, to_email: str, subject: str, body: str) -> None:
     })
 
 
-def _get_lead(db, lead_id: str) -> Optional[dict]:
+def _get_lead(db, seq: dict) -> Optional[dict]:
     # maybe_single().execute() returns bare None (not a Response with
     # .data=None) when zero rows match — a deleted/bad lead_id is exactly
-    # that case.
-    result = db.table("mse_apollo_leads").select("email,first_name").eq("id", lead_id).maybe_single().execute()
+    # that case. mse_dm_sequences carries exactly one of lead_id (apollo)
+    # or lead_finder_lead_id (lead_finder) here — linkedin_lead_id-only
+    # rows never reach this function, since they never leave
+    # 'approved_manual' status, which this agent never polls for.
+    if seq.get("lead_finder_lead_id"):
+        result = db.table("mse_leads").select("email,first_name").eq("id", seq["lead_finder_lead_id"]).maybe_single().execute()
+        return result.data if result is not None else None
+    result = db.table("mse_apollo_leads").select("email,first_name").eq("id", seq["lead_id"]).maybe_single().execute()
     return result.data if result is not None else None
 
 
@@ -103,9 +117,9 @@ def run_send_touch_1(supabase_client: Optional[Any] = None, resend_client: Optio
                 _write_audit(db, "lose", seq.get("product_id", ""), {"sequence_id": seq["id"], "touch": 1, "skipped": "daily_cap"})
                 continue
 
-            lead = _get_lead(db, seq["lead_id"])
+            lead = _get_lead(db, seq)
             if not lead or not lead.get("email"):
-                raise ValueError(f"No email on file for lead {seq['lead_id']}")
+                raise ValueError(f"No email on file for lead {seq.get('lead_finder_lead_id') or seq.get('lead_id')}")
 
             if is_suppressed(db, lead["email"]):
                 skipped.append(seq["id"])
@@ -161,9 +175,9 @@ def run_send_touch_2(supabase_client: Optional[Any] = None, resend_client: Optio
                 _write_audit(db, "lose", seq.get("product_id", ""), {"sequence_id": seq["id"], "touch": 2, "skipped": "daily_cap"})
                 continue
 
-            lead = _get_lead(db, seq["lead_id"])
+            lead = _get_lead(db, seq)
             if not lead or not lead.get("email"):
-                raise ValueError(f"No email on file for lead {seq['lead_id']}")
+                raise ValueError(f"No email on file for lead {seq.get('lead_finder_lead_id') or seq.get('lead_id')}")
 
             # A lead can unsubscribe in the 3-day gap between touch_1 and
             # touch_2 -- re-checking here, not just at touch_1, is the

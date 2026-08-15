@@ -46,12 +46,16 @@ async def approve_dm_sequence(sequence_id: str, body: ResolveSequence, request: 
     db = get_supabase()
 
     # lead_source decides the target status, not just a passthrough value:
-    # mkt_o5_sequence_sender.py (untouched here — see migration
-    # 20260814000023_linkedin_leads.sql's comment) polls specifically for
-    # status='approved_hitl' and emails whatever it finds via Resend using
-    # the linked apollo lead's email. LinkedIn leads have no email on file
-    # at all, so a LinkedIn-sourced sequence must land on a status MKT-O5
-    # never queries for — 'approved_manual' — instead of 'approved_hitl'.
+    # mkt_o5_sequence_sender.py polls specifically for status='approved_hitl'
+    # and emails whatever it finds via Resend using the linked lead's email.
+    # LinkedIn leads have no email on file at all, so LinkedIn-sourced
+    # sequences must land on a status MKT-O5 never queries for —
+    # 'approved_manual' — instead of 'approved_hitl'. lead_finder leads
+    # DO have a real, SMTP-verified email (agents/marketing/mkt_lead_finder.py
+    # only ever hands MKT-O2 email_status='verified' leads) and are meant
+    # to be auto-sent same as apollo, so they route to 'approved_hitl' too
+    # (2026-08-14) — see mkt_o5_sequence_sender.py's _get_lead() for the
+    # matching lookup change.
     existing = (
         db.table("mse_dm_sequences")
         .select("lead_source")
@@ -64,7 +68,7 @@ async def approve_dm_sequence(sequence_id: str, body: ResolveSequence, request: 
         raise HTTPException(status_code=404, detail="Sequence not found or already resolved")
 
     lead_source = existing.data.get("lead_source") or "apollo"
-    new_status = "approved_hitl" if lead_source == "apollo" else "approved_manual"
+    new_status = "approved_hitl" if lead_source in ("apollo", "lead_finder") else "approved_manual"
 
     result = db.table("mse_dm_sequences").update({
         "status": new_status,

@@ -1,0 +1,196 @@
+{
+  "id": "lead-finder-001",
+  "name": "Lead Finder — Weekly Sunday 6am MST",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "pinData": {},
+  "nodes": [
+    {
+      "id": "cron-trigger",
+      "name": "Sunday 6am MST",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 13 * * 0"
+            }
+          ]
+        }
+      },
+      "position": [200, 300]
+    },
+    {
+      "id": "get-icp-products",
+      "name": "Get ICP-Configured Products",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "mse_icp_configs"
+      },
+      "position": [420, 300]
+    },
+    {
+      "id": "for-each-product",
+      "name": "For Each Product",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "parameters": {
+        "batchSize": 1
+      },
+      "position": [640, 300]
+    },
+    {
+      "id": "trigger-find",
+      "name": "Trigger POST /marketing/leads/find",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.API_BASE_URL }}/marketing/leads/find",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.MARKETING_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ product_id: $json.product_id }) }}"
+      },
+      "position": [860, 300]
+    },
+    {
+      "id": "wait-for-run",
+      "name": "Wait 15 Minutes",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "parameters": {
+        "amount": 15,
+        "unit": "minutes"
+      },
+      "position": [1080, 300]
+    },
+    {
+      "id": "get-run-status",
+      "name": "Poll Run Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.API_BASE_URL }}/marketing/leads/runs/{{ $('Trigger POST /marketing/leads/find').item.json.run_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.MARKETING_API_KEY }}"
+            }
+          ]
+        }
+      },
+      "position": [1300, 300]
+    },
+    {
+      "id": "is-run-done",
+      "name": "Run Complete?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-status",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "running",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            },
+            {
+              "id": "check-not-pending",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "pending",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "position": [1520, 300]
+    },
+    {
+      "id": "build-weekly-digest",
+      "name": "Build Weekly Digest",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "parameters": {
+        "functionCode": "const runs = $('Poll Run Status').all();\nconst lines = runs.map(item => {\n  const r = item.json;\n  return `Product ${r.product_id || '?'}: ${r.leads_found || 0} new leads found, ${r.leads_verified || 0} verified, ${r.leads_found || 0} ready for outreach (run ${r.status})`;\n});\nconst body = lines.length ? lines.join('\\n') : 'No ICP-configured products this week.';\nreturn [{ json: { subject: 'Lead Finder — Weekly Digest', body } }];"
+      },
+      "position": [860, 500]
+    },
+    {
+      "id": "send-digest",
+      "name": "Send Digest via Resend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.RESEND_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ from: 'leads@' + $env.PRODUCT_DOMAIN, to: $env.KELVIN_EMAIL, subject: $json.subject, text: $json.body }) }}"
+      },
+      "position": [1080, 500]
+    }
+  ],
+  "connections": {
+    "Sunday 6am MST": {"main": [[{"node": "Get ICP-Configured Products", "type": "main", "index": 0}]]},
+    "Get ICP-Configured Products": {"main": [[{"node": "For Each Product", "type": "main", "index": 0}]]},
+    "For Each Product": {
+      "main": [
+        [{"node": "Build Weekly Digest", "type": "main", "index": 0}],
+        [{"node": "Trigger POST /marketing/leads/find", "type": "main", "index": 0}]
+      ]
+    },
+    "Trigger POST /marketing/leads/find": {"main": [[{"node": "Wait 15 Minutes", "type": "main", "index": 0}]]},
+    "Wait 15 Minutes": {"main": [[{"node": "Poll Run Status", "type": "main", "index": 0}]]},
+    "Poll Run Status": {"main": [[{"node": "Run Complete?", "type": "main", "index": 0}]]},
+    "Run Complete?": {
+      "main": [
+        [{"node": "For Each Product", "type": "main", "index": 0}],
+        [{"node": "Wait 15 Minutes", "type": "main", "index": 0}]
+      ]
+    },
+    "Build Weekly Digest": {"main": [[{"node": "Send Digest via Resend", "type": "main", "index": 0}]]}
+  }
+}

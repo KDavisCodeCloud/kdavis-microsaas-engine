@@ -9,15 +9,27 @@ is unknown until then.
 
 Reads the approved product's research_report.json, runs select_channels()
 to decide which channels apply, creates a campaign_builds row, and fans
-out to the downstream agents: MKT-O1 (Apollo List Builder), MKT-O2 (Cold
-DM Sequence Writer), MKT-O3 (Email Sequence Loader), MKT-S1 (SEO Content
-Factory), and MKT-V1 (Content Multiplier, gated on reddit/facebook_groups
-being in the product's icp_channels). All five are built as of 2026-08-12.
-Each still fires via a dynamic import attempt with a graceful "not yet
-built — pending" fallback on ModuleNotFoundError (matching
-agents/orchestrator/agent.py's existing pattern for vertical intel
-agents) so a future downstream agent can be added to _DOWNSTREAM_AGENTS
-ahead of actually being built, same as these five originally were.
+out to the downstream agents: the lead source (mkt_lead_finder by
+default — see below), MKT-O2 (Cold DM Sequence Writer), MKT-O3 (Email
+Sequence Loader), MKT-S1 (SEO Content Factory), and MKT-V1 (Content
+Multiplier, gated on reddit/facebook_groups being in the product's
+icp_channels). Each still fires via a dynamic import attempt with a
+graceful "not yet built — pending" fallback on ModuleNotFoundError
+(matching agents/orchestrator/agent.py's existing pattern for vertical
+intel agents) so a future downstream agent can be added to
+_DOWNSTREAM_AGENTS ahead of actually being built.
+
+Lead source routing (2026-08-14): MKT-O1 (Apollo) is deprecated — Apollo's
+Free plan has no API access (agents/marketing/mkt_o1_apollo_list_builder.py's
+own DEPRECATED flag) — and agents/marketing/mkt_lead_finder.py (self-hosted,
+zero-cost, Google Custom Search + public license databases + SMTP email
+verification) replaces it as the default. A campaign can still explicitly
+opt back into MKT-O1 (e.g. once Apollo is upgraded to a paid plan again)
+by setting research_report["use_legacy_apollo"] = true — see
+_resolve_lead_source_module below. campaign_builds.apollo_status is left
+alone (untouched column, still meaningful if MKT-O1 ever fires again);
+the lead-finder path writes to the new lead_finder_status column instead
+(migration 20260814000024_lead_finder.sql).
 """
 
 from typing import Any, Callable, Optional
@@ -26,12 +38,30 @@ from core.supabase_client import get_supabase
 
 AGENT_ID = "mkt-orch"
 
+_LEAD_FINDER_MODULE = "agents.marketing.mkt_lead_finder"
+_LEGACY_APOLLO_MODULE = "agents.marketing.mkt_o1_apollo_list_builder"
+
+
+def _resolve_lead_source_module(research_report: dict) -> str:
+    """mkt_lead_finder is the default lead source (see module docstring)
+    — a campaign only routes back to the deprecated Apollo builder if its
+    research_report explicitly asks for it, the "future Apollo upgrade
+    path" this repo's task spec anticipated."""
+    if research_report.get("use_legacy_apollo"):
+        return _LEGACY_APOLLO_MODULE
+    return _LEAD_FINDER_MODULE
+
+
 # downstream agent -> (module path, campaign_builds status column, gate predicate)
 # gate predicate takes the channels list from select_channels() and returns
 # whether this agent should fire for this product. seo/email always fire
-# (select_channels always includes them); the rest are conditional.
+# (select_channels always includes them); the rest are conditional. The
+# lead-source entry's module path is a placeholder here — the real path is
+# resolved per-campaign by _resolve_lead_source_module (its
+# research_report may ask for the deprecated Apollo builder instead), see
+# the dispatch loop in run_campaign_orchestrator below.
 _DOWNSTREAM_AGENTS: list[tuple[str, str, str, Callable[[list[str]], bool]]] = [
-    ("mkt-o1", "agents.marketing.mkt_o1_apollo_list_builder", "apollo_status",
+    ("mkt-lead-finder", _LEAD_FINDER_MODULE, "lead_finder_status",
      lambda channels: "linkedin_dm" in channels),
     ("mkt-o2", "agents.marketing.mkt_o2_cold_dm_writer", "dm_sequence_status",
      lambda channels: "linkedin_dm" in channels),
@@ -143,6 +173,9 @@ def run_campaign_orchestrator(
         for agent_id, module_path, status_column, should_fire in _DOWNSTREAM_AGENTS:
             if not should_fire(channels):
                 continue
+
+            if module_path == _LEAD_FINDER_MODULE:
+                module_path = _resolve_lead_source_module(research_report)
 
             status = _fire_agent(agent_id, module_path, research_report, campaign_build)
             status_updates[status_column] = status

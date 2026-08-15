@@ -1,4 +1,13 @@
 """
+DEPRECATED (2026-08-14): Replaced by agents/marketing/mkt_lead_finder.py.
+Apollo Free plan has no API access. This module is retained for reference
+only — do not delete, it documents the real Apollo integration shape
+(request/response fields, auth header) for if/when Apollo is upgraded to
+a paid plan later. MKT-ORCH (mkt_orch_campaign_orchestrator.py) routes to
+mkt_lead_finder by default now; this module only fires if a campaign
+explicitly opts back in via research_report["use_legacy_apollo"] (see
+that file's _DOWNSTREAM_AGENTS/_fire_agent for the override mechanism).
+
 MKT-O1 Apollo List Builder.
 
 Reads an approved product's research_report, derives Apollo.io search
@@ -28,6 +37,7 @@ from core.sanitization import DataSanitizationShield
 from core.supabase_client import get_supabase
 
 AGENT_ID = "mkt-o1"
+DEPRECATED = True
 APOLLO_SEARCH_URL = "https://api.apollo.io/v1/mixed_people/search"
 MAX_LEADS = 100
 

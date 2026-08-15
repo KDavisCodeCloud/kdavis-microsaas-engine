@@ -45,6 +45,16 @@ async def tenant_context_middleware(request: Request, call_next):
     if request.url.path.startswith("/marketing/linkedin/"):
         return await call_next(request)
 
+    # api/routers/leads.py: same n8n/internal-triggered, MARKETING_API_KEY
+    # shape — /marketing/leads (list), /marketing/leads/find,
+    # /marketing/leads/runs/{run_id}, /marketing/icp,
+    # /marketing/icp/{product_id} all use require_marketing_api_key(), and
+    # two of those five have a dynamic path segment a PUBLIC_PATHS set
+    # membership check can't match, so this is a prefix check like
+    # /marketing/linkedin/ above.
+    if request.url.path.startswith("/marketing/leads") or request.url.path.startswith("/marketing/icp"):
+        return await call_next(request)
+
     # HTTPException raised inside @app.middleware("http") is NOT caught by
     # FastAPI's normal exception handlers (a Starlette BaseHTTPMiddleware
     # gotcha) — it crashes as a raw 500 instead of the intended status code.

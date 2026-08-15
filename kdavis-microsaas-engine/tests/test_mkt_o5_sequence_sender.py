@@ -192,6 +192,61 @@ def test_touch_2_skips_lead_who_unsubscribed_after_touch_1(fake_db):
     assert len(fake_resend.Emails.sent) == 0
 
 
+def test_touch_1_resolves_lead_finder_lead_via_mse_leads(fake_db):
+    """lead_finder sequences carry lead_finder_lead_id instead of lead_id
+    (mse_dm_sequences' 3-way one-lead-ref constraint) — _get_lead must look
+    in mse_leads, not mse_apollo_leads, for these."""
+    fake_db.responses["mse_dm_sequences"] = [{
+        "id": "seq-lf-1",
+        "lead_id": None,
+        "lead_finder_lead_id": "lf-lead-1",
+        "product_id": "prod-1",
+        "campaign_build_id": None,
+        "touch_1": "You're leaving $4k/mo on the table with manual scheduling.",
+        "touch_2": "Following up — still leaving that $4k/mo on the table?",
+        "status": "approved_hitl",
+        "touch_1_sent_at": None,
+    }]
+    fake_db.responses["mse_leads"] = [{"email": "verified@example.com", "first_name": "Alex"}]
+    fake_db.responses["mse_apollo_leads"] = []  # must not be consulted for this sequence
+    fake_resend = FakeResend()
+
+    result = run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
+
+    assert result == {"sent": 1, "failed": [], "skipped": []}
+    assert fake_resend.Emails.sent[0]["to"] == "verified@example.com"
+
+    lead_selects = [c for c in fake_db.executed if c.table_name == "mse_leads" and c.calls[0][0] == "select"]
+    assert len(lead_selects) == 1
+    assert ("id", "lf-lead-1") in lead_selects[0]._filters
+
+
+def test_touch_1_fails_lead_finder_sequence_with_no_verified_email_on_lead(fake_db):
+    """A lead_finder lead with no email on file (email_status never reached
+    'verified', so mse_leads.email is still null) must fail loudly, not
+    silently send to nothing — same "No email on file" guard apollo gets."""
+    fake_db.responses["mse_dm_sequences"] = [{
+        "id": "seq-lf-2",
+        "lead_id": None,
+        "lead_finder_lead_id": "lf-lead-2",
+        "product_id": "prod-1",
+        "campaign_build_id": None,
+        "touch_1": "msg",
+        "touch_2": "follow",
+        "status": "approved_hitl",
+        "touch_1_sent_at": None,
+    }]
+    fake_db.responses["mse_leads"] = [{"email": None, "first_name": "Alex"}]
+    fake_resend = FakeResend()
+
+    result = run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
+
+    assert result == {"sent": 0, "failed": ["seq-lf-2"], "skipped": []}
+    assert len(fake_resend.Emails.sent) == 0
+    audits = [c for c in fake_db.executed if c.table_name == "audit_log" and c.calls[0][0] == "insert"]
+    assert "No email on file" in audits[0]._payload["metadata"]["error"]
+
+
 def test_run_sequence_sender_runs_both_stages(fake_db):
     _seed_sequence(fake_db, status="approved_hitl")
     fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
