@@ -1,0 +1,91 @@
+{
+  "id": "trial-enrollment-001",
+  "name": "Trial Enrollment — Webhook (Brevo)",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "pinData": {},
+  "nodes": [
+    {
+      "id": "trial-signup-webhook",
+      "name": "Trial Signup Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "parameters": {
+        "path": "trial-signup",
+        "httpMethod": "POST",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "trial-signup-webhook",
+      "position": [200, 300]
+    },
+    {
+      "id": "enroll-in-brevo",
+      "name": "Enroll In Brevo (POST /marketing/brevo/enroll)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.API_BASE_URL }}/marketing/brevo/enroll",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.MARKETING_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ product_id: $json.body.product_id, email: $json.body.email, first_name: $json.body.first_name, last_name: $json.body.last_name, plan_tier: $json.body.plan_tier, trial_start: $json.body.trial_start }) }}"
+      },
+      "position": [420, 300]
+    },
+    {
+      "id": "log-enrollment-result",
+      "name": "Log Result To audit_log",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "parameters": {
+        "operation": "create",
+        "tableId": "audit_log",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "agent_id", "fieldValue": "n8n-trial-enrollment" },
+            { "fieldId": "action", "fieldValue": "trial_enrollment_webhook" },
+            { "fieldId": "outcome", "fieldValue": "={{ $json.enrolled ? 'win' : 'lose' }}" },
+            { "fieldId": "product_id", "fieldValue": "={{ $('Trial Signup Webhook').item.json.body.product_id }}" },
+            { "fieldId": "metadata", "fieldValue": "={{ JSON.stringify($json) }}" }
+          ]
+        }
+      },
+      "position": [640, 300]
+    },
+    {
+      "id": "webhook-response",
+      "name": "Respond To Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {}
+      },
+      "position": [860, 300]
+    }
+  ],
+  "connections": {
+    "Trial Signup Webhook": {
+      "main": [[{ "node": "Enroll In Brevo (POST /marketing/brevo/enroll)", "type": "main", "index": 0 }]]
+    },
+    "Enroll In Brevo (POST /marketing/brevo/enroll)": {
+      "main": [[{ "node": "Log Result To audit_log", "type": "main", "index": 0 }]]
+    },
+    "Log Result To audit_log": {
+      "main": [[{ "node": "Respond To Webhook", "type": "main", "index": 0 }]]
+    }
+  }
+}

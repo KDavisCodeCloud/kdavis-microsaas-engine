@@ -2,35 +2,50 @@
 MKT-O3 Email Sequence Loader.
 
 Drafts a short trial-nurture email sequence from the research report's pain
-language and ICP, then loads it into systeme.io as an UNACTIVATED sequence
-("campaign" in Systeme.io's terminology) — never sends anything, never
-activates. Every sequence lands in mse_email_sequences with
-status='pending_hitl' (or 'loaded_unactivated' once the systeme.io call
-succeeds); a human approves and activates it manually in systeme.io. Matches
-MKT-O2's draft-only precedent — this agent has no sender/activation path.
+language and ICP, then loads it into mse_email_sequences — never sends
+anything, never activates. A human approves the drafted copy in the HITL
+queue; the real "sending" is Brevo's own automation workflow (built once,
+manually, per product, in the Brevo UI — see BREVO_SETUP.md), not this
+agent. Matches MKT-O2's draft-only precedent — this agent has no
+sender/activation path of its own.
 
-CONFIRMED BLOCKER (2026-08-12): _SystemeIOClient.create_unactivated_campaign's
-POST /campaigns call 404s against the live API with a real, verified key —
-this is not a wrong path to fix. Verified directly: GET /api/contacts,
-/api/tags, /api/webhooks, and /api/funnels all return 200 against the live
-account; GET/POST /api/campaigns and every plausible variant (email_campaigns,
-sequences, email_sequences, automations, campaign, newsletters) return 404.
-Systeme.io's public API does not currently expose campaign/sequence creation
-at all — this isn't something this codebase can fix by correcting a URL.
-Until Systeme.io ships that endpoint (or Kelvin confirms a different, real
-path), run_o3_email_sequence_loader will draft the sequence and persist it to
-mse_email_sequences correctly, but the systeme.io load step will always raise
-SystemeIOError and the campaign_builds row will always land on
-email_sequence_status='failed' — by design (never fails silently), not a bug
-in this agent. The drafted sequence is still fully usable: copy it into
-systeme.io by hand until the API supports this.
+PROVIDER SWAP (2026-08-14): systeme.io replaced by Brevo. systeme.io's
+public API has no campaigns/sequences endpoint at all — CONFIRMED
+BLOCKER, verified directly: GET /api/contacts, /api/tags, /api/webhooks,
+/api/funnels all return 200 against the live account; GET/POST
+/api/campaigns and every plausible variant (email_campaigns, sequences,
+email_sequences, automations, campaign, newsletters) return 404.
+Systeme.io's public API does not currently expose campaign/sequence
+creation at all. _SystemeIOClient/SystemeIOError are retained below
+(DEPRECATED = True), unused by the active flow, purely to document the
+real integration shape investigated — do not delete.
+
+Design note on where the systeme.io push disappeared to, not just what
+replaced it: systeme.io's create_unactivated_campaign was trying to
+create the SEQUENCE CONTAINER itself via API at draft time (before any
+real trial signup exists) — that's structurally what always 404'd.
+Brevo's equivalent (the automation workflow) is built once, manually, in
+the Brevo UI (BREVO_SETUP.md) — there's no API call that belongs at
+draft time for Brevo at all. What Brevo DOES need an API call for is
+enrolling one specific real contact once a real trial signup happens,
+which is a different moment in time with different available data (an
+email, a name, a plan tier — none of which exist yet at draft time). That
+per-signup enrollment is enroll_trial_in_sequence(), a new, separate
+entry point below, not a modification of run_o3_email_sequence_loader's
+draft step. A side effect worth naming: removing the always-404ing
+systeme.io push from the draft step also fixes a real, standing bug —
+campaign_builds.email_sequence_status could previously never reach
+'ready_for_hitl' for any real campaign build, only 'failed'.
 """
 
 import json
 import os
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import core.llm_router as llm_router
+from core.brevo_client import create_or_update_contact
+from core.email_compliance import is_suppressed
 from core.sanitization import DataSanitizationShield
 from core.supabase_client import get_supabase
 
@@ -127,14 +142,15 @@ class SystemeIOError(RuntimeError):
     pass
 
 
+DEPRECATED = True  # see module docstring's PROVIDER SWAP note — Brevo replaces this
+
+
 class _SystemeIOClient:
     """
-    Thin wrapper around Systeme.io's REST API, scoped to what MKT-O3 needs:
-    creating an unactivated campaign/sequence and its email steps. Endpoint
-    paths reflect Systeme.io's public API docs (developer.systeme.io) as
-    best-effort — Systeme.io's public API historically has limited/unclear
-    support for programmatic campaign creation with content; verify against
-    current docs before relying on this against a live account. Mirrors the
+    DEPRECATED (2026-08-14) — never called by the active flow anymore.
+    Retained only to document the real integration shape that was
+    investigated (endpoint paths, auth header) in case Systeme.io ever
+    ships a real campaigns API and this is worth revisiting. Mirrors the
     existing read-mostly wrapper in kdavis-agentic-platform's
     leads/integrations/systeme_io.py (base URL, X-API-Key header) rather
     than importing across repos, matching this repo's self-containment
@@ -195,12 +211,18 @@ def run_o3_email_sequence_loader(
     product_name: str = "",
     supabase_client: Optional[Any] = None,
     anthropic_client: Optional[Any] = None,
-    systeme_client: Optional[Any] = None,
 ) -> dict:
     """
-    Drafts a trial-nurture sequence and loads it into systeme.io unactivated.
-    Never activates anything. Raises on any failure — never fails silently.
-    Returns {status, sequence_id, email_count}.
+    Drafts a trial-nurture sequence and saves it to mse_email_sequences,
+    pending HITL approval. Runs at campaign-build time, before any real
+    trial signup exists — there is no contact to enroll in Brevo yet, and
+    (unlike the old systeme.io attempt) Brevo needs no API call at this
+    stage at all, since its equivalent of "the sequence container" is the
+    automation workflow built manually in the Brevo UI. Enrolling a real
+    signup into that workflow is enroll_trial_in_sequence(), below,
+    called separately whenever a real trial actually starts. Raises on
+    any failure — never fails silently. Returns {status, sequence_id,
+    email_count}.
     """
     db = supabase_client if supabase_client is not None else get_supabase()
 
@@ -228,17 +250,6 @@ def run_o3_email_sequence_loader(
             raise RuntimeError("Insert into mse_email_sequences returned no data")
         row_id = insert_result.data[0]["id"]
 
-        systeme = systeme_client if systeme_client is not None else _SystemeIOClient()
-        campaign = systeme.create_unactivated_campaign(
-            name=f"{product_name or product_id} — trial nurture",
-            emails=emails,
-        )
-
-        db.table("mse_email_sequences").update({
-            "systeme_sequence_id": campaign.get("id"),
-            "status": "loaded_unactivated",
-        }).eq("id", row_id).execute()
-
         db.table("campaign_builds").update(
             {"email_sequence_status": "ready_for_hitl"}
         ).eq("id", campaign_build_id).execute()
@@ -260,6 +271,119 @@ def run_o3_email_sequence_loader(
     })
 
     return {"status": "ready_for_hitl", "sequence_id": row_id, "email_count": len(emails)}
+
+
+@dataclass
+class EnrollmentResult:
+    status: str  # "enrolled" | "suppressed" | "failed"
+    sequence_drafted: bool
+    enrolled: bool
+    sequence_id: Optional[str] = None
+    brevo_list_id: Optional[int] = None
+    error: Optional[str] = None
+
+
+def enroll_trial_in_sequence(
+    product_id: str,
+    email: str,
+    first_name: str,
+    last_name: str,
+    plan_tier: str,
+    trial_start: str,
+    supabase_client: Optional[Any] = None,
+    brevo_client: Optional[Any] = None,
+) -> EnrollmentResult:
+    """
+    Called when a real trial signup occurs (POST /marketing/brevo/enroll,
+    triggered by n8n/trial_enrollment_workflow.json off a Stripe/Supabase
+    trialing-status event). Enrolls the contact into the product's Brevo
+    list, which is what fires that product's pre-built Brevo automation
+    (BREVO_SETUP.md) — this function itself never sends an email.
+
+    "Drafts the sequence if not already drafted" means: reuses the most
+    recent mse_email_sequences row for this product if one exists (the
+    normal case — MKT-O3's campaign-build step already ran long before
+    any real trial signup). It deliberately does NOT attempt to draft a
+    brand-new sequence here on the fly: this function's signature has no
+    research_report to draft from (only signup-specific data — email,
+    name, plan tier), and MKT-O3's own system prompt is explicit that
+    nothing gets invented without real research context. If no sequence
+    has ever been drafted for this product, that's a real, surfaced
+    failure (status="failed"), not a silently-fabricated generic one.
+
+    Never raises for expected/recoverable conditions (suppressed email,
+    no Brevo list registered yet, no sequence drafted yet, Brevo API
+    failure) — returns a typed EnrollmentResult for all of them, since
+    this is called from a live per-signup webhook path where a clean
+    logged result is more useful than a generic 500. Every outcome is
+    still audited via audit_log, win or lose, per this repo's own
+    non-negotiable.
+    """
+    db = supabase_client if supabase_client is not None else get_supabase()
+
+    _emit_event(db, "trial_enrollment_started", {"product_id": product_id, "email": email})
+
+    if is_suppressed(db, email):
+        _write_audit(db, "lose", product_id, {"email": email, "reason": "suppressed"})
+        return EnrollmentResult(status="suppressed", sequence_drafted=False, enrolled=False)
+
+    list_result = (
+        db.table("mse_brevo_lists")
+        .select("brevo_list_id")
+        .eq("product_id", product_id)
+        .maybe_single()
+        .execute()
+    )
+    if list_result is None or not list_result.data:
+        error = f"No Brevo list registered for product {product_id} — POST /marketing/brevo/lists first"
+        _write_audit(db, "lose", product_id, {"email": email, "error": error})
+        return EnrollmentResult(status="failed", sequence_drafted=False, enrolled=False, error=error)
+    brevo_list_id = list_result.data["brevo_list_id"]
+
+    sequence_result = (
+        db.table("mse_email_sequences")
+        .select("id")
+        .eq("product_id", product_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    sequence_rows = sequence_result.data or []
+    if not sequence_rows:
+        error = f"No drafted trial-nurture sequence for product {product_id} yet — run the campaign build's MKT-O3 step first"
+        _write_audit(db, "lose", product_id, {"email": email, "error": error})
+        return EnrollmentResult(status="failed", sequence_drafted=False, enrolled=False, brevo_list_id=brevo_list_id, error=error)
+    sequence_id = sequence_rows[0]["id"]
+
+    safe_attributes = DataSanitizationShield.clean({
+        "product_id": product_id, "plan_tier": plan_tier, "trial_start": trial_start,
+    })
+    contact_result = create_or_update_contact(
+        email=email, first_name=first_name, last_name=last_name,
+        attributes=safe_attributes, list_ids=[brevo_list_id],
+        brevo_client=brevo_client,
+    )
+
+    if not contact_result.success:
+        _write_audit(db, "lose", product_id, {
+            "email": email, "sequence_id": sequence_id, "brevo_list_id": brevo_list_id, "error": contact_result.error,
+        })
+        return EnrollmentResult(
+            status="failed", sequence_drafted=True, enrolled=False,
+            sequence_id=sequence_id, brevo_list_id=brevo_list_id, error=contact_result.error,
+        )
+
+    _write_audit(db, "win", product_id, {
+        "email": email, "sequence_id": sequence_id, "brevo_list_id": brevo_list_id,
+    })
+    _emit_event(db, "trial_enrollment_completed", {
+        "product_id": product_id, "email": email, "brevo_list_id": brevo_list_id,
+    })
+
+    return EnrollmentResult(
+        status="enrolled", sequence_drafted=True, enrolled=True,
+        sequence_id=sequence_id, brevo_list_id=brevo_list_id,
+    )
 
 
 def run(research_report: dict, campaign_build: dict) -> dict:
