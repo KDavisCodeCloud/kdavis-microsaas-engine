@@ -159,6 +159,38 @@ export interface DmSequence {
   mse_linkedin_leads: LinkedInLead | null;
 }
 
+// mse_research_reports.report_json shape — see
+// agents/marketing/mkt_r1_research_core.py's module docstring for the
+// authoritative schema. Only the fields the Marketing panel displays are
+// typed here; the row itself may carry more.
+export interface ResearchReport {
+  id: string;
+  product_id: string;
+  cycle_date: string;
+  report_json: {
+    pain_language?: { phrase: string; context: string; source: string; frequency: number }[];
+    content_angles?: { angle: string; supporting_data: string }[];
+    icp_channels?: string[];
+    willingness_to_pay_band?: string;
+    suggested_price?: number;
+  };
+  created_at: string;
+}
+
+// campaign_builds — MKT-ORCH's fan-out record (agents/marketing/mkt_orch_campaign_orchestrator.py).
+export interface CampaignBuild {
+  id: string;
+  product_id: string;
+  research_opp_id: string;
+  triggered_at: string;
+  apollo_status: string;
+  dm_sequence_status: string;
+  email_sequence_status: string;
+  seo_factory_status: string;
+  social_status: string;
+  lead_finder_status?: string;
+}
+
 export const MSE_VERTICALS = [
   "Healthcare / Medical Front Desk",
   "Legal / Professional Services",

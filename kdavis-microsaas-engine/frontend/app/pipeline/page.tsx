@@ -7,9 +7,10 @@ import { TopBar } from "@/components/shell/TopBar";
 import { SectionCard } from "@/components/ui/SectionCard";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ProgressBar } from "@/components/ui/ProgressBar";
+import { ProductMarketingPanel } from "@/components/ui/ProductMarketingPanel";
 import type { Opportunity, BuildBrief, BuildTask } from "@/lib/types";
 
-const STATUS_FILTER_OPTIONS = ["all", "READY_TO_BUILD", "validated", "needs_correction", "watch", "rejected"];
+const STATUS_FILTER_OPTIONS = ["all", "READY_TO_BUILD", "validated", "needs_correction", "watch", "rejected", "launched"];
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 function filterLabel(f: string): string {
@@ -286,8 +287,15 @@ export default function PipelinePage() {
   // simply gone from `opportunities` after the next fetchData().
   function tabMatches(o: Opportunity, f: string): boolean {
     const approved = o.human_review_status === "approved";
-    if (f === "READY_TO_BUILD") return approved;
-    if (approved) return false;
+    // "Build Queue" = approved but not yet building/launched. Previously
+    // this matched every approved row forever (including launched ones,
+    // which then never matched anything else since the `approved` branch
+    // below returned false first) — a launched product had no tab it
+    // could ever show up in. Scoping READY_TO_BUILD to pre-build statuses
+    // is what makes the new "launched" tab (and any other post-approval
+    // status) actually reachable.
+    if (f === "READY_TO_BUILD") return approved && o.status !== "building" && o.status !== "launched";
+    if (approved && o.status !== "building" && o.status !== "launched") return false;
     return f === "all" || o.status === f;
   }
 
@@ -439,7 +447,11 @@ export default function PipelinePage() {
                     </div>
                   </button>
 
-                  {expanded === opp.id && (
+                  {expanded === opp.id && opp.status === "launched" ? (
+                    <div className="ml-5 mb-3">
+                      <ProductMarketingPanel productId={opp.id} vertical={opp.vertical} />
+                    </div>
+                  ) : expanded === opp.id && (
                     <div className="ml-5 mb-3 space-y-3">
                       <div className="rounded-[8px] p-3.5" style={{ backgroundColor: "#10151b", border: "1px solid #1c222b" }}>
                         <p className="text-[10px] font-mono uppercase mb-1" style={{ color: "#5b6673" }}>Pain Point</p>
