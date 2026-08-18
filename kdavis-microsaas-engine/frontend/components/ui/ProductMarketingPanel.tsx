@@ -46,6 +46,12 @@ export function ProductMarketingPanel({ productId, vertical }: { productId: stri
   const [campaignState, setCampaignState] = useState<FireState>("idle");
   const [campaignError, setCampaignError] = useState<string | null>(null);
 
+  const [csvText, setCsvText] = useState("");
+  const [leadSource, setLeadSource] = useState<"linkedin_manual" | "linkedin_engager">("linkedin_manual");
+  const [leadsState, setLeadsState] = useState<FireState>("idle");
+  const [leadsError, setLeadsError] = useState<string | null>(null);
+  const [leadsResult, setLeadsResult] = useState<{ added: number; duplicates_skipped: number; dm_sequences_queued: boolean } | null>(null);
+
   const load = useCallback(async () => {
     setLoading(true);
     const [reportRes, buildRes, leadsRes, dmRes, emailRes, icpRes] = await Promise.all([
@@ -110,6 +116,31 @@ export function ProductMarketingPanel({ productId, vertical }: { productId: stri
     }
   }
 
+  async function submitLeads() {
+    setLeadsState("queuing");
+    setLeadsError(null);
+    setLeadsResult(null);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error("Not signed in");
+
+      const res = await fetch(`${API_BASE}/products/${productId}/linkedin-leads`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ csv_text: csvText, source: leadSource }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? `API error ${res.status}`);
+      setLeadsResult(data);
+      setLeadsState("queued");
+      setCsvText("");
+      load();
+    } catch (e: unknown) {
+      setLeadsError(e instanceof Error ? e.message : "Unknown error");
+      setLeadsState("error");
+    }
+  }
+
   if (loading) {
     return <p className="text-[11px] font-mono" style={{ color: "#5b6673" }}>Loading marketing status…</p>;
   }
@@ -163,6 +194,60 @@ export function ProductMarketingPanel({ productId, vertical }: { productId: stri
           </p>
         )}
         {campaignError && <p className="text-[11px] font-mono mt-2" style={{ color: "#e05d5d" }}>{campaignError}</p>}
+      </div>
+
+      {/* LinkedIn lead intake — paste a CSV export from a LinkedIn search
+          (or an engager list). No lead-finder/Google CSE credentials
+          required; matches agents/marketing/mkt_li_intake.py's manual
+          first-customer channel. */}
+      <div className="rounded-[8px] p-3.5" style={{ backgroundColor: "#10151b", border: "1px solid #1c222b" }}>
+        <p className="text-[10px] font-mono uppercase mb-1" style={{ color: "#5b6673" }}>Add LinkedIn Leads</p>
+        <p className="text-[11px] mb-2.5" style={{ color: "#8b96a3" }}>
+          Paste a CSV export from a LinkedIn search or engager list. Header row required: first_name,last_name,title,company,linkedin_url,location — only linkedin_url is mandatory per row.
+        </p>
+        <textarea
+          value={csvText}
+          onChange={(e) => setCsvText(e.target.value)}
+          placeholder={"first_name,last_name,title,company,linkedin_url,location\nJane,Doe,Team Lead,Acme Realty,https://linkedin.com/in/janedoe,Phoenix AZ"}
+          rows={5}
+          className="w-full px-3 py-2 rounded-[6px] text-[11.5px] font-mono outline-none resize-y mb-2"
+          style={{ backgroundColor: "#0b0e13", border: "1px solid #1c222b", color: "#eef2f5" }}
+        />
+        <div className="flex items-center gap-2 flex-wrap">
+          <select
+            value={leadSource}
+            onChange={(e) => setLeadSource(e.target.value as "linkedin_manual" | "linkedin_engager")}
+            className="px-2.5 py-2 rounded-[6px] text-[11.5px] font-mono outline-none"
+            style={{ backgroundColor: "#0b0e13", border: "1px solid #1c222b", color: "#eef2f5" }}
+          >
+            <option value="linkedin_manual">Manual search export</option>
+            <option value="linkedin_engager">Engager (liked/commented)</option>
+          </select>
+          <button
+            onClick={submitLeads}
+            disabled={leadsState === "queuing" || !csvText.trim()}
+            className="px-3.5 py-2 rounded-[8px] text-[12px] font-semibold"
+            style={{
+              backgroundColor: leadsState === "queuing" || !csvText.trim() ? "#2a3340" : "#5a96ff1a",
+              border: "1px solid #5a96ff",
+              color: leadsState === "queuing" || !csvText.trim() ? "#5b6673" : "#5a96ff",
+              cursor: leadsState === "queuing" || !csvText.trim() ? "not-allowed" : "pointer",
+            }}
+          >
+            {leadsState === "queuing" ? "Adding…" : "Add Leads"}
+          </button>
+        </div>
+        {leadsResult && (
+          <p className="text-[11px] font-mono mt-2" style={{ color: "#6fce8f" }}>
+            {leadsResult.added} added{leadsResult.duplicates_skipped > 0 ? `, ${leadsResult.duplicates_skipped} already on file` : ""}.
+            {leadsResult.added > 0 && (
+              leadsResult.dm_sequences_queued
+                ? " Drafting cold DM copy for them now — check back in the queue."
+                : " Run Research first to draft cold DM copy for them."
+            )}
+          </p>
+        )}
+        {leadsError && <p className="text-[11px] font-mono mt-2" style={{ color: "#e05d5d" }}>{leadsError}</p>}
       </div>
 
       {/* Latest research report */}
