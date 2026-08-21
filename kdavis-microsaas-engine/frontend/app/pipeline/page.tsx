@@ -165,6 +165,9 @@ export default function PipelinePage() {
   const [buildState, setBuildState] = useState<"idle" | "queuing" | "queued" | "error">("idle");
   const [buildError, setBuildError] = useState<string | null>(null);
 
+  const [launchState, setLaunchState] = useState<Record<string, "idle" | "submitting" | "error">>({});
+  const [launchError, setLaunchError] = useState<Record<string, string>>({});
+
   const [reviewComment, setReviewComment] = useState<Record<string, string>>({});
   const [reviewState, setReviewState] = useState<Record<string, "idle" | "submitting" | "error">>({});
   const [reviewError, setReviewError] = useState<Record<string, string>>({});
@@ -368,6 +371,30 @@ export default function PipelinePage() {
     } catch (e: unknown) {
       setBuildError(e instanceof Error ? e.message : "Unknown error");
       setBuildState("error");
+    }
+  }
+
+  // Manual override for build_pipeline's own automated 'building' ->
+  // 'launched' transition — covers a product built or fixed outside the
+  // pipeline entirely, or an automated build that finished without its
+  // status catching up. api/routers/product_marketing.py's mark-launched.
+  async function markLaunched(opportunityId: string) {
+    setLaunchState((s) => ({ ...s, [opportunityId]: "submitting" }));
+    setLaunchError((e) => ({ ...e, [opportunityId]: "" }));
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error("Not signed in");
+
+      const res = await fetch(`${API_BASE}/products/${opportunityId}/mark-launched`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? `API error ${res.status}`);
+      await fetchData();
+    } catch (e: unknown) {
+      setLaunchError((err) => ({ ...err, [opportunityId]: e instanceof Error ? e.message : "Unknown error" }));
+      setLaunchState((s) => ({ ...s, [opportunityId]: "error" }));
     }
   }
 
@@ -637,6 +664,29 @@ export default function PipelinePage() {
                                 </button>
                               </div>
                             </div>
+                          )}
+                        </div>
+                      )}
+
+                      {(opp.status === "READY_TO_BUILD" || opp.status === "building") && (
+                        <div className="rounded-[8px] p-3.5" style={{ backgroundColor: "#5eead411", border: "1px solid #5eead444" }}>
+                          <p className="text-[11px] mb-2" style={{ color: "#aab4bd" }}>
+                            Already live, or the automated build finished without its status catching up? Mark it launched directly — this is a manual override, it doesn&apos;t run the build pipeline.
+                          </p>
+                          <button
+                            onClick={() => markLaunched(opp.id)}
+                            disabled={launchState[opp.id] === "submitting"}
+                            className="px-4 py-2 rounded-[8px] text-[12px] font-bold"
+                            style={{
+                              backgroundColor: launchState[opp.id] === "submitting" ? "#2a3340" : "#5eead4",
+                              color: launchState[opp.id] === "submitting" ? "#5b6673" : "#0b0e13",
+                              cursor: launchState[opp.id] === "submitting" ? "not-allowed" : "pointer",
+                            }}
+                          >
+                            {launchState[opp.id] === "submitting" ? "Marking Launched…" : "✅ Ready to Launch"}
+                          </button>
+                          {launchError[opp.id] && (
+                            <p className="text-[11px] font-mono mt-2" style={{ color: "#e05d5d" }}>{launchError[opp.id]}</p>
                           )}
                         </div>
                       )}

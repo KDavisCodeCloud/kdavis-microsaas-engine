@@ -258,3 +258,35 @@ def test_linkedin_leads_dedupes_against_existing_rows(fake_db, monkeypatch):
     assert resp.json()["added"] == 0
     assert resp.json()["duplicates_skipped"] == 1
     assert resp.json()["dm_sequences_queued"] is False
+
+
+# ── mark-launched ────────────────────────────────────────────────────
+
+def test_mark_launched_requires_admin_role():
+    resp = client.post("/products/prod-1/mark-launched", headers=_auth_header(role="marketing"))
+    assert resp.status_code == 403
+
+
+def test_mark_launched_requires_auth_at_all():
+    resp = client.post("/products/prod-1/mark-launched")
+    assert resp.status_code == 401
+
+
+def test_mark_launched_404_when_product_not_found(fake_db, monkeypatch):
+    monkeypatch.setattr(product_marketing_router, "get_supabase", lambda: fake_db)
+    resp = client.post("/products/missing-prod/mark-launched", headers=_auth_header())
+    assert resp.status_code == 404
+
+
+def test_mark_launched_updates_status_and_returns_launched(fake_db, monkeypatch):
+    fake_db.responses["opportunity_pipeline"] = [{"id": "prod-1", "vertical": "Real Estate / Property Management", "status": "launched"}]
+    monkeypatch.setattr(product_marketing_router, "get_supabase", lambda: fake_db)
+
+    resp = client.post("/products/prod-1/mark-launched", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "launched", "product_id": "prod-1"}
+
+    updates = [c for c in fake_db.executed if c.table_name == "opportunity_pipeline" and c.calls[0][0] == "update"]
+    assert len(updates) == 1
+    assert updates[0]._payload == {"status": "launched"}

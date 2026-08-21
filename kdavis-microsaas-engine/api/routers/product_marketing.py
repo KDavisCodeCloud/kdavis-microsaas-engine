@@ -120,6 +120,32 @@ async def add_linkedin_leads(product_id: str, body: LinkedInLeadsRequest, reques
     return {**result, "dm_sequences_queued": dm_sequences_queued}
 
 
+@router.post("/{product_id}/mark-launched")
+async def mark_product_launched(product_id: str, request: Request):
+    """
+    Manual override for the automated build_pipeline -> 'launched'
+    transition (agents/factory/build_pipeline.py's run_build_pipeline
+    updates opportunity_pipeline.status through 'building' -> 'launched'
+    on its own, but only for products built through that pipeline).
+    Covers two real cases: a product built or fixed outside the pipeline
+    entirely (Showing Signal, built before opportunity_pipeline existed —
+    see its 2026-08-18 backfill), or an automated build that actually
+    finished but whose status update failed/never ran. Kelvin presses
+    this once he's confirmed the product is genuinely live; no further
+    gating beyond admin auth — an explicit manual action, not something
+    to second-guess with extra status-transition rules.
+    """
+    _require_admin(request)
+    _load_opportunity(product_id)  # 404s if the product doesn't exist
+
+    db = get_supabase()
+    result = db.table("opportunity_pipeline").update({"status": "launched"}).eq("id", product_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=500, detail="Failed to update status to launched")
+
+    return {"status": "launched", "product_id": product_id}
+
+
 def _run_research(product_id: str, niche_keywords: list[str]) -> None:
     from agents.marketing.mkt_r1_research_core import run_research_core
     run_research_core(product_id, niche_keywords, source_config={})
