@@ -60,5 +60,21 @@ async def trigger_generate_brief(
 
 
 def _run_generate_brief(opportunity_id: str, triggered_by: str) -> None:
-    from agents.factory.brief_generator import generate_build_brief
-    generate_build_brief(opportunity_id, triggered_by)
+    from agents.factory.brief_generator import generate_build_brief, generate_research_report_from_verdict
+    brief_row = generate_build_brief(opportunity_id, triggered_by)
+
+    # Seeds the real marketing pipeline (mse_research_reports/mse_icp_configs/
+    # mse_brevo_sequence_drafts + fires run_campaign_orchestrator) using the
+    # brief's own id as product_id -- see generate_research_report_from_verdict's
+    # docstring for why (no mse_products table exists anywhere in this schema).
+    # Best-effort: a failure here must never take down brief generation itself,
+    # which already succeeded and is the thing a human is waiting to review.
+    if brief_row and brief_row.get("id"):
+        try:
+            generate_research_report_from_verdict(opportunity_id, brief_row["id"], triggered_by)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).error(
+                "[factory] research report seed failed for opportunity %s (brief still generated): %s",
+                opportunity_id, exc,
+            )

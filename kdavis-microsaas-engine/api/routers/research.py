@@ -11,6 +11,11 @@ VALID_VERTICALS = {
     "Real Estate / Property Management",
     "HR / Ops / People Management",
     "Finance / Accounting / Bookkeeping",
+    # Must stay in sync with agents/orchestrator/agent.py's VERTICAL_MODULE_MAP.
+    "Residential Trades / Service Contractors",
+    "Care Services (Childcare/Elder/Pet)",
+    "Personal Services (Salon/Spa/Fitness)",
+    "Field/Repair Services (Auto/Equipment)",
 }
 
 

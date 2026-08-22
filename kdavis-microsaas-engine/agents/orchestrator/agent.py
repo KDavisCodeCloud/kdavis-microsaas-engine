@@ -1,12 +1,13 @@
 import asyncio
-import json
 import importlib
+import re
 from pathlib import Path
-from typing import TypedDict
+from typing import Optional, TypedDict
 from langgraph.graph import StateGraph, END
 from core.llm_router import HAIKU, analyze_with_web_search
 from core.sanitization import DataSanitizationShield
 from core.supabase_client import get_supabase
+from core.json_extract import extract_trailing_json_array
 
 _SYSTEM_PROMPT = (Path(__file__).parent / "prompt.md").read_text()
 
@@ -17,6 +18,22 @@ VERTICAL_MODULE_MAP = {
     "Real Estate / Property Management": "realestate_intel",
     "HR / Ops / People Management":    "hr_ops_intel",
     "Finance / Accounting / Bookkeeping": "finance_intel",
+    # Industry vertical agents (2026-08-22) -- pointed at specific business
+    # segments rather than problem categories. Module names here MUST match
+    # the real on-disk package name exactly (underscores) for
+    # importlib.import_module(f"agents.{module_name}.agent") to resolve --
+    # note the six agents above already have a real, pre-existing mismatch
+    # (map values use underscores, e.g. "realestate_intel", but their
+    # on-disk directories use hyphens, e.g. agents/realestate-intel/) which
+    # is why none of them have ever actually loaded a real agent.py despite
+    # being "registered" here; harmless so far since those directories only
+    # contain __init__.py anyway, but NOT a pattern to copy. The four new
+    # directories below are underscored on disk to match their map value
+    # exactly, so they actually resolve.
+    "Residential Trades / Service Contractors": "trades_intel",
+    "Care Services (Childcare/Elder/Pet)":      "care_intel",
+    "Personal Services (Salon/Spa/Fitness)":    "service_intel",
+    "Field/Repair Services (Auto/Equipment)":   "field_intel",
 }
 
 
@@ -100,45 +117,67 @@ async def _run_one_vertical(vertical: str) -> dict:
         pass
 
     raw = analyze_with_web_search(system_prompt, safe, max_tokens=10000, model=HAIKU)
-    findings = _extract_trailing_json_array(raw)
+    findings = extract_trailing_json_array(raw)
 
     return {"vertical": vertical, "findings": findings}
 
 
-def _extract_trailing_json_array(text: str) -> list:
-    """
-    Finds the LAST top-level balanced [...] span in the response text and
-    parses it -- mirrors agents/aggregator/agent.py's _extract_trailing_json
-    for objects. Needed once this call gained real web search: a
-    search-backed response narrates its research before the final array,
-    the same way Verdict's does, instead of emitting bare JSON at the very
-    start of the response the way the old no-search prompt could get away
-    with assuming. Depth is tracked only over '[' / ']' so a nested array
-    inside an opportunity card (source_evidence, milestone_sequence) never
-    gets mistaken for the outer array's own close.
-    """
-    spans = []
-    depth = 0
-    start = None
-    for i, ch in enumerate(text):
-        if ch == "[":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "]":
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start is not None:
-                    spans.append((start, i))
+_TAM_FLOOR = 500_000
 
-    for start, end in reversed(spans):
+# Matches a comma-formatted number (500,000 / 1,200,000) or a bare "500000"
+# immediately followed by one of a few TAM-ish nouns, within the same
+# sentence fragment. Deliberately loose -- mrr_calculation is free-form
+# prose (see the Opportunity Card schema), there is no structured TAM
+# field anywhere in it, so this is a best-effort read, not a parser.
+_TAM_NUMBER_RE = re.compile(
+    r"([\d,]{4,})\s*(?:total\s+)?"
+    r"(?:addressable\s+)?"
+    r"(?:accounts|businesses|contractors|shops|providers|associations|"
+    r"establishments|HOAs|homes|salons|centers|facilities)",
+    re.IGNORECASE,
+)
+
+
+def _tam_sanity_check(finding: dict) -> Optional[str]:
+    """
+    Cheap pre-Verdict signal, not a gate (2026-08-22, mirrors this
+    repo's own established "never trust a single upstream signal as a
+    hard gate" pattern -- RAG retrieval, pipeline-health recalibration,
+    the price-adjusted-floor fallback all work the same way). Verdict's
+    own independently-researched math (agents/aggregator/agent.py) is the
+    real, authoritative floor check; this only surfaces an early warning
+    so an obviously-tiny TAM is visible on the dashboard instead of only
+    showing up after a full Verdict web-search cycle has already been
+    spent on it -- the same honest-disclosure principle this session's
+    own HOA submission used (surface a weak TAM, don't silently drop it).
+
+    Returns a warning string if no number >= _TAM_FLOOR could be found
+    anywhere in the finding's own math, or None if one was found (or if
+    the finding has no mrr_calculation to check at all, in which case
+    there's nothing to flag -- an empty/malformed finding is Verdict's
+    problem to reject, not this check's).
+    """
+    calc_text = finding.get("mrr_calculation") or ""
+    if not calc_text:
+        return None
+
+    largest = 0
+    for match in _TAM_NUMBER_RE.finditer(calc_text):
         try:
-            parsed = json.loads(text[start:end + 1])
-            if isinstance(parsed, list):
-                return parsed
-        except json.JSONDecodeError:
+            n = int(match.group(1).replace(",", ""))
+        except ValueError:
             continue
-    return []
+        largest = max(largest, n)
+
+    if largest >= _TAM_FLOOR:
+        return None
+
+    return (
+        f"TAM warning: no addressable-market figure >= {_TAM_FLOOR:,} found in "
+        f"mrr_calculation (largest matched: {largest:,}). Floor math will likely "
+        f"fail at the standard 0.5% capture rate -- informational only, Verdict's "
+        f"own independently-researched math is still the authoritative check."
+    )
 
 
 async def node_dispatch_verticals(state: OrchestratorState) -> OrchestratorState:
@@ -151,10 +190,21 @@ async def node_dispatch_verticals(state: OrchestratorState) -> OrchestratorState
             continue
         raw_findings.extend(r.get("findings", []))
 
+    tam_warnings = 0
+    for finding in raw_findings:
+        warning = _tam_sanity_check(finding)
+        if warning:
+            finding["tam_warning"] = warning
+            tam_warnings += 1
+
     get_supabase().table("usage_events").insert({
         "tenant_id": None,
         "event_type": "research_verticals_complete",
-        "metadata": {"session_id": state["session_id"], "findings_count": len(raw_findings)},
+        "metadata": {
+            "session_id": state["session_id"],
+            "findings_count": len(raw_findings),
+            "tam_warnings": tam_warnings,
+        },
     }).execute()
 
     return {**state, "raw_findings": raw_findings, "status": "aggregating"}
@@ -250,6 +300,33 @@ def node_write_pipeline(state: OrchestratorState) -> OrchestratorState:
         elif v2.get("competitors_found"):
             competitor_examples = [c.get("name") for c in v2["competitors_found"] if c.get("name")] or competitor_examples
 
+        # Vertical-specific extras (2026-08-22, e.g. the Trades/Care/
+        # Service/Field agents' facebook_groups_identified,
+        # parts_integration_verdict, free_tier_differentiation,
+        # youtube_content_angle, tam_warning, raw_review_samples, ...) --
+        # anything the finding returned beyond the fixed Opportunity Card
+        # columns mapped above. Without this, that data only ever existed
+        # in this function's in-memory `source` dict for the lifetime of
+        # one graph run; brief generation (agents/factory/brief_generator.py)
+        # fires later, via its own separate HTTP trigger, so it needs this
+        # persisted on the row itself, not recovered from a run that's
+        # long finished by the time a human clicks "generate brief".
+        _KNOWN_OPPORTUNITY_CARD_KEYS = {
+            "vertical", "existing_tool", "gap_type", "pain_point",
+            "ongoing_complaints_evidence", "source_evidence", "icp",
+            "solution_concept", "how_it_works", "competitor_examples",
+            "competitor_pricing_avg", "conservative_mrr_potential",
+            "mrr_calculation", "competition_density",
+            "competition_density_reason", "build_confidence_score",
+            "build_confidence_reason", "stack_compatible",
+            "stack_compatibility_notes", "retention_hooks",
+            "tier_structure", "mcp_integration_surface",
+            "estimated_build_weeks", "opportunity_id", "source_urls",
+        }
+        vertical_agent_extras = {
+            k: v for k, v in source.items() if k not in _KNOWN_OPPORTUNITY_CARD_KEYS
+        }
+
         to_insert.append({
             "vertical":                   result.get("vertical", "") or source.get("vertical", ""),
             "pain_point":                 v2.get("gap_evidence") or v2.get("pain_evidence") or v2.get("pain_stakes") or source.get("pain_point", "See research session notes"),
@@ -280,6 +357,7 @@ def node_write_pipeline(state: OrchestratorState) -> OrchestratorState:
             # conservative_mrr_potential against this per-row, replacing
             # the old flat $4,000 check.
             "price_adjusted_floor":       v2.get("price_adjusted_floor", 4000),
+            "vertical_agent_extras":      vertical_agent_extras,
             "notes":                      f"session:{state['session_id']}",
         })
 

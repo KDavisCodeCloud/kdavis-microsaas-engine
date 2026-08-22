@@ -363,6 +363,42 @@ for v5.0 (`existing_tool`, `gap_type`, `ongoing_complaints_evidence`).
 
 ---
 
+## VERTICAL ROUTING (industry vertical agents, added 2026-08-22)
+
+Four verticals now have a real, purpose-built agent instead of falling
+through to this generic prompt (`agents/{trades,care,service,field}_intel/
+agent.py` — see `agents/orchestrator/agent.py`'s `VERTICAL_MODULE_MAP`).
+When scoping a session, route a business idea to the matching vertical
+string below rather than a generic one:
+
+- **`Residential Trades / Service Contractors`** — HVAC, plumbing,
+  electrical, roofing, landscaping, pool service, pest control, or any
+  residential service contractor business. Anchor tools: ServiceTitan,
+  Jobber, Housecall Pro, FieldEdge, mHelpDesk, Workiz. Look for
+  per-technician pricing complaints or job-management workflow pain.
+- **`Care Services (Childcare/Elder/Pet)`** — childcare, daycare,
+  preschool, after-school, elder care, adult day programs, pet care, dog
+  training, or any care-focused service business. Anchor tools:
+  Brightwheel, HiMama, Procare, EZChildTrack, iCare, Jackrabbit Care. Look
+  for per-child/per-enrollment pricing complaints.
+- **`Personal Services (Salon/Spa/Fitness)`** — salon, spa, barbershop,
+  nail salon, tattoo studio, fitness studio, yoga studio, massage
+  therapy, or any personal-service appointment-based business. Anchor
+  tools: Vagaro, Mindbody, Boulevard, Square Appointments, Fresha,
+  GlossGenius, Booksy. Always requires the free-tier-competition
+  differentiation question to be answered (Fresha/Square Appointments are
+  free) — the Service agent enforces this itself.
+- **`Field/Repair Services (Auto/Equipment)`** — auto repair, equipment
+  repair, appliance repair, mobile mechanic, marine repair, or any
+  repair-focused field service business. Anchor tools: Mitchell 1,
+  Shop-Ware, Tekmetric, Bay-Master, MaxxTraxx, AutoLeap. Always requires
+  the `parts_integration_verdict` question to be answered explicitly
+  (`hard_requirement` or `nice_to_have`, never ambiguous) — the Field
+  agent enforces this itself and Verdict's Step 2.5 depends on it when
+  the concept touches parts-catalog integration.
+
+---
+
 ## Session Flow
 
 ### Step 1 — Scope the Session

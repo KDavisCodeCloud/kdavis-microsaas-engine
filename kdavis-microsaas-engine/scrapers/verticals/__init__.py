@@ -9,9 +9,17 @@ mkt_lead_finder.py changes.
 """
 
 from scrapers.verticals.real_estate import RealEstateScraper
+from scrapers.verticals.trades import TradesScraper
+from scrapers.verticals.care import CareScraper
+from scrapers.verticals.service import ServiceScraper
+from scrapers.verticals.field import FieldScraper
 
 VERTICAL_SCRAPERS: dict[str, type] = {
     "real_estate": RealEstateScraper,
+    "trades": TradesScraper,
+    "care": CareScraper,
+    "service": ServiceScraper,
+    "field": FieldScraper,
 }
 
 

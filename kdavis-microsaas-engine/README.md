@@ -1,6 +1,6 @@
 # Micro SaaS Engine — Root Architecture Document
 **KDavis Agentic Systems LLC | Decoded Empire Portfolio**
-**Owner: Kelvin Davis (King Kelz)**
+**Owner: Kelvin Davis**
 **Status: Active Build**
 
 ---

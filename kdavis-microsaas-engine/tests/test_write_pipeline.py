@@ -106,6 +106,32 @@ def test_v3_nested_scenarios_floor_is_read_correctly(monkeypatch, fake_db):
     assert payload["conservative_mrr_potential"] == 4700.0
 
 
+def test_killed_below_floor_is_archived_not_written_to_the_dashboard(monkeypatch, fake_db):
+    # Kelvin's hard MRR gate (2026-07-20): killed_below_floor must never
+    # reach opportunity_pipeline at all, not even as a visible 'rejected'
+    # row -- it goes straight to the rejection archive instead, same table
+    # the manual reject-button flow uses.
+    monkeypatch.setattr(orchestrator, "get_supabase", lambda: fake_db)
+
+    orchestrator.node_write_pipeline(_state([{
+        "vertical": "HR / Ops / People Management",
+        "solution_concept": "Obviously Below Floor Thing",
+        "status": "killed_below_floor",
+        "rejection_reason": "Hard MRR gate: net_mrr_floor $46 is below the absolute $3,500 floor under any realistic scenario — killed before reaching the dashboard, archived to the rejection log only.",
+        "verdict_v2_output": {"verdict": "DO_NOT_BUILD", "net_mrr_floor": 46},
+    }]))
+
+    pipeline_inserts = [c for c in fake_db.executed if c.table_name == "opportunity_pipeline" and c.calls[0][0] == "insert"]
+    assert pipeline_inserts == []
+
+    archive_inserts = [c for c in fake_db.executed if c.table_name == "opportunity_pipeline_rejections" and c.calls[0][0] == "insert"]
+    assert len(archive_inserts) == 1
+    archived = archive_inserts[0]._payload
+    assert archived["rejected_by"] == "system:mrr_hard_floor"
+    assert "Hard MRR gate" in archived["rejection_comment"]
+    assert archived["original_opportunity"]["solution_concept"] == "Obviously Below Floor Thing"
+
+
 def test_one_bad_row_does_not_block_the_rest_of_the_batch(monkeypatch, fake_db):
     # Real bug found 2026-07-19: a single batch INSERT of all rows in a
     # session is one atomic Postgres statement -- one row violating the

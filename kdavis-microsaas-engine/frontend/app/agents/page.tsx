@@ -27,6 +27,17 @@ const AGENT_DEFS: AgentDef[] = [
   { name: "Runway", vertical: "HR / Ops / People Management", focus: "HR / Ops / People Mgmt vertical intel", runnable: true },
   { name: "Pulse", vertical: "Healthcare / Medical Front Desk", focus: "Healthcare / Medical Front Desk vertical intel", runnable: true },
   { name: "Scout", vertical: "E-commerce / Retail Ops", focus: "E-commerce / Retail Ops vertical intel", runnable: true },
+  // Industry vertical agents (2026-08-22) -- pointed at specific business
+  // segments rather than problem categories, per agents/{trades,care,
+  // service,field}_intel/agent.py. Named plainly (not codenamed like the
+  // six above) since their own system prompts already self-identify this
+  // way ("You are Trades...", "You are Care...", etc.) -- these are the
+  // first vertical modules with a real agent.py at all, unlike the six
+  // above which still fall through to Dispatch's generic fallback prompt.
+  { name: "Trades", vertical: "Residential Trades / Service Contractors", focus: "HVAC/plumbing/electrical/roofing/landscaping/pool/pest control vertical intel", runnable: true },
+  { name: "Care", vertical: "Care Services (Childcare/Elder/Pet)", focus: "Childcare/elder care/pet care vertical intel", runnable: true },
+  { name: "Service", vertical: "Personal Services (Salon/Spa/Fitness)", focus: "Salon/spa/fitness/barbershop vertical intel", runnable: true },
+  { name: "Field", vertical: "Field/Repair Services (Auto/Equipment)", focus: "Auto/equipment/appliance repair vertical intel", runnable: true },
 ];
 
 const CADENCE = [

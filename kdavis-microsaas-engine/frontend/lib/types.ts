@@ -198,6 +198,13 @@ export const MSE_VERTICALS = [
   "Real Estate / Property Management",
   "HR / Ops / People Management",
   "Finance / Accounting / Bookkeeping",
+  // Industry vertical agents (2026-08-22) -- must stay in sync with
+  // agents/orchestrator/agent.py's VERTICAL_MODULE_MAP and
+  // api/routers/research.py's VALID_VERTICALS.
+  "Residential Trades / Service Contractors",
+  "Care Services (Childcare/Elder/Pet)",
+  "Personal Services (Salon/Spa/Fitness)",
+  "Field/Repair Services (Auto/Equipment)",
 ] as const;
 
 export const NAV_ITEMS = [
