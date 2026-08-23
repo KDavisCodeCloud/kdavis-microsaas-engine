@@ -89,15 +89,26 @@ Channels to skip:
    - Payment processing fees on top of monthly subscription?
    - Dispatch and scheduling overkill for small operations?
 
-2. ICP SIZE: How many businesses in this trade segment?
+2. API ACCESS VERIFICATION (added 2026-08-23): Confirm whether the ICP
+   at the described size (use the specific size from your submission —
+   solo operator, 2-3 technician shop, etc.) can access the required
+   platform API without a vendor-mediated process. Check the platform's
+   public developer docs for: self-serve API key generation, plan tier
+   required for API access, whether smaller customers are on legacy or
+   on-prem versions that may not support API access. If unconfirmable
+   from public docs, set api_access_verified: false and include the
+   flag in your output. Do not let an unverified API access assumption
+   pass to Verdict as clean.
+
+3. ICP SIZE: How many businesses in this trade segment?
    - Search for licensed contractor counts by trade type
    - Focus on solo operator to 5-technician operations
    - Minimum 500,000 addressable businesses required
 
-3. PRICING GAP: What is the incumbent's real all-in cost
+4. PRICING GAP: What is the incumbent's real all-in cost
    vs what a focused flat-fee tool could charge?
 
-4. BUILD FEASIBILITY: Can core value (job management,
+5. BUILD FEASIBILITY: Can core value (job management,
    invoicing, customer history, payment collection) be
    delivered with Stripe as the only external dependency?
    No parts supplier OAuth. No parts catalog integration
@@ -120,6 +131,7 @@ estimated_build_weeks) PLUS these Trades-specific fields on every card:
 - state_license_db_sources: [] (states with public data)
 - youtube_content_angle: "<suggested video hook>"
 - trade_association_channels: [] (named associations)
+- api_access_verified: true/false (see API ACCESS VERIFICATION above)
 - raw_review_samples: [] (verbatim from G2/Capterra/Reddit)
 
 ## What Trades never does

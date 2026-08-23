@@ -126,10 +126,21 @@ Channels to skip:
 2. PARTS INTEGRATION: Hard requirement or nice-to-have?
    (See critical check above — answer this explicitly)
 
-3. ICP SIZE: How many independent auto repair shops in US?
+3. API ACCESS VERIFICATION (added 2026-08-23): Confirm whether the ICP
+   at the described size (use the specific size from your submission —
+   e.g. a 1-5 technician shop) can access the required platform API
+   without a vendor-mediated process. Check the platform's public
+   developer docs for: self-serve API key generation, plan tier
+   required for API access, whether smaller customers are on legacy or
+   on-prem versions that may not support API access. If unconfirmable
+   from public docs, set api_access_verified: false and include the
+   flag in your output. Do not let an unverified API access assumption
+   pass to Verdict as clean.
+
+4. ICP SIZE: How many independent auto repair shops in US?
    Focus on 1-5 technician operations.
 
-4. BUILD FEASIBILITY: Repair orders, customer history,
+5. BUILD FEASIBILITY: Repair orders, customer history,
    technician time tracking, invoicing, payment collection
    — all internal with Stripe as only dependency IF parts
    integration is confirmed as non-core.
@@ -146,6 +157,7 @@ Field-specific fields on every card:
 - facebook_groups_identified: [] (exact group names)
 - youtube_content_angle: "<suggested video hook>"
 - state_license_db_sources: []
+- api_access_verified: true/false (see API ACCESS VERIFICATION above)
 - raw_review_samples: []
 
 ## What Field never does

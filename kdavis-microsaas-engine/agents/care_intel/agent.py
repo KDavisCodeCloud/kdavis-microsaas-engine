@@ -90,18 +90,29 @@ Channels to skip:
      that scale painfully as enrollment grows
    - Is there a flat-fee gap for centers with 30-100 children?
 
-2. ICP SIZE: How many licensed childcare providers in the US?
+2. API ACCESS VERIFICATION (added 2026-08-23): Confirm whether the ICP
+   at the described size (use the specific size from your submission —
+   e.g. a 20-100 child center) can access the required platform API
+   without a vendor-mediated process. Check the platform's public
+   developer docs for: self-serve API key generation, plan tier
+   required for API access, whether smaller customers are on legacy or
+   on-prem versions that may not support API access. If unconfirmable
+   from public docs, set api_access_verified: false and include the
+   flag in your output. Do not let an unverified API access assumption
+   pass to Verdict as clean.
+
+3. ICP SIZE: How many licensed childcare providers in the US?
    - Search for total licensed childcare center count
    - Focus on centers with 20-100 children (not home daycares)
    - Minimum 500,000 addressable businesses required
 
-3. WORKFLOW PAIN: Beyond pricing, what features are broken?
+4. WORKFLOW PAIN: Beyond pricing, what features are broken?
    - Parent communication failures?
    - Billing and tuition collection friction?
    - Attendance tracking problems?
    - State subsidy billing complexity?
 
-4. BUILD FEASIBILITY: Can core value (enrollment management,
+5. BUILD FEASIBILITY: Can core value (enrollment management,
    parent communication, tuition billing, attendance) be
    delivered with Stripe as the only external dependency?
    No state subsidy system integration as core feature.
@@ -116,6 +127,7 @@ Care-specific fields on every card:
 - facebook_groups_identified: [] (exact group names)
 - state_licensing_db_sources: [] (states with public data)
 - state_association_channels: [] (named associations)
+- api_access_verified: true/false (see API ACCESS VERIFICATION above)
 - raw_review_samples: []
 
 ## What Care never does

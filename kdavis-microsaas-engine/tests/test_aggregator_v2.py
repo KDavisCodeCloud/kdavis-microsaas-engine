@@ -405,10 +405,26 @@ def test_mid_acquisition_platform_hard_stop_forces_rejected():
     assert result["status"] == "rejected"
 
 
+def test_multiple_oauth_dependencies_hard_stop_forces_rejected():
+    # Added 2026-08-23 alongside prompt.md's Step 2.5 hard-gate restructure --
+    # matches the exact same enforcement pattern as the other three hard
+    # stops above (never trust the model's own verdict alone).
+    payload = _with_floor(_base_payload(
+        verdict="BUILD", timeline_classification="STRONG", confidence_score=88,
+        multiple_oauth_dependencies_failed=True, integration_dependency_count=2,
+        step_2_5_failure_reason="MULTIPLE_OAUTH_DEPENDENCIES",
+    ), net_mrr_floor=7000)
+    llm = lambda system, user: _canned(payload)
+    result = run([{"opportunity_id": "opp-1", "conservative_mrr_potential": 7000}], llm=llm)[0]
+    assert result["status"] == "rejected"
+    assert "hard stop" in result["rejection_reason"].lower()
+
+
 def test_no_hard_stop_failure_does_not_affect_a_clean_build():
     payload = _with_floor(_base_payload(
         verdict="BUILD", timeline_classification="STRONG", confidence_score=90,
         api_capability_failed=False, third_party_approval_gate_failed=False, mid_acquisition_platform_failed=False,
+        multiple_oauth_dependencies_failed=False,
     ), net_mrr_floor=8000)
     llm = lambda system, user: _canned(payload)
     result = run([{"opportunity_id": "opp-1", "conservative_mrr_potential": 8000}], llm=llm)[0]

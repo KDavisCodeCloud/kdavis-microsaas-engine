@@ -139,36 +139,24 @@ If one is clearly confirmed -> proceed to Step 2.5
 
 ---
 
-### STEP 2.5 — IS THE PROPOSED INTEGRATION VIABLE? (added 2026-08-15, Kelvin's rule)
+### STEP 2.5 — IS THE PROPOSED INTEGRATION VIABLE? (added 2026-08-15; restructured into explicit hard/soft gates 2026-08-23, Kelvin's rule)
 
-Only runs when the solution concept depends on integrating with a
-third-party platform's API to function (i.e. `PLATFORM_GAP` from Step 2,
-or any other gap type whose solution still requires reading/writing
-through an external platform's API). If the concept has no such
-dependency, skip this step and proceed directly to Step 3.
+The HARD GATES below, and the first soft gate, only run when the
+solution concept depends on integrating with a third-party platform's
+API to function (i.e. `PLATFORM_GAP` from Step 2, or any other gap type
+whose solution still requires reading/writing through an external
+platform's API). The last two soft gates (regulatory/compliance layer,
+buyer-user mismatch) are NOT API-dependency-specific — they run on
+every submission regardless of whether Step 2.5's API trigger applies.
 
-**Three checks. These are PERMANENT HARD STOPS — never loosened,
-regardless of pipeline health, regardless of any active recalibration.**
-Check all three when applicable; any ONE failing is DO_NOT_BUILD.
+#### HARD GATES
+
+**Auto-reject. Verdict is DO_NOT_BUILD regardless of all other scores —
+no exceptions, no override, never loosened by any active pipeline-health
+recalibration.** Check all four when applicable; any ONE failing is
+DO_NOT_BUILD.
 
 ```
-THIRD_PARTY_APPROVAL_GATE:
-  Does shipping this integration require approval from the platform
-  owner (app marketplace review, OAuth app verification, partner
-  program admission) that could block or delay launch indefinitely?
-  Evidence: [confirm via the platform's current developer docs/app
-  review policy, not assumption]
-  FAILS if: approval required AND no evidence such approval is routine
-  or fast for this category of integration.
-
-MID_ACQUISITION_PLATFORM:
-  Is the target platform currently being acquired, in acquisition
-  talks, or under an ownership transition (check recent news, not
-  training-data memory)?
-  Evidence: [dated source]
-  FAILS if: confirmed acquisition activity in progress or announced
-  within the last 12 months with integration/API stability at risk.
-
 API_CANNOT_PERFORM_CORE_ACTION:
   Does the platform's CURRENT public API actually support the specific
   read/write action the solution concept depends on? Verify against
@@ -178,16 +166,47 @@ API_CANNOT_PERFORM_CORE_ACTION:
   Evidence: [current API doc citation, dated]
   FAILS if: the core action the concept depends on is not supported by
   the platform's current API.
+
+MID_ACQUISITION_OR_REPRICING_PLATFORM:
+  Is the target platform currently being acquired, in acquisition
+  talks, or under an ownership transition, OR has it announced a
+  pricing restructure taking effect within the next 90 days (check
+  recent news and the platform's own pricing/changelog page, not
+  training-data memory)?
+  Evidence: [dated source]
+  FAILS if: confirmed acquisition activity in progress or announced
+  within the last 12 months with integration/API stability at risk, OR
+  a pricing restructure is announced to take effect within 90 days.
+
+THIRD_PARTY_APPROVAL_GATE:
+  Must the customer complete a third-party approval process before your
+  product works for them — Meta Business verification, WhatsApp
+  Business API approval, an app marketplace review, OAuth app
+  verification, partner program admission, or an equivalent gate that
+  could block or delay their time-to-value indefinitely?
+  Evidence: [confirm via the platform's current developer docs/app
+  review policy, not assumption]
+  FAILS if: such approval is required AND no evidence such approval is
+  routine or fast for this category of integration.
+
+MULTIPLE_OAUTH_DEPENDENCIES:
+  Does the customer need to complete more than one external OAuth
+  connection before reaching core value?
+  Evidence: [count and name each required OAuth connection]
+  FAILS if: `integration_dependency_count` > 1. Exactly one OAuth
+  dependency is not, by itself, a hard-gate failure (see
+  PRIMARY_INTEGRATION_WIDELY_ADOPTED below) — this gate exists
+  specifically for concepts stacking two or more.
 ```
 
-If ANY of the three checks above fails -> DO_NOT_BUILD. Set
+If ANY of the four checks above fails -> DO_NOT_BUILD. Set
 `failed_at_step: "2.5"` and `step_2_5_failure_reason` to whichever one
-failed (`THIRD_PARTY_APPROVAL_GATE` | `MID_ACQUISITION_PLATFORM` |
-`API_CANNOT_PERFORM_CORE_ACTION`). If more than one fails, report the
-first one checked in the order listed above.
+failed (`API_CANNOT_PERFORM_CORE_ACTION` |
+`MID_ACQUISITION_OR_REPRICING_PLATFORM` | `THIRD_PARTY_APPROVAL_GATE` |
+`MULTIPLE_OAUTH_DEPENDENCIES`). If more than one fails, report the first
+one checked in the order listed above.
 
-**Soft criterion — not a hard stop, may be recalibrated (see PIPELINE
-HEALTH MONITORING below):**
+**Informational, not a gate:**
 
 ```
 INTEGRATION_DEPENDENCY_COUNT: [count of distinct third-party platform
@@ -200,12 +219,55 @@ PRIMARY_INTEGRATION_WIDELY_ADOPTED: true/false — is the (or the primary)
   position — named evidence, not a guess.
 ```
 
-Default posture (no active recalibration): `INTEGRATION_DEPENDENCY_COUNT
->= 1` -> DO_NOT_BUILD. A recalibration block prepended above this prompt,
-if present, may relax this specific threshold — follow it exactly as
-stated when present; it never touches the three hard stops above.
+At exactly one dependency, this is recorded but does not by itself gate
+anything — proceed to the soft gates below.
 
-If all applicable checks pass (or the step doesn't apply) -> proceed to
+---
+
+#### SOFT GATES
+
+**Return CONDITIONAL — never DO_NOT_BUILD, never a silent BUILD.** If
+Steps 1-3 would otherwise land on BUILD, a triggered soft gate downgrades
+it to CONDITIONAL (same "downgrade only, never upgrade" principle as
+Step 4's confidence-score override below). State explicitly which soft
+gate fired. **A CONDITIONAL verdict triggered by one of the first two
+soft gates MUST include the exact one-question design partner test,
+spelled out verbatim with the brackets filled in — never a generic
+"validate with a design partner" note.**
+
+```
+API_ACCESS_UNVERIFIED_FOR_ICP_SIZE: (only applies when this concept has
+  the third-party API dependency described above)
+  The API exists, but whether the ICP's specific size tier (use the
+  actual size from the submission — "2-5 person shop", "5-20 person
+  practice", solo operator, etc.) can access it without a
+  vendor-mediated process is unconfirmable from public docs alone.
+  REQUIRED design_partner_question (fill in the brackets — do not leave
+  as a template): "Can you pull [specific data type] from [platform]
+  today without contacting your IT vendor or [platform] reseller?"
+
+REGULATORY_OR_COMPLIANCE_LAYER_PRESENT: (runs on every submission,
+  regardless of API dependency)
+  A compliance layer (HIPAA, PCI, FCRA, EEOC, or equivalent) is present
+  that changes the build profile (data handling, agreements required,
+  liability).
+  REQUIRED design_partner_question (fill in the brackets): "Does your
+  current workflow involve data that would require a BAA or compliance
+  agreement with a new vendor?"
+
+BUYER_USER_MISMATCH: (runs on every submission, regardless of API
+  dependency)
+  The buyer and the end user are different people, and the buyer does
+  not have unilateral purchase authority (e.g. an IT director must
+  approve what a front-line user wants).
+  REQUIRED output note (fill in the brackets): "Sales motion requires
+  reaching [buyer role], not [user role]. GTM realism score should
+  reflect this."
+```
+
+If none of the three soft gates apply, proceed with no downgrade.
+
+If all applicable hard gates pass -> proceed to the soft gates, then
 Step 3.
 
 ---
@@ -231,6 +293,27 @@ YOUR CALCULATION:
   Gross MRR: P x $X
   Churn: 20%
   Net MRR: Gross x 0.80
+
+REACHABLE SEGMENT SANITY CHECK (added 2026-08-23):
+  If Reachable segment (R) exceeds 10% of the total unhappy segment (U —
+  i.e. `unhappy_segment_total`, from your own independently-derived
+  sizing), set `reachable_segment_warning` to exactly this, filled in:
+    "REACHABLE SEGMENT WARNING: Estimate may be inflated. Reachable
+    segment ({X}) is {Y}% of total unhappy segment ({Z}). Verify
+    discovery rate assumption before accepting MRR projection."
+  {X}=R, {Y}=the actual percentage (R/U x 100), {Z}=U. This is
+  informational — it does not by itself change the verdict — but it
+  MUST appear whenever the condition is true. If R is 10% or less of U,
+  `reachable_segment_warning` is null.
+
+MRR PROJECTION LABELING (added 2026-08-23):
+  `net_mrr_floor` is a 12-MONTH CEILING — the best case at full ramp,
+  not an expected or average value. Never describe it as "expected MRR"
+  anywhere in your reasoning or output. Also calculate
+  `month_6_realistic_mrr` = net_mrr_floor x 0.30, a more conservative
+  mid-ramp estimate. Both fields are required on every BUILD and
+  CONDITIONAL output (compute `month_6_realistic_mrr` the same way on a
+  DO_NOT_BUILD too, for consistency — it just won't be acted on).
 
 FLOOR CHECK:
   $19-29/mo -> floor $3,500
@@ -391,9 +474,13 @@ SUPPORTING DATA:
   Gap type: [PRICE/PLATFORM/FEATURE/COMPLEXITY/SEGMENT]
   Unhappy segment: [N accounts]
   Reachable segment: [R accounts]
-  Net MRR floor: $X at month N
+  Reachable segment warning: [warning text, or "none"]
+  Net MRR floor (12-month ceiling): $X at month N
+  Month 6 realistic MRR: $X
   Price-adjusted floor target: $X
   Floor cleared: true/false
+  Soft gate triggered: [gate name, or "none"]
+  Design partner question: [exact question, or "none"]
 ```
 
 ---
@@ -414,11 +501,14 @@ These are hard stops. Non-negotiable. No exceptions.
   burden check as a gate. No cross-industry requirement as a gate. No
   maintenance cost as a gate. These may be noted in supporting data
   only — they are NOT reasons to stop evaluation.
-- Do NOT loosen Step 2.5's three hard stops (third-party approval gate,
-  mid-acquisition platform, API cannot perform core action) for any
-  reason, including an active pipeline-health recalibration. Only
-  Step 2.5's soft criterion (integration dependency count) may ever be
-  recalibrated.
+- Do NOT loosen Step 2.5's four hard gates (API cannot perform core
+  action, mid-acquisition or repricing platform, third-party approval
+  gate, multiple OAuth dependencies) for any reason, including an active
+  pipeline-health recalibration. The three SOFT gates (API access
+  unverified for ICP size, regulatory/compliance layer present,
+  buyer-user mismatch) return CONDITIONAL, never DO_NOT_BUILD, and are
+  the only part of Step 2.5 that pipeline-health recalibration may ever
+  touch.
 - Do NOT reject an idea because a well-reviewed competitor exists. The
   only question is whether that competitor is failing enough people to
   build a $4K MRR business around the gap.
@@ -523,6 +613,10 @@ around it). This is what the pipeline parses; if it is missing or
 malformed, this evaluation cannot be recorded. All monetary fields are
 numbers (not strings), all `_pct` fields are numbers 0-100.
 
+`net_mrr_floor` is a 12-month ceiling, never an expected value —
+`month_6_realistic_mrr` (30% of it) is the realistic mid-ramp figure,
+and both are required on every BUILD/CONDITIONAL output (see Step 3).
+
 ```json
 {
   "opportunity_id": "carried forward from input, or null if not provided",
@@ -539,7 +633,10 @@ numbers (not strings), all `_pct` fields are numbers 0-100.
   "third_party_approval_gate_failed": false,
   "mid_acquisition_platform_failed": false,
   "api_capability_failed": false,
-  "step_2_5_failure_reason": "THIRD_PARTY_APPROVAL_GATE | MID_ACQUISITION_PLATFORM | API_CANNOT_PERFORM_CORE_ACTION | null",
+  "multiple_oauth_dependencies_failed": false,
+  "step_2_5_failure_reason": "API_CANNOT_PERFORM_CORE_ACTION | MID_ACQUISITION_OR_REPRICING_PLATFORM | THIRD_PARTY_APPROVAL_GATE | MULTIPLE_OAUTH_DEPENDENCIES | null",
+  "soft_gate_triggered": "API_ACCESS_UNVERIFIED_FOR_ICP_SIZE | REGULATORY_OR_COMPLIANCE_LAYER_PRESENT | BUYER_USER_MISMATCH | null",
+  "design_partner_question": "string — the exact filled-in one-question test (soft gates 1-2) or buyer/user GTM note (soft gate 3), verbatim, never a generic placeholder; null if no soft gate applies",
   "icp": "string — behavior + role + size, not industry label alone",
   "unhappy_segment_total": 0,
   "unhappy_segment_source": "string",
@@ -548,6 +645,7 @@ numbers (not strings), all `_pct` fields are numbers 0-100.
   "gtm_channel": "string — the specific named distribution mechanism",
   "discovery_rate_pct": 0,
   "reachable_segment": 0,
+  "reachable_segment_warning": "string — exact REACHABLE SEGMENT WARNING text when reachable segment exceeds 10% of unhappy_segment_total, else null",
   "capture_rate_pct": 0.5,
   "paying_accounts": 0,
   "proposed_price": 0,
@@ -555,6 +653,7 @@ numbers (not strings), all `_pct` fields are numbers 0-100.
   "gross_mrr": 0,
   "churn_haircut_pct": 20,
   "net_mrr_floor": 0,
+  "month_6_realistic_mrr": 0,
   "price_adjusted_floor": 0,
   "floor_cleared": false,
   "month_floor_cleared": 0,

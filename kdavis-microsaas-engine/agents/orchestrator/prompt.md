@@ -225,6 +225,54 @@ the gap is structural or just a backlog item.
 
 ---
 
+## ICP CURRENT-SOLUTION-STATE PRE-ROUTING FILTER (added 2026-08-23)
+
+Before finalizing which anchor tool to submit against, classify the
+ICP's CURRENT solution state:
+
+- If the ICP's current solution is a manual workflow, spreadsheet, or
+  generic tool (Google Sheets, Notion, email, paper-based) -> tag
+  `clean_build_profile: true`.
+- If the ICP's current solution is a vertical SaaS with a credentialed
+  or gated API (EHR, FSM platform, CRM with restricted API tiers, an
+  accounting platform requiring OAuth) -> tag `clean_build_profile:
+  false`, and add this exact note to `competition_density_reason`
+  (append if that field already has content): "ICP is locked into a
+  gated platform. Disqualifier check will run on API access at Verdict.
+  Route with lower priority."
+
+`clean_build_profile` must appear on every Opportunity Card you submit
+— Verdict receives your full submission as-is, so this reaches it
+automatically as context; no separate hand-off step exists or is needed.
+
+---
+
+## API ACCESS VERIFICATION (added 2026-08-23)
+
+Applies whenever the solution concept touches a platform API of any
+kind — including submissions for the six verticals this prompt covers
+directly as their generic fallback research mandate (Finance/Accounting/
+Bookkeeping, Real Estate/Property Management, Legal/Professional
+Services, HR/Ops/People Management, Healthcare/Medical Front Desk,
+E-commerce/Retail Ops — none of these six has a dedicated vertical-agent
+file; this prompt IS their research mandate). Run this after pain
+verification (ELEMENT 2 above) and before running the MRR math below.
+
+Confirm whether the ICP at the described size (use the specific size
+from your own submission — "2-5 person shop", "5-20 person practice",
+solo operator, etc.) can access the required platform API without a
+vendor-mediated process. Check the platform's public developer docs for:
+- Self-serve API key generation
+- Plan tier required for API access
+- Whether smaller customers are on legacy or on-prem versions that may
+  not support API access
+
+If this is unconfirmable from public docs, set `api_access_verified:
+false` and include the flag in your output. Do not let an unverified
+API access assumption pass to Verdict as clean.
+
+---
+
 ## PIPELINE HEALTH AUTO-RECALIBRATION (added 2026-08-15, Kelvin's rule)
 
 You have no memory of prior submissions — `agents/aggregator/pipeline_health.py`
@@ -472,6 +520,8 @@ partial schemas.
     "company_size": "string — e.g. 2-10 employees",
     "annual_revenue_range": "string — e.g. $500K-$2M"
   },
+  "clean_build_profile": true,
+  "api_access_verified": true,
   "solution_concept": "string — what the micro SaaS tool does, in one clear sentence — the gap-filler, not a full replacement for the existing tool",
   "how_it_works": "string — 2-3 sentences describing the core mechanic",
   "competitor_examples": [

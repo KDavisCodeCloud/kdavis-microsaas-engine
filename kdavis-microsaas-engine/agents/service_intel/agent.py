@@ -103,11 +103,22 @@ Channels to skip:
    - Marketing automation?
    - Commission tracking?
 
-3. ICP SIZE: How many multi-staff salons and spas in the US?
+3. API ACCESS VERIFICATION (added 2026-08-23): Confirm whether the ICP
+   at the described size (use the specific size from your submission —
+   e.g. a 3-15 staff salon) can access the required platform API
+   without a vendor-mediated process. Check the platform's public
+   developer docs for: self-serve API key generation, plan tier
+   required for API access, whether smaller customers are on legacy or
+   on-prem versions that may not support API access. If unconfirmable
+   from public docs, set api_access_verified: false and include the
+   flag in your output. Do not let an unverified API access assumption
+   pass to Verdict as clean.
+
+4. ICP SIZE: How many multi-staff salons and spas in the US?
    - Focus on 3-15 staff operations (solo has free options)
    - State cosmetology board data for establishment counts
 
-4. BUILD FEASIBILITY: Booking, client history, staff
+5. BUILD FEASIBILITY: Booking, client history, staff
    scheduling, payment collection — all internal with Stripe.
    No Instagram booking integration as core feature.
 
@@ -123,6 +134,7 @@ Service-specific fields on every card:
   scale — REQUIRED, never omitted, never generic>"
 - facebook_groups_identified: [] (exact group names)
 - instagram_strategy_note: "<one sentence on Instagram angle>"
+- api_access_verified: true/false (see API ACCESS VERIFICATION above)
 - raw_review_samples: []
 
 ## What Service never does
