@@ -99,12 +99,22 @@ async def trigger_linkedin_dm_sequences(
 ):
     """
     Triggers MKT-O2 (run_o2_for_linkedin_leads) for every product that
-    currently has pending_dm LinkedIn leads — the single call n8n's daily
-    workflow makes after its two GET /marketing/linkedin/leads polls
-    above. Looks up each product's most recent MKT-R1 research report
-    itself (mse_research_reports) so n8n never has to carry that payload
-    around; a product with no research report yet is skipped, not failed,
-    since MKT-O2 has nothing to ground the copy in.
+    currently has pending_dm leads from ANY source it handles (LinkedIn
+    engager/manual leads in mse_linkedin_leads, or lead-finder leads in
+    mse_leads) — the single call n8n's daily workflow makes after its two
+    GET /marketing/linkedin/leads polls above. Looks up each product's
+    most recent MKT-R1 research report itself (mse_research_reports) so
+    n8n never has to carry that payload around; a product with no
+    research report yet is skipped, not failed, since MKT-O2 has nothing
+    to ground the copy in.
+
+    Fixed 2026-08-27: product discovery only ever checked
+    mse_linkedin_leads, so a product with pending_dm rows in mse_leads
+    (lead_finder-sourced) but zero mse_linkedin_leads rows was silently
+    never picked up here at all — run_o2_for_linkedin_leads itself already
+    processes mse_leads correctly once called for a product_id (see its
+    own docstring), it just never got called for lead-finder-only
+    products. Discovery now unions both sources.
     """
     require_marketing_api_key(authorization)
     background_tasks.add_task(_run_linkedin_dm_sequences)
@@ -115,8 +125,17 @@ def _run_linkedin_dm_sequences() -> None:
     from agents.marketing.mkt_o2_cold_dm_writer import run_o2_for_linkedin_leads
 
     db = get_supabase()
-    pending = db.table("mse_linkedin_leads").select("product_id").eq("status", "pending_dm").execute().data or []
-    product_ids = {row["product_id"] for row in pending if row.get("product_id")}
+    pending_linkedin = db.table("mse_linkedin_leads").select("product_id").eq("status", "pending_dm").execute().data or []
+    pending_lead_finder = (
+        db.table("mse_leads")
+        .select("product_id")
+        .eq("status", "pending_dm")
+        .eq("email_status", "verified")
+        .execute()
+        .data
+        or []
+    )
+    product_ids = {row["product_id"] for row in pending_linkedin + pending_lead_finder if row.get("product_id")}
 
     for product_id in product_ids:
         reports = (
