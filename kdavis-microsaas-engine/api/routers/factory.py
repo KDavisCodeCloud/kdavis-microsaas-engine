@@ -59,6 +59,26 @@ async def trigger_generate_brief(
     return {"status": "queued", "opportunity_id": opportunity_id}
 
 
+@router.post("/dispatch-brief/{brief_id}")
+async def trigger_dispatch_brief(
+    brief_id: str, request: Request, background_tasks: BackgroundTasks,
+):
+    if getattr(request.state, "role", "") != "admin":
+        raise HTTPException(status_code=403, detail="Brief dispatch requires admin role")
+
+    triggered_by = getattr(request.state, "tenant_id", None)
+    if not triggered_by:
+        raise HTTPException(status_code=401, detail="No authenticated user to attribute this dispatch to")
+
+    background_tasks.add_task(_run_dispatch_brief, brief_id, triggered_by)
+    return {"status": "queued", "brief_id": brief_id}
+
+
+def _run_dispatch_brief(brief_id: str, triggered_by: str) -> None:
+    from agents.factory.brief_dispatcher import dispatch_brief
+    dispatch_brief(brief_id, triggered_by)
+
+
 def _run_generate_brief(opportunity_id: str, triggered_by: str) -> None:
     from agents.factory.brief_generator import generate_build_brief, generate_research_report_from_verdict
     brief_row = generate_build_brief(opportunity_id, triggered_by)

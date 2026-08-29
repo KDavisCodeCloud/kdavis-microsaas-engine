@@ -86,3 +86,27 @@ def test_generate_brief_queues_with_triggered_by_from_jwt_sub(monkeypatch):
     assert resp.json() == {"status": "queued", "opportunity_id": "opp-1"}
     assert captured["opp_id"] == "opp-1"
     assert captured["triggered_by"] == "operator-42"
+
+
+def test_dispatch_brief_requires_admin_role():
+    resp = client.post("/factory/dispatch-brief/brief-1", headers=_auth_header(role="marketing"))
+    assert resp.status_code == 403
+
+
+def test_dispatch_brief_requires_auth_at_all():
+    resp = client.post("/factory/dispatch-brief/brief-1")
+    assert resp.status_code == 401
+
+
+def test_dispatch_brief_queues_with_triggered_by_from_jwt_sub(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(factory_router, "_run_dispatch_brief", lambda brief_id, triggered_by: captured.update(
+        brief_id=brief_id, triggered_by=triggered_by,
+    ))
+
+    resp = client.post("/factory/dispatch-brief/brief-1", headers=_auth_header(sub="operator-42"))
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "queued", "brief_id": "brief-1"}
+    assert captured["brief_id"] == "brief-1"
+    assert captured["triggered_by"] == "operator-42"
