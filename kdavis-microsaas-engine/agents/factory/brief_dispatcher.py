@@ -88,7 +88,12 @@ def dispatch_brief(
             "dispatched_by": triggered_by,
             "dispatch_result": {"error": str(exc)},
         }).eq("id", brief_id).execute()
-        _write_audit(db, "lose", brief.get("product_slug", brief_id), {"triggered_by": triggered_by, "error": str(exc)})
+        # audit_log.product_id is a uuid FK -- brief_id (not product_slug,
+        # which is text) is the only uuid this function has in hand. Real
+        # bug caught live 2026-08-29: passing product_slug here raised
+        # postgrest APIError 22P02 "invalid input syntax for type uuid"
+        # and masked the actual dispatch failure being audited.
+        _write_audit(db, "lose", brief_id, {"triggered_by": triggered_by, "product_slug": brief.get("product_slug"), "error": str(exc)})
         raise RuntimeError(f"Brief dispatch failed for {brief_id}: {exc}") from exc
 
     dispatched_at = datetime.now(timezone.utc).isoformat()
@@ -100,6 +105,6 @@ def dispatch_brief(
         "dispatch_result": result,
     }).eq("id", brief_id).execute()
 
-    _write_audit(db, "win", brief.get("product_slug", brief_id), {"triggered_by": triggered_by, "brief_id": brief_id})
+    _write_audit(db, "win", brief_id, {"triggered_by": triggered_by, "product_slug": brief.get("product_slug")})
 
     return {"brief_id": brief_id, "dispatch_status": "dispatched", "dispatched_at": dispatched_at, "result": result}
