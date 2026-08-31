@@ -53,4 +53,12 @@ app.include_router(dist.router)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    # RAILWAY_GIT_COMMIT_SHA is a real Railway-provided env var, set
+    # automatically on every GitHub-integration deploy -- no extra config
+    # needed. DIST Task 5's deploy-freshness monitor reads this (and the
+    # Vercel deployment API's own commit field for frontend services) to
+    # compare against origin/main HEAD; None here means this instance
+    # wasn't deployed via the GitHub integration (e.g. a bare `railway up`),
+    # which the monitor reports as "can't determine freshness" rather than
+    # silently treating as fresh.
+    return {"status": "ok", "commit_sha": os.environ.get("RAILWAY_GIT_COMMIT_SHA")}
