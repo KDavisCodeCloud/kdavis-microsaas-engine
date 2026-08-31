@@ -16,6 +16,12 @@ wedge_type='temporary' (a temporary wedge means we can't defensibly claim
 a competitor structurally can't match us -- they might ship it next
 quarter) -- jtbd/calculator/faq_block archetypes are still planned since
 they don't make a competitor-comparison claim.
+
+'execution' (migration 038's three-tier taxonomy) is treated identically
+to 'structural' here: it's a pass, full archetype generation, because it
+requires the same sourced evidence bar (DIST-P2's Q4) that "temporary"
+never had to clear. Only 'temporary' is excluded from the competitor-claim
+archetypes -- that exclusion is unchanged and must not weaken.
 """
 from __future__ import annotations
 
@@ -85,7 +91,7 @@ async def plan_surfaces(product_slug: str, supabase_client: Optional[Any] = None
 
     plan_items: list[dict] = []
 
-    if wedge_type == "structural":
+    if wedge_type in ("structural", "execution"):
         competitors = (
             db.table("mse_competitors").select("id, name").eq("product_id", product_id).execute()
         )
@@ -109,7 +115,8 @@ async def plan_surfaces(product_slug: str, supabase_client: Optional[Any] = None
                 "status": "draft",
             })
     # wedge_type == 'temporary': no competitor-claim archetypes planned at
-    # all, per the spec's own moat_risk exclusion rule.
+    # all, per the spec's own moat_risk exclusion rule -- this is the one
+    # branch that must never widen.
 
     trigger_events = [t.strip() for t in pos.get("trigger_event", "").split(";") if t.strip()]
     for i, trigger in enumerate(trigger_events[:10]):

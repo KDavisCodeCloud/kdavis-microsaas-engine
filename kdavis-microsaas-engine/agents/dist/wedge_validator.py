@@ -7,44 +7,80 @@ enforced at the database level regardless of this code (migration 029's
 reject_direct_approval trigger + approve_positioning()'s owner-only
 SECURITY DEFINER gate) -- this module doesn't rely on its own discipline
 to hold that line.
+
+Three-tier taxonomy (migration 038, 2026-08-31): the original 2-tier test
+(structural pass / temporary fail) rejected every real product submitted
+to it -- a filter that rejects everything is miscalibrated, not doing its
+job. structural is a moat test; moats matter at $10K MRR and exit, not at
+the ~33-40-customer $4K first bar. This widens the PASS condition to add
+'execution' (they could close the gap and demonstrably have not -- the
+buyer is underserved today, sourced) without touching the FAIL condition:
+an unsourced or roadmap-imminent gap is still 'temporary' and still blocks
+generation exactly as before. Q1-Q3 (the original structural test) are
+unchanged; Q4 only ever moves a Q2-failing brief between execution and
+temporary, it can never turn a temporary into a structural.
 """
 from __future__ import annotations
 
 import json
 import re
+from datetime import date, timedelta
 from typing import Any, Optional
 
-from core.llm_router import analyze
+from core.llm_router import analyze_with_web_search
 from core.supabase_client import get_supabase
 
 AGENT_ID = "dist-p2-wedge-validator"
 
+# 2 quarters, per A.1's mandatory re-review requirement on 'execution'-tier
+# rows -- a bet that a substitute keeps not shipping needs a recheck date.
+_EXECUTION_REVIEW_INTERVAL_DAYS = 182
+
 SYSTEM_PROMPT = """You are an adversarial reviewer whose only job is to try to \
 defeat a proposed product "wedge" (the thing substitute products structurally \
-cannot do). You are given a DIST-P1 draft positioning brief as JSON. Attempt to \
-break it:
+cannot do, or demonstrably have not done). You are given a DIST-P1 draft \
+positioning brief as JSON. Attempt to break it by answering four questions, in \
+order, with real web search -- do not answer from memory alone:
 
 1. Could any listed substitute close this gap in one normal roadmap quarter? If \
-yes, the wedge is "temporary", not "structural" -- downgrade it regardless of what \
-the draft claims.
+yes, this is NOT structural -- fall through to Q4 to determine execution vs \
+temporary.
 2. Does closing the gap genuinely break the substitute's own revenue model or force \
-it to abandon a customer segment it currently serves? Only then does "structural" \
-hold.
+it to abandon a customer segment it currently serves? If yes, wedge_type is \
+"structural" regardless of Q4 -- stop here, Q4 does not apply.
 3. Is every claim in wedge_evidence backed by a real source_url, or merely \
-asserted? Unsourced claims must be flagged, not silently accepted.
-4. Is price_rationale argued against the CHEAPEST substitute in substitute_set, or \
-against a more expensive one (which is the exact class of error this whole system \
-exists to catch)? Flag it if wrong.
+asserted? Unsourced claims must be flagged, not silently accepted, regardless of \
+which tier this resolves to.
+4. Only asked when Q2 fails (the substitute COULD close the gap): is there sourced \
+evidence the substitute has had the opportunity to close this gap and chosen not \
+to? Concrete evidence only -- shipped-feature history, a public roadmap, stated \
+positioning, or years in market without addressing it. Search for the substitute's \
+actual changelog/roadmap/release notes; do not infer inaction from absence of a \
+search result. ABSENCE OF EVIDENCE IS NOT EVIDENCE -- an unsourced or unresearched \
+answer here MUST resolve to "temporary", never "execution". A substitute actively \
+shipping comparable features on a normal cadence (e.g. ~6-week release cycles) is \
+"temporary" even if today's snapshot doesn't have the exact feature yet -- they are \
+actively closing it, not sitting on it.
+
+price_rationale check, independent of the above: is price_rationale argued against \
+the CHEAPEST substitute in substitute_set, or against a more expensive one (the \
+exact class of error this whole system exists to catch)? Flag it if wrong.
 
 Return ONLY a single JSON object, no markdown fences:
 {
-  "corrected_wedge_type": "structural"|"temporary",
+  "corrected_wedge_type": "structural"|"execution"|"temporary",
   "downgrade_reason": str|null,
   "unsourced_claims": [str],
   "price_rationale_flag": str|null,
+  "q4_evidence": [{"claim": str, "source_url": str, "verified_at": "YYYY-MM-DD"}],
   "verdict": "pending_review",
-  "notes": "one paragraph, plain, for the review log"
+  "notes": "one paragraph, plain, for the review log -- state your Q1-Q4 answers"
 }
+
+q4_evidence MUST be a non-empty array with at least one real source_url whenever \
+corrected_wedge_type is "execution", and MUST be an empty array otherwise -- do not \
+populate it for structural or temporary verdicts, and never claim "execution" \
+without it.
 
 "verdict" must always be "pending_review" -- you are never able to approve or \
 reject outright; the owner decides. Your job is to surface real problems, not to \
@@ -63,11 +99,17 @@ def _extract_json(text: str) -> dict[str, Any]:
 
 
 async def validate_wedge(positioning_id: str, supabase_client: Optional[Any] = None) -> dict:
-    """Runs DIST-P2 against one draft mse_positioning row. Writes findings
-    into wedge_evidence.validation and appends to review_log. Sets
+    """Runs DIST-P2 against one draft/pending mse_positioning row. Writes
+    findings into wedge_evidence.validation (+ wedge_evidence.q4_evidence
+    for an execution verdict) and appends to review_log. Sets
     status='pending_review' -- never 'approved' (structurally impossible
     for this code path to do that even if it tried, see migration 029).
-    Returns the updated row."""
+
+    Raises ValueError, and writes nothing, if the model returns an
+    'execution' verdict with no sourced q4_evidence -- absence of evidence
+    is not evidence, per A.2; a bare LLM claim of "execution" is not
+    sufficient to unlock full surface generation. Returns the updated row
+    on success."""
     db = supabase_client or get_supabase()
 
     # Same maybe_single()-returns-bare-None quirk as positioning_researcher.py.
@@ -89,17 +131,31 @@ async def validate_wedge(positioning_id: str, supabase_client: Optional[Any] = N
         indent=2,
     )
 
-    raw = analyze(SYSTEM_PROMPT, user_prompt, max_tokens=2000)
+    raw = analyze_with_web_search(SYSTEM_PROMPT, user_prompt, max_uses=12, max_tokens=6000)
     findings = _extract_json(raw)
+
+    corrected_wedge_type = findings["corrected_wedge_type"]
+    q4_evidence = findings.get("q4_evidence") or []
+
+    if corrected_wedge_type == "execution" and len(q4_evidence) == 0:
+        raise ValueError(
+            f"DIST-P2 rejected 'execution' verdict for positioning {positioning_id!r}: "
+            "no sourced q4_evidence provided. Absence of evidence is not evidence -- "
+            "this resolves to 'temporary', not 'execution'. Nothing was written."
+        )
 
     wedge_evidence = dict(brief["wedge_evidence"] or {})
     wedge_evidence["validation"] = {
-        "corrected_wedge_type": findings["corrected_wedge_type"],
+        "corrected_wedge_type": corrected_wedge_type,
         "downgrade_reason": findings.get("downgrade_reason"),
         "unsourced_claims": findings.get("unsourced_claims", []),
         "price_rationale_flag": findings.get("price_rationale_flag"),
         "reviewer": AGENT_ID,
     }
+    if corrected_wedge_type == "execution":
+        wedge_evidence["q4_evidence"] = q4_evidence
+    else:
+        wedge_evidence.pop("q4_evidence", None)
 
     review_log = list(brief.get("review_log") or [])
     review_log.append(
@@ -112,11 +168,17 @@ async def validate_wedge(positioning_id: str, supabase_client: Optional[Any] = N
     )
 
     update = {
-        "wedge_type": findings["corrected_wedge_type"],
+        "wedge_type": corrected_wedge_type,
         "wedge_evidence": wedge_evidence,
         "review_log": review_log,
         "status": "pending_review",
-        "moat_risk": findings["corrected_wedge_type"] == "temporary",
+        "moat_risk": corrected_wedge_type != "structural",
+        "wedge_review_status": "current",
+        "next_review_due": (
+            (date.today() + timedelta(days=_EXECUTION_REVIEW_INTERVAL_DAYS)).isoformat()
+            if corrected_wedge_type == "execution"
+            else None
+        ),
     }
     result = db.table("mse_positioning").update(update).eq("id", positioning_id).execute()
     return result.data[0]

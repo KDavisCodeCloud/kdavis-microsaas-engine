@@ -62,11 +62,14 @@ create table mse_positioning (
   trigger_event       text not null,
   substitute_set      jsonb not null,
   wedge               text not null,
-  wedge_type          text not null check (wedge_type in ('structural','temporary')),
+  wedge_type          text not null check (wedge_type in ('structural','execution','temporary')),
   wedge_evidence      jsonb not null,
   price_rationale     text not null,
   kill_criteria       text not null,
   moat_risk           boolean not null default false,
+  wedge_review_status text not null default 'current'
+                        check (wedge_review_status in ('current','needs_rereview')),
+  next_review_due     date,
 
   status              text not null default 'draft'
                         check (status in ('draft','pending_review','approved','rejected','superseded')),
@@ -88,21 +91,40 @@ create policy mse_positioning_tenant_read on mse_positioning
   );
 ```
 
-Approval is enforced by a `SECURITY DEFINER` function (`approve_positioning`) checking `role = 'admin'`, plus a trigger rejecting any direct `UPDATE ... status='approved'` that didn't go through it. See `supabase/migrations/20260830000029_dist_phase0_positioning.sql` for the real, live implementation.
+Approval is enforced by a `SECURITY DEFINER` function (`approve_positioning`) checking `role = 'admin'`, plus a trigger rejecting any direct `UPDATE ... status='approved'` that didn't go through it. See `supabase/migrations/20260830000029_dist_phase0_positioning.sql` for the real, live implementation. `wedge_type`'s third value and the `wedge_review_status`/`next_review_due` columns were added by `supabase/migrations/20260831000038_dist_wedge_taxonomy.sql` — see §0.4a.
 
 ## 0.3 — `substitute_set` contract
 
 Array, minimum three entries, **must** include one with `kind = 'do_nothing'`. `kind` ∈ `free_tool | paid_tool | do_nothing | manual_process | in_house_build | agency_service`.
 
-## 0.4 — The structural test
+## 0.4 — The wedge taxonomy (amended 2026-08-31, migration 038)
 
-`wedge_type = 'structural'` is only valid if the substitute **cannot** close the gap without breaking its own revenue model or org incentives. If they could close it in a normal roadmap quarter, it's `temporary` and it is not a wedge — it's a head start. A `temporary` brief may be approved, but flags `moat_risk` and is excluded from the surface generator's competitor-claim archetypes.
+The original 2-tier test (`structural` pass / `temporary` fail) rejected every real brief submitted to it — SPH, DecodedSix, and all three TradesDesk verticals all came back `temporary`. A filter that rejects everything is miscalibrated, not doing its job: `structural` is a **moat** test, and almost no micro-SaaS at this scale clears one (Jobber doesn't, Innago doesn't). A moat matters at $10K MRR and at exit; it is not required to clear the ~33-40-customer $4K first bar. This amendment widens the **pass** condition only — the original three structural questions are unchanged, and `temporary` is not weakened.
+
+`wedge_type` is now one of three values:
+
+| Tier | Meaning | Gate outcome |
+|---|---|---|
+| `structural` | Closing the gap breaks the substitute's revenue model or costs them a segment | Pass. Full surface generation, all archetypes. |
+| `execution` | They could close it and demonstrably have not; the buyer is underserved today, sourced | Pass. Full surface generation, same as `structural`. `moat_risk = true`. Mandatory re-review every 2 quarters (`next_review_due`). |
+| `temporary` | They will close it on a normal roadmap cycle and there is no other advantage | Fail. Excluded from the surface generator's competitor-claim archetypes (`vs_competitor`/`alternatives_to`) — unchanged behavior, see §4.3. |
+
+DIST-P2 asks four questions, in order:
+
+1. Could any listed substitute close this gap in one normal roadmap quarter? (Same as before.)
+2. Does closing the gap genuinely break the substitute's own revenue model or force it to abandon a segment it serves? If yes → `structural`, stop — Q4 does not apply.
+3. Is every claim in `wedge_evidence` sourced? (Same as before, applies regardless of tier.)
+4. **New.** Only asked when Q2 fails: is there sourced evidence the substitute has had the opportunity to close this gap and chosen not to? Concrete evidence only — shipped-feature history, a public roadmap, stated positioning, years in market without addressing it. **Absence of evidence is not evidence** — an unsourced or unresearched Q4 answer resolves to `temporary`, never `execution`. A substitute actively shipping comparable features on a normal cadence (e.g. Jobber's ~6-week release cycles) is `temporary` even without the exact feature today, because they're actively closing the gap.
+
+`wedge_evidence.q4_evidence` must be a non-empty array with at least one real `source_url` whenever `corrected_wedge_type` is `execution` — DIST-P2 rejects (raises, writes nothing) an `execution` verdict with empty `q4_evidence` rather than accept a bare LLM assertion of "they haven't shipped it."
+
+**Migration data policy:** rows that were `temporary` under the old 2-tier rule are **not** auto-promoted to `execution` — they're flagged `wedge_review_status = 'needs_rereview'` so DIST-P2 re-evaluates them under the new Q4 rule from real evidence, rather than inheriting a verdict rendered under different criteria.
 
 ## 0.5 — Agents
 
 **DIST-P1 — Positioning Researcher.** Enumerates the substitute set, hard requirement to search explicitly for free/open-source options and the no-software-at-all path.
 
-**DIST-P2 — Wedge Validator.** Adversarial. Downgrades unsupported `structural` claims, rejects unsourced evidence, checks price against the *cheapest* substitute. **May never approve.** Owner approval only.
+**DIST-P2 — Wedge Validator.** Adversarial, real web-search backed. Downgrades unsupported `structural` claims, rejects unsourced evidence, checks price against the *cheapest* substitute, and (§0.4) determines `execution` vs `temporary` via sourced Q4 evidence. **May never approve.** Owner approval only.
 
 ## 0.6 — Acceptance (all confirmed 2026-08-30/31)
 
@@ -112,6 +134,14 @@ Array, minimum three entries, **must** include one with `kind = 'do_nothing'`. `
 - [x] DIST-P1 run against SPH surfaces Innago, TurboTenant, Avail, Baselane, and spreadsheet-plus-Zelle
 - [x] DIST-P2 correctly downgrades a seeded `temporary` wedge
 - [x] Approval path is admin-only; agent write to `status='approved'` raises
+
+**Wedge taxonomy amendment (2026-08-31, migration 038) — confirmed:**
+
+- [x] `wedge_type` CHECK widened to `('structural','execution','temporary')`; existing `temporary` rows flagged `wedge_review_status='needs_rereview'`, none auto-promoted — verified live against `microsaas-prod`
+- [x] DIST-P2 Q4 logic tested against all three calibration fixtures (Jobber shipping cadence → `temporary`; long-standing free competitor with no roadmap signal → `execution`; SPH ACH absorption → `structural`)
+- [x] `execution` verdict with empty `q4_evidence` is rejected by DIST-P2 (raises, writes nothing) — real test
+- [x] `temporary` still excluded from `vs_competitor`/`alternatives_to` generation — regression test re-run, unweakened
+- [x] Six pending briefs (SPH v2, DecodedSix v2, `tradesdesk`, `tradesdesk-hvac`, `tradesdesk-plumbing`, `tradesdesk-electrical`) re-evaluated under the amended rule as new versions at `pending_review`; zero approved
 
 ---
 
@@ -267,7 +297,7 @@ create table mse_content_surfaces (
 
 ## 4.3 — Agents
 
-**DIST-S1 Surface Planner** — refuses `vs_competitor`/`alternatives_to` when `wedge_type='temporary'`, reads `mse_generator_state`'s pause flag first.
+**DIST-S1 Surface Planner** — plans `vs_competitor`/`alternatives_to` for `wedge_type` in `('structural','execution')`, refuses them for `'temporary'` (§0.4), reads `mse_generator_state`'s pause flag first.
 **DIST-S2 Surface Writer** — every competitor claim sourced from `mse_competitors`.
 **DIST-S3 Quality Gate** — 5 real checks: original-value, substance floor, duplicate detection (pgvector, `search_path='public'`), claim audit (source + 90-day freshness), schema validity. 3rd rejection of the same archetype pauses it + raises HITL.
 

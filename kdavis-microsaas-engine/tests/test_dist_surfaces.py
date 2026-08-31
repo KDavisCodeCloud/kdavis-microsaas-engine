@@ -62,6 +62,23 @@ async def test_plan_surfaces_structural_wedge_plans_competitor_archetypes(fake_d
 
 
 @pytest.mark.asyncio
+async def test_plan_surfaces_execution_wedge_plans_competitor_archetypes(fake_db):
+    # Three-tier taxonomy (migration 038): 'execution' is a pass, treated
+    # identically to 'structural' -- full archetype generation, because it
+    # cleared the same sourced-evidence bar 'temporary' never had to.
+    fake_db.responses["mse_products"] = [_product_row(pid="prod-3", slug="tradesdesk-hvac", name="TradesDesk HVAC")]
+    fake_db.responses["mse_positioning"] = [_approved_positioning(pid="prod-3", wedge_type="execution")]
+    fake_db.responses["mse_competitors"] = [{"id": "comp-1", "name": "FreeFSM"}]
+
+    await plan_surfaces("tradesdesk-hvac", supabase_client=fake_db)
+    archetypes = _upserted_archetypes(fake_db)
+    assert archetypes.count("vs_competitor") == 1
+    assert archetypes.count("alternatives_to") == 1
+    assert "jtbd" in archetypes
+    assert "calculator" in archetypes
+
+
+@pytest.mark.asyncio
 async def test_plan_surfaces_temporary_wedge_excludes_competitor_claims(fake_db):
     fake_db.responses["mse_products"] = [_product_row(pid="prod-2", slug="tradesdesk", name="TradesDesk")]
     fake_db.responses["mse_positioning"] = [_approved_positioning(pid="prod-2", wedge_type="temporary")]

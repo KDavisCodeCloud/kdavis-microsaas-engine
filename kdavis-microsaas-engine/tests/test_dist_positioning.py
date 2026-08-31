@@ -171,22 +171,27 @@ async def test_validate_wedge_raises_on_missing_row():
         await wedge_validator.validate_wedge("missing", supabase_client=db)
 
 
-async def test_validate_wedge_never_writes_approved(monkeypatch):
-    db = FakeSupabase(data={"mse_positioning": [{
+def _base_brief(wedge_type="structural"):
+    return {
         "id": "b1", "product_id": "p1", "icp": "x", "trigger_event": "x",
         "substitute_set": [{"name": "A", "kind": "do_nothing"}],
-        "wedge": "x", "wedge_type": "structural", "wedge_evidence": {}, "price_rationale": "x",
+        "wedge": "x", "wedge_type": wedge_type, "wedge_evidence": {}, "price_rationale": "x",
         "review_log": [],
-    }]})
+    }
+
+
+async def test_validate_wedge_never_writes_approved(monkeypatch):
+    db = FakeSupabase(data={"mse_positioning": [_base_brief()]})
     findings = json.dumps({
         "corrected_wedge_type": "temporary",
         "downgrade_reason": "Substitute could ship this in one sprint",
         "unsourced_claims": ["claim X is asserted, not sourced"],
         "price_rationale_flag": None,
+        "q4_evidence": [],
         "verdict": "pending_review",
         "notes": "Real finding.",
     })
-    monkeypatch.setattr(wedge_validator, "analyze", lambda *a, **k: findings)
+    monkeypatch.setattr(wedge_validator, "analyze_with_web_search", lambda *a, **k: findings)
 
     row = await wedge_validator.validate_wedge("b1", supabase_client=db)
 
@@ -194,23 +199,21 @@ async def test_validate_wedge_never_writes_approved(monkeypatch):
     assert row["status"] != "approved"
     assert row["wedge_type"] == "temporary"
     assert row["moat_risk"] is True
+    assert row["next_review_due"] is None
 
 
 async def test_validate_wedge_downgrade_sets_moat_risk_true(monkeypatch):
-    db = FakeSupabase(data={"mse_positioning": [{
-        "id": "b1", "product_id": "p1", "icp": "x", "trigger_event": "x",
-        "substitute_set": [], "wedge": "x", "wedge_type": "structural",
-        "wedge_evidence": {}, "price_rationale": "x", "review_log": [],
-    }]})
+    db = FakeSupabase(data={"mse_positioning": [_base_brief()]})
     findings = json.dumps({
         "corrected_wedge_type": "structural",
         "downgrade_reason": None,
         "unsourced_claims": [],
         "price_rationale_flag": None,
+        "q4_evidence": [],
         "verdict": "pending_review",
         "notes": "Confirmed structural.",
     })
-    monkeypatch.setattr(wedge_validator, "analyze", lambda *a, **k: findings)
+    monkeypatch.setattr(wedge_validator, "analyze_with_web_search", lambda *a, **k: findings)
 
     row = await wedge_validator.validate_wedge("b1", supabase_client=db)
     assert row["moat_risk"] is False
@@ -219,17 +222,115 @@ async def test_validate_wedge_downgrade_sets_moat_risk_true(monkeypatch):
 
 async def test_validate_wedge_appends_review_log(monkeypatch):
     db = FakeSupabase(data={"mse_positioning": [{
-        "id": "b1", "product_id": "p1", "icp": "x", "trigger_event": "x",
-        "substitute_set": [], "wedge": "x", "wedge_type": "structural",
-        "wedge_evidence": {}, "price_rationale": "x",
+        **_base_brief(),
         "review_log": [{"date": "2026-08-01", "reviewer": "DIST-P1", "outcome": "draft", "notes": "initial"}],
     }]})
     findings = json.dumps({
         "corrected_wedge_type": "temporary", "downgrade_reason": "x", "unsourced_claims": [],
-        "price_rationale_flag": None, "verdict": "pending_review", "notes": "second review",
+        "price_rationale_flag": None, "q4_evidence": [], "verdict": "pending_review", "notes": "second review",
     })
-    monkeypatch.setattr(wedge_validator, "analyze", lambda *a, **k: findings)
+    monkeypatch.setattr(wedge_validator, "analyze_with_web_search", lambda *a, **k: findings)
 
     row = await wedge_validator.validate_wedge("b1", supabase_client=db)
     assert len(row["review_log"]) == 2
     assert row["review_log"][-1]["notes"] == "second review"
+
+
+# ---- wedge_validator.validate_wedge — Q4 / three-tier calibration -------
+
+
+async def test_validate_wedge_q4_jobber_shipping_cadence_resolves_temporary(monkeypatch):
+    # Calibration fixture: Jobber shipping comparable custom-object features
+    # on ~6-week cycles -- actively closing the gap -> temporary, not
+    # execution, even though the feature isn't shipped as of today.
+    db = FakeSupabase(data={"mse_positioning": [_base_brief()]})
+    findings = json.dumps({
+        "corrected_wedge_type": "temporary",
+        "downgrade_reason": "Jobber ships comparable custom-object features on ~6-week release cycles per its public changelog",
+        "unsourced_claims": [],
+        "price_rationale_flag": None,
+        "q4_evidence": [],
+        "verdict": "pending_review",
+        "notes": "Jobber changelog shows custom-field/object work shipped 3 times in the last 18 weeks -- actively closing this gap on a normal cadence.",
+    })
+    monkeypatch.setattr(wedge_validator, "analyze_with_web_search", lambda *a, **k: findings)
+
+    row = await wedge_validator.validate_wedge("b1", supabase_client=db)
+    assert row["wedge_type"] == "temporary"
+    assert row["next_review_due"] is None
+
+
+async def test_validate_wedge_q4_long_standing_free_competitor_resolves_execution(monkeypatch):
+    # Calibration fixture: a free competitor that has existed for years
+    # without addressing the gap, with no roadmap signal -> execution,
+    # with sourced q4_evidence populated.
+    db = FakeSupabase(data={"mse_positioning": [_base_brief()]})
+    findings = json.dumps({
+        "corrected_wedge_type": "execution",
+        "downgrade_reason": "Free substitute could technically build this but has not in 6+ years on the market",
+        "unsourced_claims": [],
+        "price_rationale_flag": None,
+        "q4_evidence": [
+            {
+                "claim": "Substitute has had no public roadmap item or changelog entry addressing this gap since its 2020 launch",
+                "source_url": "https://example.com/substitute/changelog",
+                "verified_at": "2026-08-31",
+            }
+        ],
+        "verdict": "pending_review",
+        "notes": "6 years in market, no roadmap signal, no shipped movement toward this -- underserved today, sourced.",
+    })
+    monkeypatch.setattr(wedge_validator, "analyze_with_web_search", lambda *a, **k: findings)
+
+    row = await wedge_validator.validate_wedge("b1", supabase_client=db)
+    assert row["wedge_type"] == "execution"
+    assert row["moat_risk"] is True
+    assert row["wedge_evidence"]["q4_evidence"]
+    assert row["wedge_evidence"]["q4_evidence"][0]["source_url"]
+    assert row["next_review_due"] is not None
+
+
+async def test_validate_wedge_sph_ach_absorption_resolves_structural(monkeypatch):
+    # Calibration fixture: SPH's tenant-fee (ACH) absorption -- closing the
+    # gap would break the substitute's own revenue model -> structural,
+    # unchanged by the taxonomy amendment.
+    db = FakeSupabase(data={"mse_positioning": [_base_brief()]})
+    findings = json.dumps({
+        "corrected_wedge_type": "structural",
+        "downgrade_reason": None,
+        "unsourced_claims": [],
+        "price_rationale_flag": None,
+        "q4_evidence": [],
+        "verdict": "pending_review",
+        "notes": "Substitutes monetize via the tenant-side ACH/convenience fee -- absorbing it breaks their own revenue model, not a roadmap gap.",
+    })
+    monkeypatch.setattr(wedge_validator, "analyze_with_web_search", lambda *a, **k: findings)
+
+    row = await wedge_validator.validate_wedge("b1", supabase_client=db)
+    assert row["wedge_type"] == "structural"
+    assert row["moat_risk"] is False
+
+
+async def test_validate_wedge_execution_verdict_with_empty_q4_evidence_is_rejected(monkeypatch):
+    # A.2's hard rule: absence of evidence is not evidence. An LLM claiming
+    # "execution" with no sourced q4_evidence must be rejected outright --
+    # not silently downgraded, not written to the DB at all.
+    db = FakeSupabase(data={"mse_positioning": [_base_brief()]})
+    findings = json.dumps({
+        "corrected_wedge_type": "execution",
+        "downgrade_reason": "Substitute could close this but seems like they haven't",
+        "unsourced_claims": [],
+        "price_rationale_flag": None,
+        "q4_evidence": [],
+        "verdict": "pending_review",
+        "notes": "Unsourced assertion of inaction.",
+    })
+    monkeypatch.setattr(wedge_validator, "analyze_with_web_search", lambda *a, **k: findings)
+
+    with pytest.raises(ValueError, match="no sourced q4_evidence"):
+        await wedge_validator.validate_wedge("b1", supabase_client=db)
+
+    # Nothing was written -- the row is untouched.
+    row = db.table("mse_positioning").select("*").eq("id", "b1").maybe_single().execute()
+    assert row.data["wedge_type"] == "structural"
+    assert "status" not in row.data
