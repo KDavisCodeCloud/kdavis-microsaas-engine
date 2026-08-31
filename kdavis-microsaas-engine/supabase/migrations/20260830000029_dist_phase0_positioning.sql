@@ -83,7 +83,7 @@ alter table mse_positioning enable row level security;
 drop policy if exists mse_positioning_tenant_read on mse_positioning;
 create policy mse_positioning_tenant_read on mse_positioning
   for select using (
-    (auth.jwt() -> 'app_metadata' ->> 'role') = 'owner'
+    (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'
   );
 
 -- Service role (agents) may INSERT drafts and UPDATE most fields, but the
@@ -121,8 +121,8 @@ declare
   v_row public.mse_positioning;
 begin
   v_role := (auth.jwt() -> 'app_metadata' ->> 'role');
-  if v_role is distinct from 'owner' then
-    raise exception 'approve_positioning: owner role required, got %', coalesce(v_role, 'null');
+  if v_role is distinct from 'admin' then
+    raise exception 'approve_positioning: admin role required, got %', coalesce(v_role, 'null');
   end if;
 
   update public.mse_positioning
@@ -184,8 +184,8 @@ declare
   v_row public.mse_positioning;
 begin
   v_role := (auth.jwt() -> 'app_metadata' ->> 'role');
-  if v_role is distinct from 'owner' then
-    raise exception 'approve_positioning: owner role required, got %', coalesce(v_role, 'null');
+  if v_role is distinct from 'admin' then
+    raise exception 'approve_positioning: admin role required, got %', coalesce(v_role, 'null');
   end if;
 
   perform set_config('dist.approving', 'true', true);
