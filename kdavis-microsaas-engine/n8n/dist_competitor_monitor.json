@@ -1,0 +1,52 @@
+{
+  "id": "dist-competitor-monitor-001",
+  "name": "DIST Competitor Monitor — Monthly",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "pinData": {},
+  "nodes": [
+    {
+      "id": "cron-trigger",
+      "name": "15th of Month",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 15 * *"
+            }
+          ]
+        }
+      },
+      "position": [200, 300]
+    },
+    {
+      "id": "run-competitor-monitor",
+      "name": "Trigger DIST-C1 Run",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.API_BASE_URL }}/dist/competitor-monitor/run",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.MARKETING_API_KEY }}"
+            }
+          ]
+        }
+      },
+      "position": [420, 300]
+    }
+  ],
+  "connections": {
+    "15th of Month": {"main": [[{"node": "Trigger DIST-C1 Run", "type": "main", "index": 0}]]}
+  }
+}
