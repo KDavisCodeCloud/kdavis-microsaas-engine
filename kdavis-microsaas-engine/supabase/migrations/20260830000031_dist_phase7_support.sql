@@ -31,7 +31,7 @@ drop policy if exists service_role_all on mse_support_tickets;
 create policy service_role_all on mse_support_tickets for all to service_role using (true) with check (true);
 drop policy if exists owner_read on mse_support_tickets;
 create policy owner_read on mse_support_tickets for select using (
-  (auth.jwt() -> 'app_metadata' ->> 'role') = 'owner'
+  (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'
 );
 
 create table if not exists mse_support_drafts (
@@ -57,7 +57,7 @@ drop policy if exists service_role_all on mse_support_drafts;
 create policy service_role_all on mse_support_drafts for all to service_role using (true) with check (true);
 drop policy if exists owner_read on mse_support_drafts;
 create policy owner_read on mse_support_drafts for select using (
-  (auth.jwt() -> 'app_metadata' ->> 'role') = 'owner'
+  (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'
 );
 
 create table if not exists mse_support_kb (
@@ -76,7 +76,7 @@ drop policy if exists service_role_all on mse_support_kb;
 create policy service_role_all on mse_support_kb for all to service_role using (true) with check (true);
 drop policy if exists owner_read on mse_support_kb;
 create policy owner_read on mse_support_kb for select using (
-  (auth.jwt() -> 'app_metadata' ->> 'role') = 'owner'
+  (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'
 );
 
 -- Tier 1 auto-answer gate. mse_products was created THIS session
@@ -112,8 +112,8 @@ declare
   v_row                 public.mse_products;
 begin
   v_role := (auth.jwt() -> 'app_metadata' ->> 'role');
-  if v_role is distinct from 'owner' then
-    raise exception 'enable_support_autoanswer: owner role required, got %', coalesce(v_role, 'null');
+  if v_role is distinct from 'admin' then
+    raise exception 'enable_support_autoanswer: admin role required, got %', coalesce(v_role, 'null');
   end if;
 
   select paying_customer_count into v_paying_customers from public.mse_products where id = p_product_id;
