@@ -140,10 +140,20 @@ class FakeSupabase:
         self.executed = []
         self.tables_touched = []
         self.fail_on_insert = fail_on_insert or set()
+        self.rpc_calls = []
 
     def table(self, name):
         self.tables_touched.append(name)
         return FakeQuery(name, self)
+
+    def rpc(self, name, params=None):
+        # Additive (DIST Phase 5, 2026-08-30) -- no prior test in this repo
+        # called .rpc(), so this can't break an existing one. Records the
+        # call for assertion (self.rpc_calls) and returns whatever the test
+        # pre-seeded under responses[f"rpc:{name}"] (default []), matching
+        # the same responses-dict convention .table()/.execute() already use.
+        self.rpc_calls.append((name, params or {}))
+        return FakeQuery(f"rpc:{name}", self)
 
 
 @pytest.fixture

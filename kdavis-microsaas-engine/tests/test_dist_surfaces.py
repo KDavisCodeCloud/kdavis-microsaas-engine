@@ -147,3 +147,74 @@ async def test_check_surface_third_rejection_pauses_generator(fake_db):
     assert len(events) == 1
     assert events[0]._payload["requires_human_decision"] is True
     assert events[0]._payload["run_type"] == "triggered"
+
+
+# ---- Phase 5: tier routing + Tier 1 auto-publish ----------------------
+
+def test_hitl_tier_mapping_matches_spec():
+    from agents.dist.surface_planner import _HITL_TIER
+    assert _HITL_TIER == {
+        "vs_competitor": 3,
+        "alternatives_to": 3,
+        "jurisdiction": 3,
+        "jtbd": 2,
+        "calculator": 2,
+        "faq_block": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_check_surface_tier1_pass_calls_auto_publish(fake_db):
+    fake_db.responses["mse_content_surfaces"] = [_surface_row(hitl_tier=1, archetype="faq_block")]
+
+    result = await check_surface("surf-1", supabase_client=fake_db)
+
+    assert result["passed"] is True
+    assert ("auto_publish_tier1_surface", {"p_id": "surf-1"}) in fake_db.rpc_calls
+
+
+@pytest.mark.asyncio
+async def test_check_surface_tier2_pass_does_not_auto_publish(fake_db):
+    fake_db.responses["mse_content_surfaces"] = [_surface_row(hitl_tier=2, archetype="jtbd")]
+
+    result = await check_surface("surf-1", supabase_client=fake_db)
+
+    assert result["passed"] is True
+    assert fake_db.rpc_calls == []
+
+
+@pytest.mark.asyncio
+async def test_check_surface_tier3_pass_does_not_auto_publish(fake_db):
+    fake_db.responses["mse_content_surfaces"] = [
+        _surface_row(hitl_tier=3, archetype="vs_competitor", body_mdx="We charge $99/mo for this real product. " * 60)
+    ]
+
+    result = await check_surface("surf-1", supabase_client=fake_db)
+
+    assert result["passed"] is True
+    assert fake_db.rpc_calls == []
+
+
+@pytest.mark.asyncio
+async def test_plan_surfaces_honors_generator_pause_circuit_breaker(fake_db):
+    fake_db.responses["mse_products"] = [_product_row()]
+    fake_db.responses["mse_generator_state"] = [{"product_id": "prod-1", "paused": True}]
+    fake_db.responses["mse_positioning"] = [_approved_positioning(wedge_type="structural")]
+
+    result = await plan_surfaces("small-portfolio-hub", supabase_client=fake_db)
+
+    assert result == []
+    # Never even reached the positioning check -- paused short-circuits first.
+    assert not any(q.table_name == "mse_positioning" for q in fake_db.executed)
+
+
+@pytest.mark.asyncio
+async def test_plan_surfaces_runs_normally_when_not_paused(fake_db):
+    fake_db.responses["mse_products"] = [_product_row()]
+    fake_db.responses["mse_generator_state"] = [{"product_id": "prod-1", "paused": False}]
+    fake_db.responses["mse_positioning"] = [_approved_positioning(wedge_type="structural")]
+    fake_db.responses["mse_competitors"] = [{"id": "comp-1", "name": "Innago"}]
+
+    await plan_surfaces("small-portfolio-hub", supabase_client=fake_db)
+    archetypes = _upserted_archetypes(fake_db)
+    assert "vs_competitor" in archetypes

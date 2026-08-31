@@ -21,6 +21,55 @@ from agents.dist.indexation_monitor import check_stale_and_alert, sync_indexatio
 router = APIRouter(prefix="/dist", tags=["dist"])
 
 
+@router.post("/surfaces/plan")
+async def plan_all_surfaces(authorization: str | None = Header(default=None)):
+    """Monthly job entry point (n8n: dist_surface_plan.json). Runs
+    DIST-S1 for every product in mse_products -- real no-op for any
+    product without an approved positioning brief (plan_surfaces' own
+    behavior, not special-cased here)."""
+    _require_api_key(authorization)
+
+    from agents.dist.surface_planner import plan_surfaces
+
+    db = get_supabase()
+    products = db.table("mse_products").select("slug").execute().data or []
+
+    results = []
+    for product in products:
+        inserted = await plan_surfaces(product["slug"], supabase_client=db)
+        results.append({"product_slug": product["slug"], "planned": len(inserted)})
+
+    return {"products_processed": len(results), "results": results}
+
+
+@router.post("/surfaces/generate")
+async def generate_all_surfaces(background_tasks: BackgroundTasks, authorization: str | None = Header(default=None)):
+    """Daily job entry point (n8n: dist_surface_generate.json). S2 -> S3
+    for every draft surface across every product, in the background --
+    each write_surface call is a real LLM request, this must not block
+    the request/response cycle."""
+    _require_api_key(authorization)
+    background_tasks.add_task(_run_surface_generate)
+    return {"status": "queued"}
+
+
+def _run_surface_generate() -> None:
+    import asyncio
+
+    from agents.dist.surface_writer import write_surface
+    from agents.dist.quality_gate import check_surface
+
+    db = get_supabase()
+    drafts = db.table("mse_content_surfaces").select("id").eq("status", "draft").execute().data or []
+
+    async def _process_all():
+        for row in drafts:
+            await write_surface(row["id"], supabase_client=db)
+            await check_surface(row["id"], supabase_client=db)
+
+    asyncio.run(_process_all())
+
+
 @router.post("/indexation/sync")
 async def sync_all_products(authorization: str | None = Header(default=None)):
     """Weekly job entry point (n8n: dist_indexation_sync.json). Syncs

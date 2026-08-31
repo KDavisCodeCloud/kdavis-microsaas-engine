@@ -55,6 +55,20 @@ async def plan_surfaces(product_slug: str, supabase_client: Optional[Any] = None
         raise ValueError(f"No mse_products row for slug {product_slug!r}")
     product_id = product.data["id"]
 
+    # Phase 5 hook: honor Phase 2's indexation circuit breaker (real gap
+    # confirmed tonight -- mse_generator_state existed and quality_gate.py
+    # writes to it on 3+ rejections, but nothing actually read it before
+    # planning new surfaces). Real, existing limit of the current schema:
+    # mse_generator_state.paused is one flag per product_id (upserted on
+    # that conflict key), not per-archetype, even though the spec's own
+    # prose says "pauses that archetype" -- pausing the whole product's
+    # planning run is what the table as built actually supports; adding
+    # real per-archetype granularity is a schema change out of scope
+    # tonight, not silently done here.
+    state = db.table("mse_generator_state").select("paused").eq("product_id", product_id).maybe_single().execute()
+    if state is not None and state.data and state.data.get("paused"):
+        return []
+
     positioning = (
         db.table("mse_positioning")
         .select("*")

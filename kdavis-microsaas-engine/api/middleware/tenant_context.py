@@ -42,6 +42,8 @@ async def tenant_context_middleware(request: Request, call_next):
         "/dist/indexation/sync",
         # DIST Phase 3 -- same n8n-triggered, MARKETING_API_KEY-gated shape.
         "/dist/competitor-monitor/run",
+        # DIST Phase 5 -- same n8n-triggered, MARKETING_API_KEY-gated shape.
+        "/dist/surfaces/plan", "/dist/surfaces/generate",
     }
     if request.url.path in PUBLIC_PATHS:
         return await call_next(request)

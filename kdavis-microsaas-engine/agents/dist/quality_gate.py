@@ -191,4 +191,16 @@ async def check_surface(
     db.table("mse_content_surfaces").update({"status": "pending_review", "reject_reason": None}).eq(
         "id", surface_id
     ).execute()
+
+    # Phase 5 hook: Tier 1 (faq_block) auto-publishes on an S3 pass, per
+    # spec ("Publishes on S3 pass. Spot-audited monthly."). Routed through
+    # auto_publish_tier1_surface (migration 033) -- the same admin-only
+    # publish gate applies underneath, this just supplies a different,
+    # narrowly-scoped (hitl_tier=1 only) eligibility path than a human
+    # clicking approve. Never call this for tier 2/3 -- the function
+    # itself also refuses, this check just avoids a pointless RPC round
+    # trip for the common case.
+    if s["hitl_tier"] == 1:
+        db.rpc("auto_publish_tier1_surface", {"p_id": surface_id}).execute()
+
     return {"passed": True, "reason": None}
