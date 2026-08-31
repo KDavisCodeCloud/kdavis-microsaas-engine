@@ -12,4 +12,14 @@ node_modules/
 frontend/.next/
 *.egg-info/
 dist/
+# The bare pattern above (meant for JS build-output dirs, alongside .next/
+# and node_modules/ above) was silently also matching agents/dist/ -- the
+# real, committed Python package for tonight's DIST subsystem. Found live
+# 2026-08-30 when `git add` refused every file in it. Carve it back out
+# explicitly rather than removing the original rule, in case some other
+# real JS dist/ output directory still needs it.
+!agents/dist/
+!agents/dist/**
+agents/dist/__pycache__/
+agents/dist/**/__pycache__/
 .vercel/

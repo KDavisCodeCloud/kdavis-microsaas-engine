@@ -31,6 +31,17 @@ async def tenant_context_middleware(request: Request, call_next):
         # HMAC token in the URL (core/email_compliance.py) is what actually
         # authenticates the request, not a bearer token or JWT.
         "/marketing/unsubscribe",
+        # DIST Phase 1 -- an anonymous pre-signup visitor has no JWT to
+        # present. /backfill validates tenant_id shape itself rather than
+        # relying on this middleware's JWT check (see dist_attribution.py's
+        # own docstring for why a shared backend can't verify a tenant_id
+        # against another product's own separate Supabase project).
+        "/dist/attribution/track", "/dist/attribution/backfill",
+        # DIST Phase 2 -- weekly n8n-triggered indexation sync, same
+        # MARKETING_API_KEY shared-secret shape as /marketing/* above.
+        "/dist/indexation/sync",
+        # DIST Phase 3 -- same n8n-triggered, MARKETING_API_KEY-gated shape.
+        "/dist/competitor-monitor/run",
     }
     if request.url.path in PUBLIC_PATHS:
         return await call_next(request)

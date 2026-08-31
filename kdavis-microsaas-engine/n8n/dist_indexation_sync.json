@@ -1,0 +1,52 @@
+{
+  "id": "dist-indexation-sync-001",
+  "name": "DIST Indexation Sync — Weekly",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "pinData": {},
+  "nodes": [
+    {
+      "id": "cron-trigger",
+      "name": "Monday 6am MST",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 13 * * 1"
+            }
+          ]
+        }
+      },
+      "position": [200, 300]
+    },
+    {
+      "id": "run-indexation-sync",
+      "name": "Sync All Products",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.API_BASE_URL }}/dist/indexation/sync",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.MARKETING_API_KEY }}"
+            }
+          ]
+        }
+      },
+      "position": [420, 300]
+    }
+  ],
+  "connections": {
+    "Monday 6am MST": {"main": [[{"node": "Sync All Products", "type": "main", "index": 0}]]}
+  }
+}
