@@ -47,6 +47,7 @@ Kelvin architects and designs. Claude Code executes. Kelvin validates all output
 6. Hard $4K MRR floor enforced at DB constraint level on every product this factory ships
 7. 6 retention loops ship before any feature work on any product
 8. Haiku for scraping and for the Dispatch/Verdict swarm; Sonnet is the default everywhere else — see Model Routing above, do not swap without new regression testing
+9. **The canonical admin role value in every JWT/RLS check is `'admin'`, never `'owner'`.** `(auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'` is the real, live pattern — confirmed against `auth.users` and every existing role check in `api/middleware/auth.py`/`tenant_context.py`. The DIST spec's own source text (`docs/dist-execution-order.md`) used `'owner'` throughout; three independent forks (Phases 0, 1, 7, 2026-08-30) each hit this and had to patch it live before an admin-role account could pass. If you're writing a new role-comparison anywhere — RLS policy, `SECURITY DEFINER` function, JWT claim check — it's `'admin'`. `'owner'` is not a real role value in this project.
 
 ---
 
