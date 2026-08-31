@@ -55,6 +55,7 @@ async def generate_all_surfaces(background_tasks: BackgroundTasks, authorization
 
 def _run_surface_generate() -> None:
     import asyncio
+    import os
 
     from agents.dist.surface_writer import write_surface
     from agents.dist.quality_gate import check_surface
@@ -62,10 +63,28 @@ def _run_surface_generate() -> None:
     db = get_supabase()
     drafts = db.table("mse_content_surfaces").select("id").eq("status", "draft").execute().data or []
 
+    # Real bug found and fixed (Task 2, 2026-08-31): this call never
+    # passed get_embedding at all, so DIST-S3's duplicate-detection check
+    # could never run in production -- not just credential-blocked
+    # (GEMINI_API_KEY is genuinely unset today), a step further: the
+    # wiring itself was missing, so setting the key alone wouldn't have
+    # fixed it. Gated on the key actually being present rather than
+    # passed unconditionally -- get_embedding's own _get_client() reads
+    # os.environ["GEMINI_API_KEY"] with no fallback and check_surface has
+    # no try/except around the embedding call, so passing it in while the
+    # key is absent would turn today's silent skip into a hard crash on
+    # every surface that clears the first two checks. Falls back to None
+    # (today's existing, correct, silently-skips-duplicate-detection
+    # behavior) until the key exists.
+    get_embedding = None
+    if os.environ.get("GEMINI_API_KEY"):
+        from core.embeddings import get_embedding as _get_embedding
+        get_embedding = _get_embedding
+
     async def _process_all():
         for row in drafts:
             await write_surface(row["id"], supabase_client=db)
-            await check_surface(row["id"], supabase_client=db)
+            await check_surface(row["id"], supabase_client=db, get_embedding=get_embedding)
 
     asyncio.run(_process_all())
 
