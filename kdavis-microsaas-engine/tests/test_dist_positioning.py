@@ -102,9 +102,11 @@ async def test_research_positioning_inserts_draft_row(monkeypatch):
         "trigger_event": "Missed a job because of a scheduling conflict",
         "substitute_set": [
             {"name": "Orcatec", "kind": "free_tool", "price_to_buyer": 0, "monetization": None,
-             "switching_cost_hours": 3, "source_url": "https://orcatec.com", "verified_at": "2026-08-30"},
+             "switching_cost_hours": 3, "source_url": "https://orcatec.com", "verified_at": "2026-08-30",
+             "configurable_options": [], "researched": True},
             {"name": "Jobber", "kind": "paid_tool", "price_to_buyer": 49, "monetization": "subscription",
-             "switching_cost_hours": 8, "source_url": "https://getjobber.com", "verified_at": "2026-08-30"},
+             "switching_cost_hours": 8, "source_url": "https://getjobber.com", "verified_at": "2026-08-30",
+             "configurable_options": [], "researched": True},
             {"name": "Pen and paper", "kind": "do_nothing", "price_to_buyer": 0, "monetization": None,
              "switching_cost_hours": 0, "source_url": None, "verified_at": "2026-08-30"},
         ],
@@ -133,8 +135,8 @@ async def test_research_positioning_increments_version(monkeypatch):
     fake_llm_output = json.dumps({
         "icp": "x", "trigger_event": "x",
         "substitute_set": [
-            {"name": "A", "kind": "paid_tool", "price_to_buyer": 1, "monetization": None, "switching_cost_hours": 0, "source_url": None, "verified_at": "2026-08-30"},
-            {"name": "B", "kind": "paid_tool", "price_to_buyer": 1, "monetization": None, "switching_cost_hours": 0, "source_url": None, "verified_at": "2026-08-30"},
+            {"name": "A", "kind": "paid_tool", "price_to_buyer": 1, "monetization": None, "switching_cost_hours": 0, "source_url": None, "verified_at": "2026-08-30", "configurable_options": [], "researched": True},
+            {"name": "B", "kind": "paid_tool", "price_to_buyer": 1, "monetization": None, "switching_cost_hours": 0, "source_url": None, "verified_at": "2026-08-30", "configurable_options": [], "researched": True},
             {"name": "C", "kind": "do_nothing", "price_to_buyer": 0, "monetization": None, "switching_cost_hours": 0, "source_url": None, "verified_at": "2026-08-30"},
         ],
         "wedge": "x", "wedge_type": "temporary", "wedge_evidence": {}, "price_rationale": "x", "kill_criteria": "x",
@@ -150,8 +152,8 @@ async def test_research_positioning_strips_markdown_fences(monkeypatch):
     fenced = "```json\n" + json.dumps({
         "icp": "x", "trigger_event": "x",
         "substitute_set": [
-            {"name": "A", "kind": "paid_tool", "price_to_buyer": 1, "monetization": None, "switching_cost_hours": 0, "source_url": None, "verified_at": "2026-08-30"},
-            {"name": "B", "kind": "paid_tool", "price_to_buyer": 1, "monetization": None, "switching_cost_hours": 0, "source_url": None, "verified_at": "2026-08-30"},
+            {"name": "A", "kind": "paid_tool", "price_to_buyer": 1, "monetization": None, "switching_cost_hours": 0, "source_url": None, "verified_at": "2026-08-30", "configurable_options": [], "researched": True},
+            {"name": "B", "kind": "paid_tool", "price_to_buyer": 1, "monetization": None, "switching_cost_hours": 0, "source_url": None, "verified_at": "2026-08-30", "configurable_options": [], "researched": True},
             {"name": "C", "kind": "do_nothing", "price_to_buyer": 0, "monetization": None, "switching_cost_hours": 0, "source_url": None, "verified_at": "2026-08-30"},
         ],
         "wedge": "x", "wedge_type": "temporary", "wedge_evidence": {}, "price_rationale": "x", "kill_criteria": "x",
@@ -309,6 +311,170 @@ async def test_validate_wedge_sph_ach_absorption_resolves_structural(monkeypatch
     row = await wedge_validator.validate_wedge("b1", supabase_client=db)
     assert row["wedge_type"] == "structural"
     assert row["moat_risk"] is False
+
+
+# ---- B.1: configurable_options requirement -------------------------------
+
+
+def _substitute(kind="free_tool", configurable_options=None, researched=None, **overrides):
+    entry = {
+        "name": "X", "kind": kind, "price_to_buyer": 0, "monetization": None,
+        "switching_cost_hours": 0, "source_url": "https://example.com", "verified_at": "2026-08-30",
+    }
+    if configurable_options is not None:
+        entry["configurable_options"] = configurable_options
+    if researched is not None:
+        entry["researched"] = researched
+    entry.update(overrides)
+    return entry
+
+
+def test_validate_configurable_options_raises_on_missing_field():
+    substitute_set = [_substitute(kind="free_tool")]  # no configurable_options key at all
+    with pytest.raises(ValueError, match="missing configurable_options"):
+        positioning_researcher._validate_configurable_options(substitute_set)
+
+
+def test_validate_configurable_options_raises_on_empty_without_researched():
+    substitute_set = [_substitute(kind="paid_tool", configurable_options=[])]  # empty, no researched marker
+    with pytest.raises(ValueError, match="no researched: true marker"):
+        positioning_researcher._validate_configurable_options(substitute_set)
+
+
+def test_validate_configurable_options_accepts_empty_with_researched_true():
+    substitute_set = [_substitute(kind="free_tool", configurable_options=[], researched=True)]
+    positioning_researcher._validate_configurable_options(substitute_set)  # must not raise
+
+
+def test_validate_configurable_options_accepts_populated_array():
+    substitute_set = [_substitute(kind="paid_tool", configurable_options=[
+        {"option": "landlord absorbs tenant ACH fee", "available": True,
+         "cost_shift": "landlord pays instead of tenant",
+         "source_url": "https://innago.com/faq", "verified_at": "2026-08-31"},
+    ])]
+    positioning_researcher._validate_configurable_options(substitute_set)  # must not raise
+
+
+def test_validate_configurable_options_skips_do_nothing_and_manual_kinds():
+    substitute_set = [
+        _substitute(kind="do_nothing", name="Pen and paper"),
+        _substitute(kind="manual_process", name="Spreadsheet"),
+        _substitute(kind="in_house_build", name="Custom tool"),
+        _substitute(kind="agency_service", name="Bookkeeper"),
+    ]
+    for entry in substitute_set:
+        entry.pop("configurable_options", None)
+        entry.pop("researched", None)
+    positioning_researcher._validate_configurable_options(substitute_set)  # must not raise -- no vendor settings page to check
+
+
+async def test_research_positioning_raises_on_missing_configurable_options(monkeypatch):
+    db = FakeSupabase(data={"mse_products": [_product_row()], "mse_positioning": []})
+    fake_llm_output = json.dumps({
+        "icp": "x", "trigger_event": "x",
+        "substitute_set": [
+            {"name": "A", "kind": "paid_tool", "price_to_buyer": 1, "monetization": None,
+             "switching_cost_hours": 0, "source_url": "https://a.example", "verified_at": "2026-08-30"},
+            {"name": "B", "kind": "paid_tool", "price_to_buyer": 1, "monetization": None,
+             "switching_cost_hours": 0, "source_url": "https://b.example", "verified_at": "2026-08-30",
+             "configurable_options": [], "researched": True},
+            {"name": "C", "kind": "do_nothing", "price_to_buyer": 0, "monetization": None,
+             "switching_cost_hours": 0, "source_url": None, "verified_at": "2026-08-30"},
+        ],
+        "wedge": "x", "wedge_type": "temporary", "wedge_evidence": {}, "price_rationale": "x", "kill_criteria": "x",
+    })
+    monkeypatch.setattr(positioning_researcher, "analyze_with_web_search", lambda *a, **k: fake_llm_output)
+
+    with pytest.raises(ValueError, match="missing configurable_options"):
+        await positioning_researcher.research_positioning("tradesdesk", "ctx", supabase_client=db)
+
+    # Nothing inserted -- reject before the DB write, same policy as every other malformed-shape case.
+    assert db.data["mse_positioning"] == []
+
+
+# ---- B.2: Q0 pre-check -----------------------------------------------------
+
+
+async def test_validate_wedge_q0_fires_forces_invalid(monkeypatch):
+    db = FakeSupabase(data={"mse_positioning": [_base_brief()]})
+    findings = json.dumps({
+        "q0": {"already_offered": True, "substitute": "Innago",
+               "source_url": "https://innago.com/faq", "verified_at": "2026-08-31"},
+        "corrected_wedge_type": "invalid",
+        "downgrade_reason": "Innago already lets the landlord absorb the tenant ACH fee via account settings",
+        "unsourced_claims": [], "price_rationale_flag": None, "q4_evidence": [],
+        "verdict": "pending_review", "notes": "Q0 fired -- Innago already offers this as a setting.",
+    })
+    monkeypatch.setattr(wedge_validator, "analyze_with_web_search", lambda *a, **k: findings)
+
+    row = await wedge_validator.validate_wedge("b1", supabase_client=db)
+    assert row["wedge_type"] == "invalid"
+    assert row["status"] == "pending_review"  # still owner-reviewed, not auto-rejected
+    assert row["moat_risk"] is True
+    assert row["wedge_evidence"]["q0"]["already_offered"] is True
+    assert row["wedge_evidence"]["q0"]["substitute"] == "Innago"
+
+
+async def test_validate_wedge_q0_fires_without_source_is_rejected(monkeypatch):
+    db = FakeSupabase(data={"mse_positioning": [_base_brief()]})
+    findings = json.dumps({
+        "q0": {"already_offered": True, "substitute": "Innago", "source_url": None, "verified_at": None},
+        "corrected_wedge_type": "invalid",
+        "downgrade_reason": "x", "unsourced_claims": [], "price_rationale_flag": None, "q4_evidence": [],
+        "verdict": "pending_review", "notes": "x",
+    })
+    monkeypatch.setattr(wedge_validator, "analyze_with_web_search", lambda *a, **k: findings)
+
+    with pytest.raises(ValueError, match="requires both substitute and source_url"):
+        await wedge_validator.validate_wedge("b1", supabase_client=db)
+
+
+async def test_validate_wedge_q0_true_but_wedge_type_not_invalid_is_rejected(monkeypatch):
+    # Internal inconsistency in the model's own output -- must not be silently accepted.
+    db = FakeSupabase(data={"mse_positioning": [_base_brief()]})
+    findings = json.dumps({
+        "q0": {"already_offered": True, "substitute": "Innago",
+               "source_url": "https://innago.com/faq", "verified_at": "2026-08-31"},
+        "corrected_wedge_type": "temporary",  # inconsistent with q0.already_offered=true
+        "downgrade_reason": "x", "unsourced_claims": [], "price_rationale_flag": None, "q4_evidence": [],
+        "verdict": "pending_review", "notes": "x",
+    })
+    monkeypatch.setattr(wedge_validator, "analyze_with_web_search", lambda *a, **k: findings)
+
+    with pytest.raises(ValueError, match="must be 'invalid'"):
+        await wedge_validator.validate_wedge("b1", supabase_client=db)
+
+
+async def test_validate_wedge_q0_false_leaves_normal_taxonomy_unaffected(monkeypatch):
+    # Regression: Q0 not firing must not change any existing temporary/structural/execution behavior.
+    db = FakeSupabase(data={"mse_positioning": [_base_brief()]})
+    findings = json.dumps({
+        "q0": {"already_offered": False, "substitute": None, "source_url": None, "verified_at": None},
+        "corrected_wedge_type": "temporary",
+        "downgrade_reason": "Could ship in one sprint", "unsourced_claims": [], "price_rationale_flag": None,
+        "q4_evidence": [], "verdict": "pending_review", "notes": "Q0 checked, nothing already offered.",
+    })
+    monkeypatch.setattr(wedge_validator, "analyze_with_web_search", lambda *a, **k: findings)
+
+    row = await wedge_validator.validate_wedge("b1", supabase_client=db)
+    assert row["wedge_type"] == "temporary"
+    assert row["wedge_evidence"]["q0"]["already_offered"] is False
+
+
+async def test_validate_wedge_missing_q0_key_defaults_to_not_fired(monkeypatch):
+    # Backward compatibility: older-shaped findings with no "q0" key at all
+    # (e.g. a stale cached prompt run) must not crash -- defaults to not-fired.
+    db = FakeSupabase(data={"mse_positioning": [_base_brief()]})
+    findings = json.dumps({
+        "corrected_wedge_type": "structural",
+        "downgrade_reason": None, "unsourced_claims": [], "price_rationale_flag": None,
+        "q4_evidence": [], "verdict": "pending_review", "notes": "No q0 key present.",
+    })
+    monkeypatch.setattr(wedge_validator, "analyze_with_web_search", lambda *a, **k: findings)
+
+    row = await wedge_validator.validate_wedge("b1", supabase_client=db)
+    assert row["wedge_type"] == "structural"
+    assert row["wedge_evidence"]["q0"]["already_offered"] is False
 
 
 async def test_validate_wedge_execution_verdict_with_empty_q4_evidence_is_rejected(monkeypatch):

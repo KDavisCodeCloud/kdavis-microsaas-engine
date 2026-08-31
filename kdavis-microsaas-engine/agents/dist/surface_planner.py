@@ -114,9 +114,12 @@ async def plan_surfaces(product_slug: str, supabase_client: Optional[Any] = None
                 "hitl_tier": _HITL_TIER["alternatives_to"],
                 "status": "draft",
             })
-    # wedge_type == 'temporary': no competitor-claim archetypes planned at
-    # all, per the spec's own moat_risk exclusion rule -- this is the one
-    # branch that must never widen.
+    # wedge_type == 'temporary' or 'invalid' (migration 039, 2026-08-31):
+    # no competitor-claim archetypes planned at all, per the spec's own
+    # moat_risk exclusion rule -- this is the one branch that must never
+    # widen. 'invalid' can never reach status='approved' in the first place
+    # (approve_positioning() blocks it outright, no override path), so this
+    # is belt-and-suspenders, not the only thing stopping it.
 
     trigger_events = [t.strip() for t in pos.get("trigger_event", "").split(";") if t.strip()]
     for i, trigger in enumerate(trigger_events[:10]):

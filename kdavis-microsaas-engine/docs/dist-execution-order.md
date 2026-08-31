@@ -62,7 +62,7 @@ create table mse_positioning (
   trigger_event       text not null,
   substitute_set      jsonb not null,
   wedge               text not null,
-  wedge_type          text not null check (wedge_type in ('structural','execution','temporary')),
+  wedge_type          text not null check (wedge_type in ('structural','execution','invalid','temporary')),
   wedge_evidence      jsonb not null,
   price_rationale     text not null,
   kill_criteria       text not null,
@@ -70,6 +70,9 @@ create table mse_positioning (
   wedge_review_status text not null default 'current'
                         check (wedge_review_status in ('current','needs_rereview')),
   next_review_due     date,
+  gross_margin_at_ceiling numeric,
+  margin_floor        numeric not null default 0.70,
+  margin_override_reason text,
 
   status              text not null default 'draft'
                         check (status in ('draft','pending_review','approved','rejected','superseded')),
@@ -91,11 +94,13 @@ create policy mse_positioning_tenant_read on mse_positioning
   );
 ```
 
-Approval is enforced by a `SECURITY DEFINER` function (`approve_positioning`) checking `role = 'admin'`, plus a trigger rejecting any direct `UPDATE ... status='approved'` that didn't go through it. See `supabase/migrations/20260830000029_dist_phase0_positioning.sql` for the real, live implementation. `wedge_type`'s third value and the `wedge_review_status`/`next_review_due` columns were added by `supabase/migrations/20260831000038_dist_wedge_taxonomy.sql` — see §0.4a.
+Approval is enforced by a `SECURITY DEFINER` function (`approve_positioning`) checking `role = 'admin'`, plus a trigger rejecting any direct `UPDATE ... status='approved'` that didn't go through it. See `supabase/migrations/20260830000029_dist_phase0_positioning.sql` for the real, live implementation. `wedge_type`'s third value and the `wedge_review_status`/`next_review_due` columns were added by `supabase/migrations/20260831000038_dist_wedge_taxonomy.sql` — see §0.4a. `wedge_type`'s fourth value (`invalid`) and the viability-gate columns (`gross_margin_at_ceiling`, `margin_floor`, `margin_override_reason`) were added by `supabase/migrations/20260831000039_dist_gate_hardening.sql` — see §0.4b and §0.4c.
 
 ## 0.3 — `substitute_set` contract
 
 Array, minimum three entries, **must** include one with `kind = 'do_nothing'`. `kind` ∈ `free_tool | paid_tool | do_nothing | manual_process | in_house_build | agency_service`.
+
+**`configurable_options` requirement (added 2026-08-31, migration/prompt change, no schema change — enforced in `positioning_researcher.py`).** Every entry with `kind` of `free_tool` or `paid_tool` must carry a `configurable_options` array: `[{"option", "available", "cost_shift", "source_url", "verified_at"}]`, researched against the substitute's pricing page, FAQ, help docs, and settings documentation — not just its advertised default price. An empty array is only valid alongside an explicit `researched: true` marker, so "looked and found none" is distinguishable from "never looked"; DIST-P1 raises and writes nothing otherwise. Proven necessary by small-portfolio-hub v4 (2026-08-30/31): the brief's entire wedge rested on "substitutes must charge the tenant a fee," never checked against Innago's and TurboTenant's real, existing account-setting toggle that lets the landlord absorb that fee instead — a real, sourced, distinct piece of information P1 never looked for because nothing required it to.
 
 ## 0.4 — The wedge taxonomy (amended 2026-08-31, migration 038)
 
@@ -120,11 +125,27 @@ DIST-P2 asks four questions, in order:
 
 **Migration data policy:** rows that were `temporary` under the old 2-tier rule are **not** auto-promoted to `execution` — they're flagged `wedge_review_status = 'needs_rereview'` so DIST-P2 re-evaluates them under the new Q4 rule from real evidence, rather than inheriting a verdict rendered under different criteria.
 
+## 0.4a — Q0 and the fourth tier: `invalid` (added 2026-08-31, migration 039)
+
+Small-portfolio-hub v4 passed Q1–Q4 correctly — it genuinely was `structural` on its own terms — while resting on a wedge ("tenants pay $0 with us") that Innago and TurboTenant had *already shipped* as a configurable landlord-side setting. That's not `temporary` (something a substitute could ship on a normal roadmap cycle); it was already true, today, before the brief was even written. Q1–Q4 have no question that catches this, because they all ask about the *future* (could/would a substitute close the gap) — none of them ask whether one already has.
+
+**Q0, asked before Q1:** *Does any substitute already offer this, including as a configurable option, a settings toggle, or a specific tier — right now, today?* DIST-P2 checks each substitute's own `configurable_options` field first (§0.3), then verifies independently rather than trust it blindly. If Q0 finds a real, sourced yes, `wedge_type = 'invalid'` — a fourth tier, distinct from and more severe than `temporary` — and Q1–Q4 do not run; DIST-P2 must name the substitute and cite the source in `wedge_evidence.q0`.
+
+| Tier | Meaning | Gate outcome |
+|---|---|---|
+| `invalid` | A substitute already offers this, today, as a real option/setting/tier | Fail, harder than `temporary`. `approve_positioning()` blocks it outright — **no override path**, unlike the margin gate below. Excluded from competitor-claim archetypes exactly like `temporary` (§4.3), and can never reach `status='approved'` in the first place regardless. |
+
+## 0.4b — Viability gate on approval (added 2026-08-31, migration 039)
+
+Q0–Q4 test *defensibility* (is the wedge real). None of them test *viability* (does the unit economics survive at the tier's own ceiling) — which is exactly how v4 was approvable while stating, in its own `price_rationale`, that Core goes margin-negative above ~20 units, negative-51.5% at its own 30-unit ceiling. Defensibility and viability are separate tests; only the first one ran.
+
+`gross_margin_at_ceiling` (numeric, nullable) and `margin_floor` (numeric, default `0.70`) are set on the row before approval — margin computed at the **top of the tier's unit range**, not the average; v4 looked fine on average and was negative at its own ceiling. `approve_positioning(p_id, p_margin_override_reason default null)` raises if `gross_margin_at_ceiling` is null or below `margin_floor`, unless a non-empty `p_margin_override_reason` is passed, which is then recorded on the row as `margin_override_reason` — the owner can still approve a low-margin brief deliberately, but the reason is on the record, not silent. This is the one place in Phase 0 with a real override path; `invalid` (§0.4a) has none, because a wedge a substitute already offers isn't a risk to weigh, it's a fact already true.
+
 ## 0.5 — Agents
 
-**DIST-P1 — Positioning Researcher.** Enumerates the substitute set, hard requirement to search explicitly for free/open-source options and the no-software-at-all path.
+**DIST-P1 — Positioning Researcher.** Enumerates the substitute set, hard requirement to search explicitly for free/open-source options and the no-software-at-all path, and (§0.3, 2026-08-31) hard requirement to research each `free_tool`/`paid_tool` entry's `configurable_options` — pricing pages, FAQs, help docs, settings documentation, not just the advertised default.
 
-**DIST-P2 — Wedge Validator.** Adversarial, real web-search backed. Downgrades unsupported `structural` claims, rejects unsourced evidence, checks price against the *cheapest* substitute, and (§0.4) determines `execution` vs `temporary` via sourced Q4 evidence. **May never approve.** Owner approval only.
+**DIST-P2 — Wedge Validator.** Adversarial, real web-search backed. Runs Q0 first (§0.4a) — does a substitute already offer this as a real option, today — before Q1–Q4. Downgrades unsupported `structural` claims, rejects unsourced evidence, checks price against the *cheapest* substitute, and (§0.4) determines `execution` vs `temporary` via sourced Q4 evidence. **May never approve.** Owner approval only.
 
 ## 0.6 — Acceptance (all confirmed 2026-08-30/31)
 
@@ -141,6 +162,18 @@ DIST-P2 asks four questions, in order:
 - [x] DIST-P2 Q4 logic tested against all three calibration fixtures (Jobber shipping cadence → `temporary`; long-standing free competitor with no roadmap signal → `execution`; SPH ACH absorption → `structural`)
 - [x] `execution` verdict with empty `q4_evidence` is rejected by DIST-P2 (raises, writes nothing) — real test
 - [x] `temporary` still excluded from `vs_competitor`/`alternatives_to` generation — regression test re-run, unweakened
+
+**Gate hardening (2026-08-31, migration 039) — confirmed:**
+
+- [x] `wedge_type` CHECK widened again to `('structural','execution','invalid','temporary')`
+- [x] `configurable_options` required on every `free_tool`/`paid_tool` substitute_set entry; empty array without `researched: true` rejected by DIST-P1 (raises, writes nothing) — real test, plus a real test confirming `do_nothing`/`manual_process`/`in_house_build`/`agency_service` kinds are exempt (no vendor settings page to check)
+- [x] Q0 fixture (a substitute already offering the wedge as a setting) resolves to `invalid`, not `temporary` — real test; a mismatched model output (`q0.already_offered=true` with `corrected_wedge_type` not `invalid`, or `already_offered=true` missing `substitute`/`source_url`) is rejected outright — real test; `q0.already_offered=false` and a missing `q0` key (backward compatibility) both leave the existing three-tier behavior untouched — real test
+- [x] `gross_margin_at_ceiling`/`margin_floor`/`margin_override_reason` added; `approve_positioning()` raises on null-or-below-floor margin with no override, succeeds with a recorded override reason, succeeds outright above the floor, and blocks `invalid` unconditionally (no override path) — four real fixture tests run live against `microsaas-prod` via simulated-JWT SQL, not mocks
+- [x] Regression: `invalid` produces zero `vs_competitor`/`alternatives_to` archetypes in `surface_planner.py`, identically to `temporary`; `structural` still produces both — real tests (`tests/test_dist_surface_planner_wedge_gate.py`)
+- [x] Real bug caught and fixed during this migration's own live testing: `create or replace function approve_positioning(p_id uuid, p_margin_override_reason text default null)` does not replace a function whose *signature* changed — it adds a second overload, making any 1-argument call ambiguous. Fixed with an explicit `drop function if exists approve_positioning(uuid)` before the `create or replace`, both in the live migration and the committed `.sql` file.
+- [x] Five pending briefs (`decodedsix`, `tradesdesk`, `tradesdesk-hvac`, `tradesdesk-plumbing`, `tradesdesk-electrical`) re-run through Q0 live against `microsaas-prod`. One dead: `tradesdesk-plumbing` → `invalid`, sourced directly from BSI Online's own site (already in that brief's own substitute_set) already generating and auto-submitting jurisdiction-specific backflow reports — the brief's "no *generic FSM* does this" framing was true but irrelevant, since BSI Online was never generic FSM. Four remain `temporary`/`pending_review` but flagged `wedge_review_status='needs_rereview'` as genuine research gaps, not confirmed dead: `tradesdesk-electrical` (PermitFlow already does the core capability at scale, but its self-serve pricing/fit for a solo electrician is unconfirmed — flagged as the single highest-risk open item), `tradesdesk-hvac` (two named substitutes, RefriTrak/RefriComply, could not be verified as real products — a data-quality issue in the original P1 brief, separate from Q0 itself), `tradesdesk` (Service Fusion is a real flat-rate/unlimited-user substitute missing from the original substitute_set — doesn't clearly invalidate the wedge for a true solo-operator ICP given its higher price point, but makes "every paid substitute" a false absolute), `decodedsix` (no source found confirming any one free tool combines a map location layer with a payout-sorted daily-reset queue — inconclusive, not confirmed either way). TradesDesk's separately-completed MotionOps analysis (`docs/motionops-competitive-analysis.md`) folded in as a citation on the base `tradesdesk` brief, not re-run.
+- [x] small-portfolio-hub v5's `gross_margin_at_ceiling` backfilled to `1.0` (its real, tested figure per `docs/unit-economics.md`'s restored fee model) once v5 existed; v4 (approved before this migration) left untouched, not retroactively gated
+- [x] `published_surfaces` confirmed `0`, `approved_positioning` confirmed `1` (unchanged — small-portfolio-hub v4, approved before this pass) — nothing newly approved by this work
 - [x] Six pending briefs (SPH v2, DecodedSix v2, `tradesdesk`, `tradesdesk-hvac`, `tradesdesk-plumbing`, `tradesdesk-electrical`) re-evaluated under the amended rule as new versions at `pending_review`; zero approved
 
 ---

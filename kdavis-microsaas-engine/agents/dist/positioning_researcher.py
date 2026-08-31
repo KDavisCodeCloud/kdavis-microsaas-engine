@@ -41,6 +41,18 @@ cannot find a real source for a claim, do not include the claim.
 4. Return AT LEAST 3 substitute entries, and EXACTLY ONE of them must have \
 kind = "do_nothing" (price_to_buyer: 0, monetization: null, switching_cost_hours: 0, \
 source_url: null).
+5. For every "free_tool" or "paid_tool" entry, check whether it has a CONFIGURABLE \
+setting that changes who bears a cost the wedge depends on (e.g. a landlord absorbing \
+a fee the tenant would otherwise pay, a tier that removes a per-seat charge, a toggle \
+that waives a fee). Check the substitute's pricing page, FAQ, help docs, and settings \
+documentation, not just its default/advertised price. A wedge built on "substitute X \
+must charge the buyer" is invalid if X can already be configured not to -- this exact \
+class of error let a real wedge through review once (small-portfolio-hub v4, \
+2026-08-31: Innago and TurboTenant both already let a landlord absorb the tenant's ACH \
+fee as an account setting, which was never checked). If you found real configurable \
+options, list them with sources. If you looked and found none, say so explicitly \
+(researched: true, empty array) -- do not just omit the field, which is indistinguishable \
+from never having looked.
 
 Return ONLY a single JSON object with this exact shape, nothing else, no markdown \
 fences:
@@ -50,7 +62,9 @@ fences:
   "substitute_set": [
     {"name": str, "kind": "free_tool"|"paid_tool"|"do_nothing"|"manual_process"|"in_house_build"|"agency_service",
      "price_to_buyer": number, "monetization": str|null, "switching_cost_hours": number,
-     "source_url": str|null, "verified_at": "YYYY-MM-DD"}
+     "source_url": str|null, "verified_at": "YYYY-MM-DD",
+     "researched": bool,
+     "configurable_options": [{"option": str, "available": bool, "cost_shift": str, "source_url": str, "verified_at": "YYYY-MM-DD"}]}
   ],
   "wedge": "what the substitute set structurally cannot do",
   "wedge_type": "structural"|"temporary",
@@ -58,6 +72,12 @@ fences:
   "price_rationale": "argued against the CHEAPEST real substitute, not the most expensive",
   "kill_criteria": "concrete, numeric conditions that would stop funding this"
 }
+
+"researched" and "configurable_options" are REQUIRED on every entry whose kind is \
+"free_tool" or "paid_tool" (optional, may be omitted, for "do_nothing", \
+"manual_process", "in_house_build", "agency_service" -- there's no vendor settings \
+page to check). An empty configurable_options array is only valid together with \
+researched: true.
 
 wedge_type = "structural" only if closing the gap would break a substitute's own \
 revenue model or require abandoning a customer segment they currently serve. If any \
@@ -74,6 +94,35 @@ def _extract_json(text: str) -> dict[str, Any]:
     if not match:
         raise ValueError(f"No JSON object found in DIST-P1 output: {text[:300]}")
     return json.loads(match.group(0))
+
+
+_OPTIONS_REQUIRED_KINDS = {"free_tool", "paid_tool"}
+
+
+def _validate_configurable_options(substitute_set: list[dict]) -> None:
+    """B.1: any free_tool/paid_tool entry must carry configurable_options --
+    an empty array is only valid alongside an explicit researched: true, so
+    "looked and found none" is distinguishable from "never looked". Raises,
+    never silently accepts a malformed entry (same policy as the rest of
+    this module)."""
+    for entry in substitute_set:
+        if entry.get("kind") not in _OPTIONS_REQUIRED_KINDS:
+            continue
+        name = entry.get("name", "<unnamed>")
+        if "configurable_options" not in entry:
+            raise ValueError(
+                f"DIST-P1: substitute {name!r} (kind={entry.get('kind')}) is missing "
+                "configurable_options -- required for free_tool/paid_tool entries."
+            )
+        options = entry["configurable_options"]
+        if not isinstance(options, list):
+            raise ValueError(f"DIST-P1: substitute {name!r} configurable_options must be an array.")
+        if len(options) == 0 and not entry.get("researched"):
+            raise ValueError(
+                f"DIST-P1: substitute {name!r} has an empty configurable_options array "
+                "with no researched: true marker -- cannot distinguish 'looked, found "
+                "none' from 'never looked'."
+            )
 
 
 async def research_positioning(product_slug: str, context: str, supabase_client: Optional[Any] = None) -> dict:
@@ -103,6 +152,7 @@ async def research_positioning(product_slug: str, context: str, supabase_client:
 
     raw = analyze_with_web_search(SYSTEM_PROMPT, user_prompt, max_uses=12, max_tokens=6000)
     parsed = _extract_json(raw)
+    _validate_configurable_options(parsed["substitute_set"])
 
     existing = (
         db.table("mse_positioning")

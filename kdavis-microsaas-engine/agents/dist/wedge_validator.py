@@ -19,6 +19,17 @@ an unsourced or roadmap-imminent gap is still 'temporary' and still blocks
 generation exactly as before. Q1-Q3 (the original structural test) are
 unchanged; Q4 only ever moves a Q2-failing brief between execution and
 temporary, it can never turn a temporary into a structural.
+
+Fourth tier, 'invalid' (migration 039, 2026-08-31): proven necessary by
+small-portfolio-hub v4, which passed Q1-Q4 (correctly structural on its own
+terms) while resting on a wedge -- "tenants pay $0 with us" -- that a
+substitute (Innago, TurboTenant) already offered as a configurable setting.
+That's not "temporary" (they could ship it); they'd already shipped it. Q0
+runs before Q1 and, when it fires, short-circuits straight to 'invalid' --
+a distinct, more severe outcome than temporary, and one approve_positioning()
+now blocks outright with no override path (unlike the margin_floor gate,
+which allows an explicit override). Q0 firing is a fact already true today,
+not a risk to weigh.
 """
 from __future__ import annotations
 
@@ -39,8 +50,22 @@ _EXECUTION_REVIEW_INTERVAL_DAYS = 182
 SYSTEM_PROMPT = """You are an adversarial reviewer whose only job is to try to \
 defeat a proposed product "wedge" (the thing substitute products structurally \
 cannot do, or demonstrably have not done). You are given a DIST-P1 draft \
-positioning brief as JSON. Attempt to break it by answering four questions, in \
+positioning brief as JSON. Attempt to break it by answering these questions, in \
 order, with real web search -- do not answer from memory alone:
+
+Q0 (ask FIRST, before Q1): Does any substitute in substitute_set ALREADY offer this \
+-- including as a configurable option, a settings toggle, or a specific tier -- right \
+now, today? Check each entry's own configurable_options field first (DIST-P1 is now \
+required to research this), then verify independently with your own search rather \
+than trust it blindly. This is a different question from Q1: Q1 asks whether a \
+substitute COULD close the gap; Q0 asks whether one already HAS. If Q0 finds a real, \
+sourced yes, the wedge is "invalid", not "temporary" -- stop, do not proceed to \
+Q1-Q4, and name the substitute and cite the source. A wedge whose entire claim is \
+"substitute X must impose cost Y on the buyer" is invalid, not merely beatable, once \
+X can already be configured not to. Real example this caught, 2026-08-31: \
+small-portfolio-hub's "tenants pay $0 with us" wedge was invalid because Innago and \
+TurboTenant both already let a landlord absorb the tenant's ACH fee via account \
+settings -- that wasn't "temporary" (something they could ship), it was already true.
 
 1. Could any listed substitute close this gap in one normal roadmap quarter? If \
 yes, this is NOT structural -- fall through to Q4 to determine execution vs \
@@ -68,19 +93,25 @@ exact class of error this whole system exists to catch)? Flag it if wrong.
 
 Return ONLY a single JSON object, no markdown fences:
 {
-  "corrected_wedge_type": "structural"|"execution"|"temporary",
+  "q0": {"already_offered": bool, "substitute": str|null, "source_url": str|null, "verified_at": str|null},
+  "corrected_wedge_type": "structural"|"execution"|"invalid"|"temporary",
   "downgrade_reason": str|null,
   "unsourced_claims": [str],
   "price_rationale_flag": str|null,
   "q4_evidence": [{"claim": str, "source_url": str, "verified_at": "YYYY-MM-DD"}],
   "verdict": "pending_review",
-  "notes": "one paragraph, plain, for the review log -- state your Q1-Q4 answers"
+  "notes": "one paragraph, plain, for the review log -- state your Q0 answer first, then Q1-Q4 if Q0 didn't already resolve this"
 }
+
+q0.already_offered = true FORCES corrected_wedge_type = "invalid" regardless of what \
+Q1-Q4 would otherwise conclude, and REQUIRES q0.substitute and q0.source_url to be \
+non-null. q0.already_offered = false means state that explicitly (do not leave it \
+null); q0.substitute and q0.source_url are null in that case.
 
 q4_evidence MUST be a non-empty array with at least one real source_url whenever \
 corrected_wedge_type is "execution", and MUST be an empty array otherwise -- do not \
-populate it for structural or temporary verdicts, and never claim "execution" \
-without it.
+populate it for structural, invalid, or temporary verdicts, and never claim \
+"execution" without it.
 
 "verdict" must always be "pending_review" -- you are never able to approve or \
 reject outright; the owner decides. Your job is to surface real problems, not to \
@@ -134,8 +165,24 @@ async def validate_wedge(positioning_id: str, supabase_client: Optional[Any] = N
     raw = analyze_with_web_search(SYSTEM_PROMPT, user_prompt, max_uses=12, max_tokens=6000)
     findings = _extract_json(raw)
 
+    q0 = findings.get("q0") or {}
+    q0_fired = bool(q0.get("already_offered"))
     corrected_wedge_type = findings["corrected_wedge_type"]
     q4_evidence = findings.get("q4_evidence") or []
+
+    if q0_fired:
+        if not q0.get("substitute") or not q0.get("source_url"):
+            raise ValueError(
+                f"DIST-P2 rejected Q0 verdict for positioning {positioning_id!r}: "
+                "already_offered=true requires both substitute and source_url. "
+                "Nothing was written."
+            )
+        if corrected_wedge_type != "invalid":
+            raise ValueError(
+                f"DIST-P2 rejected findings for positioning {positioning_id!r}: "
+                f"q0.already_offered=true but corrected_wedge_type={corrected_wedge_type!r}, "
+                "must be 'invalid'. Nothing was written."
+            )
 
     if corrected_wedge_type == "execution" and len(q4_evidence) == 0:
         raise ValueError(
@@ -151,6 +198,12 @@ async def validate_wedge(positioning_id: str, supabase_client: Optional[Any] = N
         "unsourced_claims": findings.get("unsourced_claims", []),
         "price_rationale_flag": findings.get("price_rationale_flag"),
         "reviewer": AGENT_ID,
+    }
+    wedge_evidence["q0"] = {
+        "already_offered": q0_fired,
+        "substitute": q0.get("substitute"),
+        "source_url": q0.get("source_url"),
+        "verified_at": q0.get("verified_at"),
     }
     if corrected_wedge_type == "execution":
         wedge_evidence["q4_evidence"] = q4_evidence
