@@ -32,6 +32,8 @@ const SOURCE_COLOR: Record<DmSequence["lead_source"], string> = {
   linkedin_engager: "#6fce8f",
 };
 
+type SequencePreview = { touch_1: string; touch_2: string; has_footer: boolean };
+
 export default function OutreachPage() {
   const supabase = createClient();
   const [sequences, setSequences] = useState<DmSequence[]>([]);
@@ -41,6 +43,13 @@ export default function OutreachPage() {
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Finding 3 (2026-09-02 HITL audit): the compliance footer is appended
+  // at send time, not queue time -- what's approved must match what
+  // sends. Fetched per pending sequence from GET .../preview (read-only,
+  // reuses the real send-time footer logic) rather than reimplemented
+  // here, so this can't independently drift from what MKT-O5 actually
+  // sends. Keyed by sequence id; absence just means "still loading."
+  const [previews, setPreviews] = useState<Record<string, SequencePreview>>({});
 
   const fetchData = useCallback(async () => {
     const leadEmbed =
@@ -74,18 +83,39 @@ export default function OutreachPage() {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  async function callBackend(path: string) {
+  async function callBackend(path: string, method: "GET" | "POST" = "POST") {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) throw new Error("Not signed in");
     const res = await fetch(`${API_BASE}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
-      body: JSON.stringify({ resolved_by: session.user.email }),
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      ...(method === "POST" ? { body: JSON.stringify({ resolved_by: session.user.email }) } : {}),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail ?? `API error ${res.status}`);
     return data;
   }
+
+  // Fetch the footer-appended preview for each pending sequence whenever
+  // the pending list changes -- not on every render, and not for sequences
+  // already fetched, so approving/rejecting one doesn't re-fetch the rest.
+  useEffect(() => {
+    const missing = sequences.filter((s) => !(s.id in previews));
+    if (missing.length === 0) return;
+    missing.forEach(async (seq) => {
+      try {
+        const data = await callBackend(`/outreach/dm-sequences/${seq.id}/preview`, "GET");
+        setPreviews((prev) => ({ ...prev, [seq.id]: data as SequencePreview }));
+      } catch {
+        // Preview is a review aid, not a blocker -- if it fails, Approve/
+        // Reject still work against the raw copy already rendered below.
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sequences]);
 
   async function handleApprove(id: string) {
     setBusyId(id);
@@ -206,14 +236,40 @@ export default function OutreachPage() {
                       </button>
                     </div>
                   </div>
-                  <div className="rounded-[8px] p-3 mb-1.5" style={{ backgroundColor: "#10151b", border: "1px solid #1c222b" }}>
-                    <p className="text-[10px] font-mono uppercase mb-1" style={{ color: "#5b6673" }}>Touch 1</p>
-                    <p className="text-[12px]" style={{ color: "#aab4bd" }}>{seq.touch_1}</p>
-                  </div>
-                  <div className="rounded-[8px] p-3" style={{ backgroundColor: "#10151b", border: "1px solid #1c222b" }}>
-                    <p className="text-[10px] font-mono uppercase mb-1" style={{ color: "#5b6673" }}>Touch 2 (+3 days)</p>
-                    <p className="text-[12px]" style={{ color: "#aab4bd" }}>{seq.touch_2}</p>
-                  </div>
+                  {(() => {
+                    const preview = previews[seq.id];
+                    const touch1 = preview?.touch_1 ?? seq.touch_1;
+                    const touch2 = preview?.touch_2 ?? seq.touch_2;
+                    return (
+                      <>
+                        <div className="rounded-[8px] p-3 mb-1.5" style={{ backgroundColor: "#10151b", border: "1px solid #1c222b" }}>
+                          <div className="flex items-center gap-1.5 mb-1">
+                            <p className="text-[10px] font-mono uppercase" style={{ color: "#5b6673" }}>Touch 1</p>
+                            {preview?.has_footer && (
+                              <span className="text-[9px] font-mono uppercase" style={{ color: "#6fce8f" }}>
+                                incl. mailing address + unsubscribe link (sends exactly as shown)
+                              </span>
+                            )}
+                            {!preview && (
+                              <span className="text-[9px] font-mono" style={{ color: "#5b6673" }}>loading footer preview…</span>
+                            )}
+                          </div>
+                          <p className="text-[12px] whitespace-pre-line" style={{ color: "#aab4bd" }}>{touch1}</p>
+                        </div>
+                        <div className="rounded-[8px] p-3" style={{ backgroundColor: "#10151b", border: "1px solid #1c222b" }}>
+                          <div className="flex items-center gap-1.5 mb-1">
+                            <p className="text-[10px] font-mono uppercase" style={{ color: "#5b6673" }}>Touch 2 (+3 days)</p>
+                            {preview?.has_footer && (
+                              <span className="text-[9px] font-mono uppercase" style={{ color: "#6fce8f" }}>
+                                incl. mailing address + unsubscribe link (sends exactly as shown)
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[12px] whitespace-pre-line" style={{ color: "#aab4bd" }}>{touch2}</p>
+                        </div>
+                      </>
+                    );
+                  })()}
                 </div>
               ))
             )}

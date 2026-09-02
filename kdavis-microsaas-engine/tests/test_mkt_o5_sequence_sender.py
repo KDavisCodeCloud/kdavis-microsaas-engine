@@ -22,6 +22,17 @@ class FakeResend:
         self.Emails = FakeResendEmails()
 
 
+def _update_to(fake_db, status):
+    """Finds the mse_dm_sequences update() call that set this exact status
+    -- claim-then-confirm (Finding 1 fix) and the expiry-void check
+    (Finding 2 fix) both add update() calls ahead of the final one, so
+    positional indexing (updates[0]) is no longer meaningful; look up by
+    the status value instead."""
+    updates = [c for c in fake_db.executed if c.table_name == "mse_dm_sequences" and c._payload and c._payload.get("status") == status]
+    assert updates, f"no mse_dm_sequences update set status={status!r}; saw {[c._payload for c in fake_db.executed if c.table_name == 'mse_dm_sequences' and c._payload]}"
+    return updates[0]
+
+
 def _seed_sequence(fake_db, status="approved_hitl", touch_1_sent_at=None, lead_id="lead-1"):
     fake_db.responses["mse_dm_sequences"] = [{
         "id": "seq-1",
@@ -48,9 +59,8 @@ def test_touch_1_sends_email_and_updates_status(fake_db):
     assert fake_resend.Emails.sent[0]["subject"] == "Quick question, Jamie"
     assert "4k/mo" in fake_resend.Emails.sent[0]["text"]
 
-    updates = [c for c in fake_db.executed if c.table_name == "mse_dm_sequences" and c._payload and "status" in c._payload]
-    assert updates[0]._payload["status"] == "touch_1_sent"
-    assert updates[0]._payload["touch_1_sent_at"] is not None
+    final_update = _update_to(fake_db, "touch_1_sent")
+    assert final_update._payload["touch_1_sent_at"] is not None
 
     audits = [c for c in fake_db.executed if c.table_name == "audit_log" and c.calls[0][0] == "insert"]
     assert audits[0]._payload["outcome"] == "win"
@@ -84,8 +94,7 @@ def test_touch_1_skips_suppressed_lead_without_sending(fake_db):
     assert result == {"sent": 0, "failed": [], "skipped": ["seq-1"]}
     assert len(fake_resend.Emails.sent) == 0
 
-    updates = [c for c in fake_db.executed if c.table_name == "mse_dm_sequences" and c._payload and "status" in c._payload]
-    assert updates[0]._payload["status"] == "suppressed"
+    _update_to(fake_db, "suppressed")
 
     audits = [c for c in fake_db.executed if c.table_name == "audit_log" and c.calls[0][0] == "insert"]
     assert audits[0]._payload["outcome"] == "lose"
@@ -172,9 +181,8 @@ def test_touch_2_sends_and_completes_sequence(fake_db):
     assert result == {"sent": 1, "failed": [], "skipped": []}
     assert fake_resend.Emails.sent[0]["subject"] == "Following up, Jamie"
 
-    updates = [c for c in fake_db.executed if c.table_name == "mse_dm_sequences" and c._payload and "status" in c._payload]
-    assert updates[0]._payload["status"] == "sequence_complete"
-    assert updates[0]._payload["touch_2_sent_at"] is not None
+    final_update = _update_to(fake_db, "sequence_complete")
+    assert final_update._payload["touch_2_sent_at"] is not None
 
 
 def test_touch_2_skips_lead_who_unsubscribed_after_touch_1(fake_db):
@@ -245,6 +253,117 @@ def test_touch_1_fails_lead_finder_sequence_with_no_verified_email_on_lead(fake_
     assert len(fake_resend.Emails.sent) == 0
     audits = [c for c in fake_db.executed if c.table_name == "audit_log" and c.calls[0][0] == "insert"]
     assert "No email on file" in audits[0]._payload["metadata"]["error"]
+
+
+# ── Finding 1 (2026-09-02 HITL audit): atomic claim, no double-send ─────
+
+def test_touch_1_claims_row_with_conditional_update_before_sending(fake_db):
+    """The claim must be a real conditional UPDATE (id + prior status),
+    matching what real Postgres needs to make it atomic under concurrent
+    callers -- not just an unconditional status flip."""
+    _seed_sequence(fake_db, status="approved_hitl")
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_resend = FakeResend()
+
+    run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
+
+    claim = _update_to(fake_db, "touch_1_sending")
+    assert ("id", "seq-1") in claim._filters
+    assert ("status", "approved_hitl") in claim._filters
+    assert len(fake_resend.Emails.sent) == 1  # the send still happens once the claim succeeds
+    final_update = _update_to(fake_db, "touch_1_sent")
+    # Ordering: claim, then send (implicit -- the fake can't order against
+    # an external call), then confirm. The confirm must come after the claim.
+    assert fake_db.executed.index(claim) < fake_db.executed.index(final_update)
+
+
+def test_touch_1_skips_without_sending_when_claim_is_lost_to_a_concurrent_run(fake_db):
+    """Simulates the exact race Finding 1 was about: another (concurrent
+    or retried) run already claimed this row between our SELECT and our
+    UPDATE. A real conditional UPDATE would affect zero rows on Postgres;
+    next_update_returns_empty simulates that for the fake. Must not send,
+    must not error -- a lost claim is an expected outcome, not a failure."""
+    _seed_sequence(fake_db, status="approved_hitl")
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_db.next_update_returns_empty.add(("mse_dm_sequences", "touch_1_sending"))
+    fake_resend = FakeResend()
+
+    result = run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
+
+    assert result == {"sent": 0, "failed": [], "skipped": ["seq-1"]}
+    assert len(fake_resend.Emails.sent) == 0  # the actual point: never touched Resend
+
+    audits = [c for c in fake_db.executed if c.table_name == "audit_log" and c.calls[0][0] == "insert"]
+    assert audits[0]._payload["metadata"]["skipped"] == "already_claimed"
+
+
+def test_touch_1_reverts_claim_when_send_raises_so_it_can_retry_later(fake_db):
+    """A send failure AFTER a successful claim must not strand the row at
+    the transient 'touch_1_sending' status forever -- it has to go back to
+    'approved_hitl' so a later run picks it up again."""
+    _seed_sequence(fake_db, status="approved_hitl")
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+
+    class ExplodingResend:
+        class Emails:
+            @staticmethod
+            def send(params):
+                raise RuntimeError("Resend API timeout")
+
+    result = run_send_touch_1(supabase_client=fake_db, resend_client=ExplodingResend())
+
+    assert result == {"sent": 0, "failed": ["seq-1"], "skipped": []}
+    revert = _update_to(fake_db, "approved_hitl")
+    assert ("status", "touch_1_sending") in revert._filters
+
+    audits = [c for c in fake_db.executed if c.table_name == "audit_log" and c.calls[0][0] == "insert"]
+    assert audits[0]._payload["outcome"] == "lose"
+    assert "Resend API timeout" in audits[0]._payload["metadata"]["error"]
+
+
+def test_touch_2_claim_and_revert_use_touch_1_sent_as_the_base_status(fake_db):
+    """touch_2's claim/release pair must key off touch_1_sent, not
+    approved_hitl -- a copy-paste of touch_1's constants here would let a
+    touch_2 claim succeed against a row that was never actually sent
+    touch_1, or fail to revert correctly on a touch_2 send failure."""
+    old_enough = (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
+    _seed_sequence(fake_db, status="touch_1_sent", touch_1_sent_at=old_enough)
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+
+    run_send_touch_2(supabase_client=fake_db, resend_client=FakeResend())
+
+    claim = _update_to(fake_db, "touch_2_sending")
+    assert ("status", "touch_1_sent") in claim._filters
+
+
+# ── Finding 2 (2026-09-02 HITL audit): stale approvals void, not fire ───
+
+def test_touch_1_voids_expired_approvals_before_processing_the_batch(fake_db):
+    """An approval past its expiry must be voided to 'approval_expired' via
+    a real conditional UPDATE (status='approved_hitl' AND
+    hitl_approved_expires_at < now) before the send loop runs at all --
+    this is the "stale approvals fire late" gap the audit found, closed.
+    (The fake DB always returns the same canned rows regardless of which
+    filters a query applied -- same limitation noted on the existing
+    test_touch_2_query_filters_on_status_and_cadence_cutoff test above --
+    so this asserts the void call and its filters are issued correctly,
+    which is what proves the fix exists; real Postgres enforcing those
+    filters is what makes it actually work in production.)"""
+    fake_db.responses["mse_dm_sequences"] = [{
+        "id": "seq-1", "lead_id": "lead-1", "product_id": "prod-1", "campaign_build_id": "camp-1",
+        "touch_1": "msg", "touch_2": "follow", "status": "approved_hitl", "touch_1_sent_at": None,
+        "hitl_approved_expires_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+    }]
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+
+    run_send_touch_1(supabase_client=fake_db, resend_client=FakeResend())
+
+    void_call = _update_to(fake_db, "approval_expired")
+    assert ("status", "approved_hitl") in void_call._filters
+    lt_calls = [c for c in void_call.calls if c[0] == "lt"]
+    assert lt_calls and lt_calls[0][1] == "hitl_approved_expires_at"
+    # The void call must be issued before anything else touches this table.
+    assert fake_db.executed.index(void_call) == 0
 
 
 def test_run_sequence_sender_runs_both_stages(fake_db):

@@ -21,14 +21,23 @@ mse_linkedin_leads manual-outreach queue alongside the existing
 apollo/email view, rather than standing up a second, parallel
 "/marketing/hitl/dm-queue" JSON endpoint that nothing would consume.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from agents.marketing.mkt_o5_sequence_sender import _get_lead
+from core.email_compliance import append_compliance_footer
 from core.supabase_client import get_supabase
 
 router = APIRouter(prefix="/outreach", tags=["outreach"])
+
+# Finding 2 (2026-09-02 HITL audit): an approval with no expiry could sit
+# indefinitely and fire whenever the hourly sender next ran, with zero
+# freshness check. 7 days matches the audit's own recommendation. Only
+# meaningful for 'approved_hitl' -- MKT-O5 never polls 'approved_manual'
+# (LinkedIn) at all, so an expiry there would never be checked by anything.
+_HITL_APPROVAL_TTL = timedelta(days=7)
 
 
 def _require_admin(request: Request) -> None:
@@ -38,6 +47,47 @@ def _require_admin(request: Request) -> None:
 
 class ResolveSequence(BaseModel):
     resolved_by: str | None = None
+
+
+@router.get("/dm-sequences/{sequence_id}/preview")
+async def preview_dm_sequence(sequence_id: str, request: Request):
+    """
+    Finding 3 (2026-09-02 HITL audit): the compliance footer (mailing
+    address + unsubscribe link, CAN-SPAM-required) is appended at send
+    time in mkt_o5_sequence_sender.py, not at queue time -- an approver
+    was reviewing touch_1/touch_2 without ever seeing the exact bytes
+    Resend actually sends. Read-only, no side effects, does not touch the
+    send path at all: reuses mkt_o5_sequence_sender.py's own _get_lead and
+    core/email_compliance.py's own append_compliance_footer so the preview
+    can't drift from what a real send would produce -- a second,
+    independently-written footer-composition function here would just
+    create a new way for preview and reality to disagree.
+
+    LinkedIn-sourced sequences (lead_source='linkedin_manual'/
+    'linkedin_engager') never reach MKT-O5 and never get a footer -- for
+    those this returns the raw touch_1/touch_2 unchanged, `has_footer:
+    false`, so the frontend doesn't imply a footer that will never exist.
+    """
+    _require_admin(request)
+    db = get_supabase()
+
+    seq = db.table("mse_dm_sequences").select("*").eq("id", sequence_id).maybe_single().execute()
+    if seq is None or not seq.data:
+        raise HTTPException(status_code=404, detail="Sequence not found")
+
+    lead_source = seq.data.get("lead_source") or "apollo"
+    if lead_source not in ("apollo", "lead_finder"):
+        return {"touch_1": seq.data["touch_1"], "touch_2": seq.data["touch_2"], "has_footer": False}
+
+    lead = _get_lead(db, seq.data)
+    if not lead or not lead.get("email"):
+        raise HTTPException(status_code=422, detail="No email on file for this lead — cannot compose an accurate preview.")
+
+    return {
+        "touch_1": append_compliance_footer(seq.data["touch_1"], lead["email"]),
+        "touch_2": append_compliance_footer(seq.data["touch_2"], lead["email"]),
+        "has_footer": True,
+    }
 
 
 @router.post("/dm-sequences/{sequence_id}/approve")
@@ -69,12 +119,17 @@ async def approve_dm_sequence(sequence_id: str, body: ResolveSequence, request: 
 
     lead_source = existing.data.get("lead_source") or "apollo"
     new_status = "approved_hitl" if lead_source in ("apollo", "lead_finder") else "approved_manual"
+    now = datetime.now(timezone.utc)
 
-    result = db.table("mse_dm_sequences").update({
+    update_payload = {
         "status": new_status,
         "hitl_approved_by": body.resolved_by,
-        "hitl_approved_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", sequence_id).eq("status", "pending_hitl").execute()
+        "hitl_approved_at": now.isoformat(),
+    }
+    if new_status == "approved_hitl":
+        update_payload["hitl_approved_expires_at"] = (now + _HITL_APPROVAL_TTL).isoformat()
+
+    result = db.table("mse_dm_sequences").update(update_payload).eq("id", sequence_id).eq("status", "pending_hitl").execute()
 
     if not result.data:
         raise HTTPException(status_code=404, detail="Sequence not found or already resolved")

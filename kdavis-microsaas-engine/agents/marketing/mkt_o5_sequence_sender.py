@@ -97,11 +97,62 @@ def _get_lead(db, seq: dict) -> Optional[dict]:
     return result.data if result is not None else None
 
 
+def _void_expired_approvals(db) -> int:
+    """Finding 2 (2026-09-02 HITL audit): approvals go stale, not silently
+    forever-pending. A row past its hitl_approved_expires_at is voided to
+    'approval_expired' -- a real, visible terminal status a human has to
+    notice and act on -- rather than sitting as 'approved_hitl' forever
+    (looks still-valid) or auto-recycling back to pending_hitl (fires late
+    with zero re-review, exactly the drift this audit exists to catch)."""
+    now = datetime.now(timezone.utc).isoformat()
+    result = (
+        db.table("mse_dm_sequences")
+        .update({"status": "approval_expired"})
+        .eq("status", "approved_hitl")
+        .lt("hitl_approved_expires_at", now)
+        .execute()
+    )
+    return len(result.data or [])
+
+
+def _claim_for_send(db, seq_id: str, from_status: str, claiming_status: str):
+    """Finding 1 (2026-09-02 HITL audit): send and status-update were two
+    separate, non-atomic steps with no guard on the update, so a crash
+    between them (or two overlapping hourly runs) could send the same
+    email twice. This is the atomic claim that closes it: a conditional
+    UPDATE, WHERE id=x AND status=from_status. On real Postgres this
+    affects at most one row even under concurrent callers -- whichever
+    request's UPDATE commits first wins the row; the loser's WHERE matches
+    zero rows. Returns True if this call won the claim, False if another
+    run already had it (in which case: skip, don't send -- never treat a
+    lost claim as an error)."""
+    result = (
+        db.table("mse_dm_sequences")
+        .update({"status": claiming_status})
+        .eq("id", seq_id)
+        .eq("status", from_status)
+        .execute()
+    )
+    return bool(result.data)
+
+
+def _release_claim(db, seq_id: str, claiming_status: str, revert_to: str) -> None:
+    """A send that fails after a successful claim must not leave the row
+    stuck at the transient claiming status forever -- revert to the prior
+    approved status so a later run retries it, same as a send that failed
+    before ever claiming anything."""
+    db.table("mse_dm_sequences").update({"status": revert_to}).eq("id", seq_id).eq("status", claiming_status).execute()
+
+
 def run_send_touch_1(supabase_client: Optional[Any] = None, resend_client: Optional[Any] = None) -> dict:
     """Sends touch_1 for every approved-but-unsent sequence. Continues past
     a single lead's failure so one bad row doesn't block the whole batch —
     each failure is still audited (never silent), just doesn't raise."""
     db = supabase_client if supabase_client is not None else get_supabase()
+
+    voided = _void_expired_approvals(db)
+    if voided:
+        _emit_event(db, "sequence_send_touch1_approvals_expired", {"count": voided})
 
     sequences = db.table("mse_dm_sequences").select("*").eq("status", "approved_hitl").execute().data or []
     _emit_event(db, "sequence_send_touch1_started", {"count": len(sequences)})
@@ -123,19 +174,30 @@ def run_send_touch_1(supabase_client: Optional[Any] = None, resend_client: Optio
 
             if is_suppressed(db, lead["email"]):
                 skipped.append(seq["id"])
-                db.table("mse_dm_sequences").update({"status": "suppressed"}).eq("id", seq["id"]).execute()
+                db.table("mse_dm_sequences").update({"status": "suppressed"}).eq("id", seq["id"]).eq("status", "approved_hitl").execute()
                 _write_audit(db, "lose", seq["product_id"], {"sequence_id": seq["id"], "touch": 1, "skipped": "suppressed"})
                 continue
 
-            first_name = lead.get("first_name") or ""
-            subject = f"Quick question, {first_name}".strip() if first_name else "Quick question"
-            body = append_compliance_footer(DataSanitizationShield.clean(seq["touch_1"]), lead["email"])
-            _send_email(resend_client, lead["email"], subject, body)
+            if not _claim_for_send(db, seq["id"], "approved_hitl", "touch_1_sending"):
+                # Another concurrent run already claimed (or already sent)
+                # this row -- not a failure, just not ours to send.
+                skipped.append(seq["id"])
+                _write_audit(db, "lose", seq["product_id"], {"sequence_id": seq["id"], "touch": 1, "skipped": "already_claimed"})
+                continue
+
+            try:
+                first_name = lead.get("first_name") or ""
+                subject = f"Quick question, {first_name}".strip() if first_name else "Quick question"
+                body = append_compliance_footer(DataSanitizationShield.clean(seq["touch_1"]), lead["email"])
+                _send_email(resend_client, lead["email"], subject, body)
+            except Exception:
+                _release_claim(db, seq["id"], "touch_1_sending", "approved_hitl")
+                raise
 
             db.table("mse_dm_sequences").update({
                 "status": "touch_1_sent",
                 "touch_1_sent_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("id", seq["id"]).execute()
+            }).eq("id", seq["id"]).eq("status", "touch_1_sending").execute()
             sent += 1
             sent_count += 1
             _write_audit(db, "win", seq["product_id"], {"sequence_id": seq["id"], "touch": 1})
@@ -185,19 +247,28 @@ def run_send_touch_2(supabase_client: Optional[Any] = None, resend_client: Optio
             # gate.
             if is_suppressed(db, lead["email"]):
                 skipped.append(seq["id"])
-                db.table("mse_dm_sequences").update({"status": "suppressed"}).eq("id", seq["id"]).execute()
+                db.table("mse_dm_sequences").update({"status": "suppressed"}).eq("id", seq["id"]).eq("status", "touch_1_sent").execute()
                 _write_audit(db, "lose", seq["product_id"], {"sequence_id": seq["id"], "touch": 2, "skipped": "suppressed"})
                 continue
 
-            first_name = lead.get("first_name") or ""
-            subject = f"Following up, {first_name}".strip() if first_name else "Following up"
-            body = append_compliance_footer(DataSanitizationShield.clean(seq["touch_2"]), lead["email"])
-            _send_email(resend_client, lead["email"], subject, body)
+            if not _claim_for_send(db, seq["id"], "touch_1_sent", "touch_2_sending"):
+                skipped.append(seq["id"])
+                _write_audit(db, "lose", seq["product_id"], {"sequence_id": seq["id"], "touch": 2, "skipped": "already_claimed"})
+                continue
+
+            try:
+                first_name = lead.get("first_name") or ""
+                subject = f"Following up, {first_name}".strip() if first_name else "Following up"
+                body = append_compliance_footer(DataSanitizationShield.clean(seq["touch_2"]), lead["email"])
+                _send_email(resend_client, lead["email"], subject, body)
+            except Exception:
+                _release_claim(db, seq["id"], "touch_2_sending", "touch_1_sent")
+                raise
 
             db.table("mse_dm_sequences").update({
                 "status": "sequence_complete",
                 "touch_2_sent_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("id", seq["id"]).execute()
+            }).eq("id", seq["id"]).eq("status", "touch_2_sending").execute()
             sent += 1
             sent_count += 1
             _write_audit(db, "win", seq["product_id"], {"sequence_id": seq["id"], "touch": 2})

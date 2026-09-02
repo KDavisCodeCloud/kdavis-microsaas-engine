@@ -86,6 +86,11 @@ class FakeQuery:
         self._filters.append((key, value))
         return self
 
+    def lt(self, key, value):
+        self.calls.append(("lt", key, value))
+        self._filters.append((key, value))
+        return self
+
     def gte(self, key, value):
         self.calls.append(("gte", key, value))
         self._filters.append((key, value))
@@ -114,6 +119,22 @@ class FakeQuery:
                         f"simulated constraint violation for {row.get('solution_concept')!r}"
                     )
         self.store.executed.append(self)
+        # Lets a test simulate a lost atomic-claim race (a concurrent run
+        # already flipped this row's status, so the conditional UPDATE this
+        # call represents would affect zero rows on real Postgres) without a
+        # real DB to enforce .eq() filters against -- real Postgres does
+        # honor them as a WHERE clause; this fake normally can't, since
+        # every execute() on a table returns the same canned response
+        # regardless of verb or filters. Keyed on (table, target status) so
+        # a specific update() call can be made to look lost without also
+        # catching an unrelated update on the same table that happens to
+        # run first (e.g. a stale-approval void check ahead of the claim) --
+        # one-shot, consumed on match.
+        target_status = self._payload.get("status") if isinstance(self._payload, dict) else None
+        key = (self.table_name, target_status)
+        if self.calls[0][0] == "update" and key in self.store.next_update_returns_empty:
+            self.store.next_update_returns_empty.remove(key)
+            return type("Result", (), {"data": []})()
         result_data = self.store.responses.get(self.table_name, [])
         if self._count_requested:
             return type("Result", (), {"data": result_data, "count": len(result_data)})()
@@ -141,6 +162,7 @@ class FakeSupabase:
         self.tables_touched = []
         self.fail_on_insert = fail_on_insert or set()
         self.rpc_calls = []
+        self.next_update_returns_empty = set()
 
     def table(self, name):
         self.tables_touched.append(name)
