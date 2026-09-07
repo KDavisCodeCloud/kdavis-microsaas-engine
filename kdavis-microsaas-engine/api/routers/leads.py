@@ -109,6 +109,131 @@ async def list_leads(
     return {"leads": result.data or [], "limit": limit, "offset": offset}
 
 
+@router.get("/leads/icp-products")
+async def list_icp_configured_products(authorization: Optional[str] = Header(default=None)):
+    """Which products the lead finder can actually run against -- the same
+    set n8n/lead_finder_workflow.json's own "Get ICP-Configured Products"
+    node reads (a plain select on mse_icp_configs), joined to mse_products
+    in Python since there's no FK relationship between the two tables for
+    PostgREST to embed. Feeds the CEO Decoded dashboard's manual "run now"
+    product picker -- the n8n-outage fallback needs to know which product
+    ids are valid without Kelvin having to go look one up by hand."""
+    require_marketing_api_key(authorization)
+    db = get_supabase()
+
+    icp_rows = db.table("mse_icp_configs").select("product_id,vertical,target_count").execute().data or []
+    if not any(r.get("product_id") for r in icp_rows):
+        return {"products": []}
+
+    # mse_products has no FK relationship to mse_icp_configs for PostgREST
+    # to embed (checked live) -- fetching the small full table and joining
+    # in Python instead of a second filtered query, same "small enough
+    # today, revisit if it grows" call as get_pipeline_summary above.
+    products = db.table("mse_products").select("id,name,slug").execute().data or []
+    names_by_id = {p["id"]: p for p in products}
+
+    return {
+        "products": [
+            {
+                "product_id": r["product_id"],
+                "name": names_by_id.get(r["product_id"], {}).get("name", "Unknown product"),
+                "slug": names_by_id.get(r["product_id"], {}).get("slug"),
+                "vertical": r.get("vertical"),
+                "target_count": r.get("target_count"),
+            }
+            for r in icp_rows
+            if r.get("product_id")
+        ]
+    }
+
+
+_PIPELINE_STAGES = ["new", "contacted", "replied", "qualified", "demo", "won", "lost"]
+
+
+@router.get("/leads/pipeline-summary")
+async def get_pipeline_summary(product_id: Optional[str] = None, authorization: Optional[str] = Header(default=None)):
+    """Real stage counts for the CEO Decoded dashboard's Sales Pipeline
+    card (previously a static mock, per that page's own "not_built" status
+    note) and decoded-empire-os's leads page header. Counts in Python, not
+    a SQL group-by RPC -- mse_leads is small enough today (0 rows in prod
+    as of 2026-09-07) that a second DB round trip / new function isn't
+    worth it yet; revisit if this table grows into the tens of thousands."""
+    require_marketing_api_key(authorization)
+    db = get_supabase()
+
+    query = db.table("mse_leads").select("stage")
+    if product_id:
+        query = query.eq("product_id", product_id)
+    result = query.execute()
+    rows = result.data or []
+
+    counts = {stage: 0 for stage in _PIPELINE_STAGES}
+    for row in rows:
+        stage = row.get("stage") or "new"
+        counts[stage] = counts.get(stage, 0) + 1
+
+    return {"product_id": product_id, "total": len(rows), "stages": counts}
+
+
+_MEETING_STAGES = ("demo", "won", "lost")  # reached demo stage or further
+
+
+@router.get("/leads/outreach-summary")
+async def get_outreach_summary(authorization: Optional[str] = Header(default=None)):
+    """Real per-product outreach stats for the CEO Decoded dashboard's
+    "Cold Outreach Tracker" card (previously a static mock with a single
+    fake "MSE Intro Sequence" row -- there is no real "named sequence
+    template" concept in this schema, mse_dm_sequences rows are generated
+    per-lead by MKT-O2, so this groups by product instead of inventing a
+    sequence name that doesn't exist).
+
+    "sent" = mse_dm_sequences rows where touch_1_sent_at is set (a real
+    send happened; excludes suppressed/pending/rejected rows, which never
+    reach a send). "meetings" is an honest approximation, not a real
+    booked-meeting count -- there is no calendar/booking integration
+    anywhere in this codebase -- it's leads currently at mse_leads.stage
+    'demo' or later (a human moved them there via the leads page after an
+    actual demo call). Open rate has no real signal at all (no email-open
+    tracking is wired up) and is deliberately omitted, same as the mock's
+    own hardcoded "opens: '—'" before this endpoint existed -- never
+    fabricated as a fake percentage."""
+    require_marketing_api_key(authorization)
+    db = get_supabase()
+
+    sequences = db.table("mse_dm_sequences").select("product_id,touch_1_sent_at").execute().data or []
+    sent_by_product: dict[str, int] = {}
+    for seq in sequences:
+        pid = seq.get("product_id")
+        if pid and seq.get("touch_1_sent_at"):
+            sent_by_product[pid] = sent_by_product.get(pid, 0) + 1
+
+    leads = db.table("mse_leads").select("product_id,stage").execute().data or []
+    meetings_by_product: dict[str, int] = {}
+    for lead in leads:
+        pid = lead.get("product_id")
+        if pid and (lead.get("stage") or "new") in _MEETING_STAGES:
+            meetings_by_product[pid] = meetings_by_product.get(pid, 0) + 1
+
+    product_ids = set(sent_by_product) | set(meetings_by_product)
+    if not product_ids:
+        return {"products": []}
+
+    products = db.table("mse_products").select("id,name").execute().data or []
+    names_by_id = {p["id"]: p.get("name", "Unknown product") for p in products}
+
+    return {
+        "products": [
+            {
+                "product_id": pid,
+                "name": names_by_id.get(pid, "Unknown product"),
+                "sent": sent_by_product.get(pid, 0),
+                "meetings": meetings_by_product.get(pid, 0),
+            }
+            for pid in sorted(product_ids)
+        ]
+    }
+
+
 @router.post("/icp")
 async def upsert_icp_config(body: IcpConfigRequest, authorization: Optional[str] = Header(default=None)):
     require_marketing_api_key(authorization)

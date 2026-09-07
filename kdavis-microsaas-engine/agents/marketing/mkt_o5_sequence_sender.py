@@ -33,6 +33,7 @@ batch or a runaway retry loop from sending far more mail in one day than
 intended; remaining sequences simply stay in their current status for the
 next hourly run to pick up, same as any other skip here.
 """
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -42,6 +43,8 @@ import resend
 from core.email_compliance import append_compliance_footer, daily_send_cap, is_suppressed, sends_today
 from core.sanitization import DataSanitizationShield
 from core.supabase_client import get_supabase
+
+log = logging.getLogger(__name__)
 
 AGENT_ID = "mkt-o5"
 TOUCH_2_DELAY = timedelta(days=3)
@@ -136,6 +139,45 @@ def _claim_for_send(db, seq_id: str, from_status: str, claiming_status: str):
     return bool(result.data)
 
 
+def _log_outreach_touch(db, seq: dict, touch: int) -> None:
+    """DIST Phase 8 (mse_leads.stage + mse_activities, migrations
+    20260831000035/20260907000042): only lead_finder-sourced sequences
+    (seq["lead_finder_lead_id"] set) connect to mse_leads at all -- apollo
+    and linkedin-sourced sequences track through mse_apollo_leads instead,
+    which has no stage column, nothing to advance here. touch_1 moves a
+    lead from 'new' to 'contacted' (.eq("stage", "new") makes this a
+    no-op, not a regression, if a human already advanced it further via
+    the leads page). touch_2 never changes stage -- 'contacted' already
+    reflects "we've reached out"; there is no automated reply/bounce
+    signal anywhere in this codebase (see mkt_o4_outreach_monitor.py's own
+    docstring) to justify moving a lead past 'contacted' without a human
+    saying so. Best-effort: a logging failure must never undo or fail a
+    send that already succeeded."""
+    lead_id = seq.get("lead_finder_lead_id")
+    if not lead_id:
+        return
+    try:
+        if touch == 1:
+            db.table("mse_leads").update({
+                "stage": "contacted",
+                "last_activity_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", lead_id).eq("stage", "new").execute()
+        else:
+            db.table("mse_leads").update({
+                "last_activity_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", lead_id).execute()
+        db.table("mse_activities").insert({
+            "product_id": seq.get("product_id"),
+            "subject_type": "lead",
+            "subject_id": lead_id,
+            "kind": "outreach_sent",
+            "body": f"touch_{touch} sent",
+            "actor": AGENT_ID,
+        }).execute()
+    except Exception as exc:
+        log.warning("mse_activities/stage update failed for lead %s (touch %d): %s", lead_id, touch, exc)
+
+
 def _release_claim(db, seq_id: str, claiming_status: str, revert_to: str) -> None:
     """A send that fails after a successful claim must not leave the row
     stuck at the transient claiming status forever -- revert to the prior
@@ -198,6 +240,7 @@ def run_send_touch_1(supabase_client: Optional[Any] = None, resend_client: Optio
                 "status": "touch_1_sent",
                 "touch_1_sent_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", seq["id"]).eq("status", "touch_1_sending").execute()
+            _log_outreach_touch(db, seq, touch=1)
             sent += 1
             sent_count += 1
             _write_audit(db, "win", seq["product_id"], {"sequence_id": seq["id"], "touch": 1})
@@ -269,6 +312,7 @@ def run_send_touch_2(supabase_client: Optional[Any] = None, resend_client: Optio
                 "status": "sequence_complete",
                 "touch_2_sent_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", seq["id"]).eq("status", "touch_2_sending").execute()
+            _log_outreach_touch(db, seq, touch=2)
             sent += 1
             sent_count += 1
             _write_audit(db, "win", seq["product_id"], {"sequence_id": seq["id"], "touch": 2})

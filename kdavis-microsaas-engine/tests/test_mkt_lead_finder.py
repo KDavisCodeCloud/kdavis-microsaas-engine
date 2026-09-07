@@ -122,3 +122,34 @@ def test_run_lead_finder_for_product_writes_leads_and_completes_run():
 
     run_updates = [c for c in fake_db.executed if c.table_name == "mse_lead_finder_runs" and c.calls[0][0] == "update"]
     assert run_updates[-1]._payload["status"] == "complete"
+
+    activity_inserts = [c for c in fake_db.executed if c.table_name == "mse_activities" and c.calls[0][0] == "insert"]
+    assert activity_inserts[0]._payload[0]["subject_id"] == "lead-row-1"
+    assert activity_inserts[0]._payload[0]["kind"] == "found"
+    assert activity_inserts[0]._payload[0]["product_id"] == "prod-1"
+
+
+def test_run_lead_finder_for_product_tolerates_activity_logging_failure():
+    """A real lead-finder run that already succeeded at finding and saving
+    leads must not fail just because best-effort mse_activities logging
+    errors -- that would turn a working run into a false 'failed' status
+    over a non-critical audit-trail write."""
+    class BrokenActivitiesDB(FakeSupabase):
+        def table(self, name):
+            if name == "mse_activities":
+                raise Exception("simulated mse_activities outage")
+            return super().table(name)
+
+    fake_db = BrokenActivitiesDB(responses={
+        "mse_icp_configs": [{"product_id": "prod-1", **VALID_ICP_CONFIG}],
+        "mse_lead_finder_runs": [{"id": "run-1"}],
+        "mse_leads": [{"id": "lead-row-1"}],
+        "usage_events": [],
+    })
+    raw = [RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="google_search", location="Phoenix AZ")]
+
+    with patch.object(mlf, "GoogleSearchScraper", return_value=_fake_google_scraper(raw)), \
+         patch.object(mlf, "get_vertical_scraper", return_value=None):
+        result = mlf.run_lead_finder_for_product("prod-1", supabase_client=fake_db)
+
+    assert result["status"] == "complete"

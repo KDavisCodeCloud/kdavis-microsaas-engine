@@ -122,6 +122,119 @@ def test_list_leads_applies_pagination_range(fake_db, monkeypatch):
     assert range_calls == [("range", 20, 29)]
 
 
+def test_icp_products_requires_auth():
+    resp = client.get("/marketing/leads/icp-products")
+    assert resp.status_code == 401
+
+
+def test_icp_products_joins_product_names(fake_db, monkeypatch):
+    fake_db.responses["mse_icp_configs"] = [
+        {"product_id": "prod-1", "vertical": "real_estate", "target_count": 100},
+    ]
+    fake_db.responses["mse_products"] = [{"id": "prod-1", "name": "TradesDesk", "slug": "tradesdesk"}]
+    monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+
+    resp = client.get("/marketing/leads/icp-products", headers=AUTH)
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "products": [
+            {"product_id": "prod-1", "name": "TradesDesk", "slug": "tradesdesk", "vertical": "real_estate", "target_count": 100},
+        ]
+    }
+
+
+def test_icp_products_empty_when_no_icp_configs(fake_db, monkeypatch):
+    fake_db.responses["mse_icp_configs"] = []
+    monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+
+    resp = client.get("/marketing/leads/icp-products", headers=AUTH)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"products": []}
+
+
+def test_pipeline_summary_requires_auth():
+    resp = client.get("/marketing/leads/pipeline-summary")
+    assert resp.status_code == 401
+
+
+def test_pipeline_summary_counts_by_stage(fake_db, monkeypatch):
+    fake_db.responses["mse_leads"] = [
+        {"stage": "new"}, {"stage": "new"}, {"stage": "contacted"}, {"stage": "won"},
+    ]
+    monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+
+    resp = client.get("/marketing/leads/pipeline-summary?product_id=prod-1", headers=AUTH)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["product_id"] == "prod-1"
+    assert body["total"] == 4
+    assert body["stages"] == {
+        "new": 2, "contacted": 1, "replied": 0, "qualified": 0, "demo": 0, "won": 1, "lost": 0,
+    }
+
+    select_query = [c for c in fake_db.executed if c.table_name == "mse_leads" and c.calls[0][0] == "select"][0]
+    assert ("product_id", "prod-1") in select_query._filters
+
+
+def test_pipeline_summary_defaults_missing_stage_to_new(fake_db, monkeypatch):
+    fake_db.responses["mse_leads"] = [{"stage": None}]
+    monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+
+    resp = client.get("/marketing/leads/pipeline-summary", headers=AUTH)
+
+    assert resp.status_code == 200
+    assert resp.json()["stages"]["new"] == 1
+
+
+def test_outreach_summary_requires_auth():
+    resp = client.get("/marketing/leads/outreach-summary")
+    assert resp.status_code == 401
+
+
+def test_outreach_summary_counts_sent_and_meetings_per_product(fake_db, monkeypatch):
+    fake_db.responses["mse_dm_sequences"] = [
+        {"product_id": "prod-1", "touch_1_sent_at": "2026-09-01T00:00:00Z"},
+        {"product_id": "prod-1", "touch_1_sent_at": "2026-09-02T00:00:00Z"},
+        {"product_id": "prod-1", "touch_1_sent_at": None},  # never sent -- must not count
+        {"product_id": "prod-2", "touch_1_sent_at": "2026-09-01T00:00:00Z"},
+    ]
+    fake_db.responses["mse_leads"] = [
+        {"product_id": "prod-1", "stage": "demo"},
+        {"product_id": "prod-1", "stage": "won"},
+        {"product_id": "prod-1", "stage": "contacted"},  # not yet a meeting -- must not count
+        {"product_id": "prod-2", "stage": "new"},
+    ]
+    fake_db.responses["mse_products"] = [
+        {"id": "prod-1", "name": "TradesDesk"},
+        {"id": "prod-2", "name": "DecodedSix"},
+    ]
+    monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+
+    resp = client.get("/marketing/leads/outreach-summary", headers=AUTH)
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "products": [
+            {"product_id": "prod-1", "name": "TradesDesk", "sent": 2, "meetings": 2},
+            {"product_id": "prod-2", "name": "DecodedSix", "sent": 1, "meetings": 0},
+        ]
+    }
+
+
+def test_outreach_summary_empty_when_no_sequences_or_leads(fake_db, monkeypatch):
+    fake_db.responses["mse_dm_sequences"] = []
+    fake_db.responses["mse_leads"] = []
+    monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+
+    resp = client.get("/marketing/leads/outreach-summary", headers=AUTH)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"products": []}
+
+
 def test_upsert_icp_config_requires_auth():
     resp = client.post("/marketing/icp", json={"product_id": "prod-1"})
     assert resp.status_code == 401

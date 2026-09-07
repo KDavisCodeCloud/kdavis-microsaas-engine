@@ -229,6 +229,87 @@ def test_touch_1_resolves_lead_finder_lead_via_mse_leads(fake_db):
     assert ("id", "lf-lead-1") in lead_selects[0]._filters
 
 
+def test_touch_1_advances_lead_finder_lead_to_contacted_and_logs_activity(fake_db):
+    """DIST Phase 8 close-the-loop wiring: a successful touch_1 send for a
+    lead_finder-sourced sequence must move mse_leads.stage new -> contacted
+    and record an mse_activities row -- this is the only automated stage
+    transition in the pipeline (there is no real reply/bounce signal to
+    justify moving a lead further than this without a human)."""
+    fake_db.responses["mse_dm_sequences"] = [{
+        "id": "seq-lf-3",
+        "lead_id": None,
+        "lead_finder_lead_id": "lf-lead-3",
+        "product_id": "prod-1",
+        "campaign_build_id": None,
+        "touch_1": "msg",
+        "touch_2": "follow-up",
+        "status": "approved_hitl",
+        "touch_1_sent_at": None,
+    }]
+    fake_db.responses["mse_leads"] = [{"email": "verified@example.com", "first_name": "Alex"}]
+    fake_resend = FakeResend()
+
+    result = run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
+    assert result == {"sent": 1, "failed": [], "skipped": []}
+
+    stage_update = [
+        c for c in fake_db.executed
+        if c.table_name == "mse_leads" and c.calls[0][0] == "update" and c._payload.get("stage") == "contacted"
+    ]
+    assert len(stage_update) == 1
+    assert ("id", "lf-lead-3") in stage_update[0]._filters
+    assert ("stage", "new") in stage_update[0]._filters  # non-regressing: only advances from 'new'
+
+    activity_inserts = [c for c in fake_db.executed if c.table_name == "mse_activities" and c.calls[0][0] == "insert"]
+    assert activity_inserts[0]._payload["subject_id"] == "lf-lead-3"
+    assert activity_inserts[0]._payload["kind"] == "outreach_sent"
+    assert activity_inserts[0]._payload["body"] == "touch_1 sent"
+
+
+def test_touch_2_logs_activity_without_changing_stage(fake_db):
+    """touch_2 must not overwrite a stage a human may have already advanced
+    (e.g. to 'qualified') -- it only refreshes last_activity_at and logs
+    the touch, never sets 'stage' in its update payload."""
+    fake_db.responses["mse_dm_sequences"] = [{
+        "id": "seq-lf-4",
+        "lead_id": None,
+        "lead_finder_lead_id": "lf-lead-4",
+        "product_id": "prod-1",
+        "campaign_build_id": None,
+        "touch_1": "msg",
+        "touch_2": "follow-up",
+        "status": "touch_1_sent",
+        "touch_1_sent_at": (datetime.now(timezone.utc) - timedelta(days=4)).isoformat(),
+    }]
+    fake_db.responses["mse_leads"] = [{"email": "verified@example.com", "first_name": "Alex"}]
+    fake_resend = FakeResend()
+
+    result = run_send_touch_2(supabase_client=fake_db, resend_client=fake_resend)
+    assert result == {"sent": 1, "failed": [], "skipped": []}
+
+    lead_updates = [c for c in fake_db.executed if c.table_name == "mse_leads" and c.calls[0][0] == "update"]
+    assert len(lead_updates) == 1
+    assert "stage" not in lead_updates[0]._payload
+
+    activity_inserts = [c for c in fake_db.executed if c.table_name == "mse_activities" and c.calls[0][0] == "insert"]
+    assert activity_inserts[0]._payload["body"] == "touch_2 sent"
+
+
+def test_touch_1_skips_mse_leads_activity_wiring_for_apollo_sequences(fake_db):
+    """A sequence with lead_id (apollo-sourced) instead of
+    lead_finder_lead_id must never touch mse_leads/mse_activities --
+    apollo leads live in mse_apollo_leads, which has no stage column."""
+    _seed_sequence(fake_db, status="approved_hitl")
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_resend = FakeResend()
+
+    result = run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
+    assert result == {"sent": 1, "failed": [], "skipped": []}
+
+    assert "mse_leads" not in fake_db.tables_touched
+    assert "mse_activities" not in fake_db.tables_touched
+
+
 def test_touch_1_fails_lead_finder_sequence_with_no_verified_email_on_lead(fake_db):
     """A lead_finder lead with no email on file (email_status never reached
     'verified', so mse_leads.email is still null) must fail loudly, not

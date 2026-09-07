@@ -40,6 +40,7 @@ callers hitting it directly and repeatedly in the same day are
 responsible for their own quota awareness.
 """
 
+import logging
 from dataclasses import asdict
 from datetime import date, datetime, timezone
 from typing import Any, Optional
@@ -49,6 +50,8 @@ from core.supabase_client import get_supabase
 from scrapers.base import RawLead
 from scrapers.google_search import GoogleSearchScraper
 from scrapers.verticals import get_vertical_scraper
+
+log = logging.getLogger(__name__)
 
 AGENT_ID = "mkt-lead-finder"
 
@@ -71,6 +74,32 @@ def _write_audit(db, outcome: str, product_id: str, metadata: dict) -> None:
         "product_id": product_id,
         "metadata": metadata,
     }).execute()
+
+
+def _log_found_activities(db, product_id: str, inserted_rows: list[dict]) -> None:
+    """DIST Phase 8 (mse_activities, migration 20260831000034): one
+    append-only 'found' entry per lead, so decoded-empire-os's leads page
+    has a real first-touch timestamp to show instead of just created_at.
+    Best-effort -- a logging failure here must never fail a real lead-
+    finder run that already succeeded at the thing that actually matters
+    (finding and saving the lead itself)."""
+    if not inserted_rows:
+        return
+    rows = [
+        {
+            "product_id": product_id,
+            "subject_type": "lead",
+            "subject_id": row["id"],
+            "kind": "found",
+            "body": f"found via {row.get('source') or 'unknown source'}",
+            "actor": AGENT_ID,
+        }
+        for row in inserted_rows
+    ]
+    try:
+        db.table("mse_activities").insert(rows).execute()
+    except Exception as exc:
+        log.warning("mse_activities logging failed for %d found leads: %s", len(rows), exc)
 
 
 def _get_icp_config(db, product_id: str) -> Optional[dict]:
@@ -300,6 +329,7 @@ def run_lead_finder_for_product(product_id: str, supabase_client: Optional[Any] 
             insert_result = db.table("mse_leads").insert(rows).execute()
             if not insert_result.data:
                 raise RuntimeError("Insert into mse_leads returned no data")
+            _log_found_activities(db, product_id, insert_result.data)
 
         verified_count = sum(1 for r in rows if r.get("email_status") == "verified")
         sources_used = sorted({r["source"] for r in rows if r.get("source")})
