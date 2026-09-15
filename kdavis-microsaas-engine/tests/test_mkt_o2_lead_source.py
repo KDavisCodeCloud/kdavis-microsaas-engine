@@ -41,6 +41,7 @@ def test_apollo_lead_source_unchanged_behavior():
     fake_db = FakeSupabase(responses={
         "mse_dm_sequences": [{"id": "seq-1"}],
         "campaign_builds": [{"id": "cb-1", "dm_sequence_status": "ready_for_hitl"}],
+        "mse_icp_configs": [{"selling_stage": "active"}],
     })
     anthropic_client = FakeAnthropic(responses=[SEQUENCE_JSON])
     leads = [{"id": "lead-1", "first_name": "Jane", "title": "Team Lead", "company": "Acme"}]
@@ -69,7 +70,10 @@ def test_apollo_lead_source_unchanged_behavior():
 
 
 def test_linkedin_manual_uses_standard_prompt_no_campaign_build():
-    fake_db = FakeSupabase(responses={"mse_dm_sequences": [{"id": "seq-1"}]})
+    fake_db = FakeSupabase(responses={
+        "mse_dm_sequences": [{"id": "seq-1"}],
+        "mse_icp_configs": [{"selling_stage": "active"}],
+    })
     anthropic_client = FakeAnthropic(responses=[SEQUENCE_JSON])
     leads = [{"id": "li-lead-1", "first_name": "Sam", "title": "Broker", "company": "Sun Realty"}]
 
@@ -96,7 +100,10 @@ def test_linkedin_manual_uses_standard_prompt_no_campaign_build():
 
 
 def test_linkedin_engager_uses_engager_prompt_and_references_interaction():
-    fake_db = FakeSupabase(responses={"mse_dm_sequences": [{"id": "seq-1"}]})
+    fake_db = FakeSupabase(responses={
+        "mse_dm_sequences": [{"id": "seq-1"}],
+        "mse_icp_configs": [{"selling_stage": "active"}],
+    })
     anthropic_client = FakeAnthropic(responses=[SEQUENCE_JSON])
     leads = [{
         "id": "li-lead-2", "first_name": "Pat", "title": "Team Lead", "company": "Valley Realty",
@@ -126,6 +133,7 @@ def test_lead_finder_source_uses_lead_finder_lead_id_and_standard_prompt():
     fake_db = FakeSupabase(responses={
         "mse_dm_sequences": [{"id": "seq-1"}],
         "mse_leads": [{"id": "lf-lead-1"}],
+        "mse_icp_configs": [{"selling_stage": "active"}],
     })
     anthropic_client = FakeAnthropic(responses=[SEQUENCE_JSON])
     leads = [{"id": "lf-lead-1", "first_name": "Alex", "title": "Broker", "company": "Sun Realty"}]
@@ -153,6 +161,74 @@ def test_lead_finder_source_uses_lead_finder_lead_id_and_standard_prompt():
     # lead_finder uses the standard system prompt -- no engager-specific fields.
     system_prompt = anthropic_client.messages.calls[0]["system"]
     assert "already engaged" not in system_prompt
+
+
+class TestSellingStageGate:
+    """Marketing stage-gate update (session 2026-09-15). A product whose
+    mse_icp_configs.selling_stage isn't 'active' must never get a DM
+    sequence written -- no LLM call, no mse_dm_sequences insert -- since
+    that row is exactly what the HITL approval queue reads."""
+
+    def test_warming_product_skips_write_entirely(self):
+        fake_db = FakeSupabase(responses={"mse_icp_configs": [{"selling_stage": "warming"}]})
+        anthropic_client = FakeAnthropic(responses=[SEQUENCE_JSON])
+        leads = [{"id": "lead-1", "first_name": "Jane", "title": "Team Lead", "company": "Acme"}]
+
+        result = run_o2_cold_dm_writer(
+            product_id="prod-warming", research_report=_research_report(), leads=leads,
+            campaign_build_id=None, lead_source="apollo",
+            supabase_client=fake_db, anthropic_client=anthropic_client,
+        )
+
+        assert result == {"status": "stage_gated", "sequences_written": 0}
+        assert anthropic_client.messages.calls == []
+        inserts = [c for c in fake_db.executed if c.table_name == "mse_dm_sequences" and c.calls[0][0] == "insert"]
+        assert inserts == []
+
+    def test_building_product_skips_write_entirely(self):
+        fake_db = FakeSupabase(responses={"mse_icp_configs": [{"selling_stage": "building"}]})
+        anthropic_client = FakeAnthropic(responses=[SEQUENCE_JSON])
+        leads = [{"id": "lead-1", "first_name": "Jane", "title": "Team Lead", "company": "Acme"}]
+
+        result = run_o2_cold_dm_writer(
+            product_id="prod-building", research_report=_research_report(), leads=leads,
+            campaign_build_id=None, lead_source="lead_finder",
+            supabase_client=fake_db, anthropic_client=anthropic_client,
+        )
+
+        assert result == {"status": "stage_gated", "sequences_written": 0}
+        assert anthropic_client.messages.calls == []
+
+    def test_no_icp_config_row_defaults_to_building_and_skips(self):
+        """No mse_icp_configs row at all for a product must fail closed
+        (skip), matching the column's own DB default, not be silently
+        treated as active."""
+        fake_db = FakeSupabase(responses={})
+        anthropic_client = FakeAnthropic(responses=[SEQUENCE_JSON])
+        leads = [{"id": "lead-1", "first_name": "Jane", "title": "Team Lead", "company": "Acme"}]
+
+        result = run_o2_cold_dm_writer(
+            product_id="prod-unknown", research_report=_research_report(), leads=leads,
+            campaign_build_id=None, lead_source="apollo",
+            supabase_client=fake_db, anthropic_client=anthropic_client,
+        )
+
+        assert result == {"status": "stage_gated", "sequences_written": 0}
+
+    def test_stage_gate_skip_is_audited(self):
+        fake_db = FakeSupabase(responses={"mse_icp_configs": [{"selling_stage": "warming"}]})
+        anthropic_client = FakeAnthropic(responses=[SEQUENCE_JSON])
+        leads = [{"id": "lead-1", "first_name": "Jane", "title": "Team Lead", "company": "Acme"}]
+
+        run_o2_cold_dm_writer(
+            product_id="prod-warming", research_report=_research_report(), leads=leads,
+            campaign_build_id=None, lead_source="apollo",
+            supabase_client=fake_db, anthropic_client=anthropic_client,
+        )
+
+        audits = [c for c in fake_db.executed if c.table_name == "audit_log" and c.calls[0][0] == "insert"]
+        assert audits[0]._payload["metadata"]["skipped"] == "selling_stage_not_active"
+        assert audits[0]._payload["metadata"]["selling_stage"] == "warming"
 
 
 def test_run_o2_for_linkedin_leads_pulls_lead_finder_leads_filtered_to_verified_email(monkeypatch):

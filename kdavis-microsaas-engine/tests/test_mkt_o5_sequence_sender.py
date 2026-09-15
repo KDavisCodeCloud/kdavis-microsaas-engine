@@ -44,6 +44,15 @@ def _seed_sequence(fake_db, status="approved_hitl", touch_1_sent_at=None, lead_i
         "status": status,
         "touch_1_sent_at": touch_1_sent_at,
     }]
+    # Marketing stage-gate update (session 2026-09-15): MKT-O5 now checks
+    # mse_icp_configs.selling_stage before sending -- every test in this
+    # file uses product_id "prod-1", so seeding one active row here covers
+    # all of them without needing per-test changes.
+    _seed_active_stage(fake_db, product_id="prod-1")
+
+
+def _seed_active_stage(fake_db, product_id="prod-1"):
+    fake_db.responses["mse_icp_configs"] = [{"product_id": product_id, "selling_stage": "active"}]
 
 
 def test_touch_1_sends_email_and_updates_status(fake_db):
@@ -108,6 +117,7 @@ def test_touch_1_stops_sending_once_daily_cap_reached(fake_db, monkeypatch):
         {"id": "seq-2", "lead_id": "lead-2", "product_id": "prod-1", "campaign_build_id": "camp-1",
          "touch_1": "msg 2", "touch_2": "follow 2", "status": "approved_hitl", "touch_1_sent_at": None},
     ]
+    _seed_active_stage(fake_db)
     fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
     monkeypatch.setenv("MARKETING_DAILY_SEND_CAP", "0")
     fake_resend = FakeResend()
@@ -215,6 +225,7 @@ def test_touch_1_resolves_lead_finder_lead_via_mse_leads(fake_db):
         "status": "approved_hitl",
         "touch_1_sent_at": None,
     }]
+    _seed_active_stage(fake_db)
     fake_db.responses["mse_leads"] = [{"email": "verified@example.com", "first_name": "Alex"}]
     fake_db.responses["mse_apollo_leads"] = []  # must not be consulted for this sequence
     fake_resend = FakeResend()
@@ -246,6 +257,7 @@ def test_touch_1_advances_lead_finder_lead_to_contacted_and_logs_activity(fake_d
         "status": "approved_hitl",
         "touch_1_sent_at": None,
     }]
+    _seed_active_stage(fake_db)
     fake_db.responses["mse_leads"] = [{"email": "verified@example.com", "first_name": "Alex"}]
     fake_resend = FakeResend()
 
@@ -281,6 +293,7 @@ def test_touch_2_logs_activity_without_changing_stage(fake_db):
         "status": "touch_1_sent",
         "touch_1_sent_at": (datetime.now(timezone.utc) - timedelta(days=4)).isoformat(),
     }]
+    _seed_active_stage(fake_db)
     fake_db.responses["mse_leads"] = [{"email": "verified@example.com", "first_name": "Alex"}]
     fake_resend = FakeResend()
 
@@ -325,6 +338,7 @@ def test_touch_1_fails_lead_finder_sequence_with_no_verified_email_on_lead(fake_
         "status": "approved_hitl",
         "touch_1_sent_at": None,
     }]
+    _seed_active_stage(fake_db)
     fake_db.responses["mse_leads"] = [{"email": None, "first_name": "Alex"}]
     fake_resend = FakeResend()
 
@@ -435,6 +449,7 @@ def test_touch_1_voids_expired_approvals_before_processing_the_batch(fake_db):
         "touch_1": "msg", "touch_2": "follow", "status": "approved_hitl", "touch_1_sent_at": None,
         "hitl_approved_expires_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
     }]
+    _seed_active_stage(fake_db)
     fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
 
     run_send_touch_1(supabase_client=fake_db, resend_client=FakeResend())
@@ -456,3 +471,52 @@ def test_run_sequence_sender_runs_both_stages(fake_db):
 
     assert "touch_1" in result and "touch_2" in result
     assert result["touch_1"]["sent"] == 1
+
+
+class TestSellingStageGateAtSendTime:
+    """Marketing stage-gate update (session 2026-09-15). MKT-O2 gates at
+    write time, but a product's stage can change after a sequence was
+    already approved and before it sends -- MKT-O5 re-checks at send
+    time so that later stage change still stops the send."""
+
+    def test_touch_1_skips_sequence_for_non_active_product(self, fake_db):
+        fake_db.responses["mse_dm_sequences"] = [{
+            "id": "seq-1", "lead_id": "lead-1", "product_id": "prod-warming", "campaign_build_id": "camp-1",
+            "touch_1": "msg", "touch_2": "follow", "status": "approved_hitl", "touch_1_sent_at": None,
+        }]
+        fake_db.responses["mse_icp_configs"] = [{"product_id": "prod-warming", "selling_stage": "warming"}]
+        fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+        fake_resend = FakeResend()
+
+        result = run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
+
+        assert result == {"sent": 0, "failed": [], "skipped": ["seq-1"]}
+        assert len(fake_resend.Emails.sent) == 0
+        audits = [c for c in fake_db.executed if c.table_name == "audit_log" and c.calls[0][0] == "insert"]
+        assert audits[0]._payload["metadata"]["skipped"] == "selling_stage_not_active"
+
+    def test_touch_2_skips_sequence_for_non_active_product(self, fake_db):
+        old_enough = (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
+        fake_db.responses["mse_dm_sequences"] = [{
+            "id": "seq-1", "lead_id": "lead-1", "product_id": "prod-building", "campaign_build_id": "camp-1",
+            "touch_1": "msg", "touch_2": "follow", "status": "touch_1_sent", "touch_1_sent_at": old_enough,
+        }]
+        fake_db.responses["mse_icp_configs"] = [{"product_id": "prod-building", "selling_stage": "building"}]
+        fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+        fake_resend = FakeResend()
+
+        result = run_send_touch_2(supabase_client=fake_db, resend_client=fake_resend)
+
+        assert result == {"sent": 0, "failed": [], "skipped": ["seq-1"]}
+        assert len(fake_resend.Emails.sent) == 0
+
+    def test_touch_1_sends_when_product_is_active(self, fake_db):
+        """Positive control -- proves the gate isn't just failing closed
+        by accident (e.g. an exception swallowed somewhere)."""
+        _seed_sequence(fake_db, status="approved_hitl")
+        fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+        fake_resend = FakeResend()
+
+        result = run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
+
+        assert result == {"sent": 1, "failed": [], "skipped": []}

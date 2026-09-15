@@ -130,6 +130,24 @@ def _write_audit(db, outcome: str, product_id: str, metadata: dict) -> None:
     }).execute()
 
 
+def _get_selling_stage(db, product_id: str) -> str:
+    """Marketing stage-gate update (session 2026-09-15). Mirrors
+    mse_icp_configs.selling_stage's own DB default ('building', the most
+    conservative option) when no config row exists at all for this
+    product, so a product with no ICP config yet never accidentally gets
+    treated as active."""
+    result = (
+        db.table("mse_icp_configs")
+        .select("selling_stage")
+        .eq("product_id", product_id)
+        .maybe_single()
+        .execute()
+    )
+    if result is None or not result.data:
+        return "building"
+    return result.data.get("selling_stage") or "building"
+
+
 def _write_dm_for_lead(lead: dict, research_context: dict, lead_source: str = "apollo", anthropic_client=None) -> dict:
     safe_lead = DataSanitizationShield.clean({
         "first_name": lead.get("first_name"),
@@ -180,8 +198,32 @@ def run_o2_cold_dm_writer(
     apollo lead comes from a MKT-ORCH campaign run) — None for every
     other source, and campaign_builds.dm_sequence_status is only touched
     when a campaign_build_id is actually given.
+
+    Stage-gated (session 2026-09-15): a product whose mse_icp_configs.
+    selling_stage isn't 'active' never gets a sequence written at all —
+    no LLM call, no mse_dm_sequences row, nothing to approve. This is the
+    real enforcement point for "nothing from a non-active product reaches
+    the HITL approval queue": that queue is just mse_dm_sequences WHERE
+    status='pending_hitl', read directly by the dashboard's own Supabase
+    client (see api/routers/outreach.py's module docstring) — gating the
+    write here is what keeps a warming/building product's rows out of it
+    in the first place, rather than filtering the read after the fact.
+    'warming' products may still get content-mention treatment elsewhere
+    in the marketing system; this function only ever handles outreach
+    sequences, so 'warming' is gated identically to 'building' here.
     """
     db = supabase_client if supabase_client is not None else get_supabase()
+
+    stage = _get_selling_stage(db, product_id)
+    if stage != "active":
+        _write_audit(db, "lose", product_id, {
+            "campaign_build_id": campaign_build_id, "lead_source": lead_source,
+            "skipped": "selling_stage_not_active", "selling_stage": stage, "lead_count": len(leads),
+        })
+        _emit_event(db, "dm_sequence_write_skipped_stage_gate", {
+            "product_id": product_id, "selling_stage": stage, "lead_count": len(leads),
+        })
+        return {"status": "stage_gated", "sequences_written": 0}
 
     _emit_event(db, "dm_sequence_write_started", {
         "product_id": product_id, "campaign_build_id": campaign_build_id,

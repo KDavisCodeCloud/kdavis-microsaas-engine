@@ -86,6 +86,22 @@ def _send_email(resend_client, to_email: str, subject: str, body: str) -> None:
     })
 
 
+def _get_active_product_ids(db) -> set:
+    """Marketing stage-gate update (session 2026-09-15). A sequence can be
+    approved while its product is active and then have the product move
+    to 'warming' or 'building' before touch_1/touch_2 actually sends —
+    MKT-O2 gates at write time, but this is the corresponding send-time
+    check so a stage change after approval still stops the send, not just
+    new sequence creation."""
+    result = db.table("mse_icp_configs").select("product_id,selling_stage").eq("selling_stage", "active").execute()
+    # Re-checks selling_stage in Python rather than trusting the .eq()
+    # filter alone -- belt-and-suspenders, and it's what makes this
+    # correct against tests/conftest.py's FakeSupabase too, which (by
+    # design, documented on several other tests in this file) returns
+    # the same canned rows regardless of which filter was applied.
+    return {row["product_id"] for row in (result.data or []) if row.get("selling_stage") == "active"}
+
+
 def _get_lead(db, seq: dict) -> Optional[dict]:
     # maybe_single().execute() returns bare None (not a Response with
     # .data=None) when zero rows match — a deleted/bad lead_id is exactly
@@ -199,12 +215,18 @@ def run_send_touch_1(supabase_client: Optional[Any] = None, resend_client: Optio
     sequences = db.table("mse_dm_sequences").select("*").eq("status", "approved_hitl").execute().data or []
     _emit_event(db, "sequence_send_touch1_started", {"count": len(sequences)})
 
+    active_product_ids = _get_active_product_ids(db)
     cap = daily_send_cap()
     sent_count = sends_today(db)
 
     sent, failed, skipped = 0, [], []
     for seq in sequences:
         try:
+            if seq.get("product_id") not in active_product_ids:
+                skipped.append(seq["id"])
+                _write_audit(db, "lose", seq.get("product_id", ""), {"sequence_id": seq["id"], "touch": 1, "skipped": "selling_stage_not_active"})
+                continue
+
             if sent_count >= cap:
                 skipped.append(seq["id"])
                 _write_audit(db, "lose", seq.get("product_id", ""), {"sequence_id": seq["id"], "touch": 1, "skipped": "daily_cap"})
@@ -269,12 +291,18 @@ def run_send_touch_2(supabase_client: Optional[Any] = None, resend_client: Optio
     )
     _emit_event(db, "sequence_send_touch2_started", {"count": len(sequences)})
 
+    active_product_ids = _get_active_product_ids(db)
     cap = daily_send_cap()
     sent_count = sends_today(db)
 
     sent, failed, skipped = 0, [], []
     for seq in sequences:
         try:
+            if seq.get("product_id") not in active_product_ids:
+                skipped.append(seq["id"])
+                _write_audit(db, "lose", seq.get("product_id", ""), {"sequence_id": seq["id"], "touch": 2, "skipped": "selling_stage_not_active"})
+                continue
+
             if sent_count >= cap:
                 skipped.append(seq["id"])
                 _write_audit(db, "lose", seq.get("product_id", ""), {"sequence_id": seq["id"], "touch": 2, "skipped": "daily_cap"})
