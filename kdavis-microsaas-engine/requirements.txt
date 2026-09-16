@@ -1,6 +1,7 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 supabase==2.7.4
+asyncpg==0.29.0  # core/migrate.py's migration runner (2026-09-16, GAPS.md #15 in kdavis-agentic-platform) -- same pin as that repo's own db/migrate.py, already proven against this same Supabase pooler
 anthropic==0.116.0
 langchain-anthropic==0.2.4
 langgraph==0.2.28

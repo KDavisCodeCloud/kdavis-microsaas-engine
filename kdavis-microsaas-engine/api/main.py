@@ -1,10 +1,34 @@
+import logging
 import os
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api.middleware.tenant_context import tenant_context_middleware
 from api.routers import events, milestones, digest, pipeline, mcp, reengagement, research, stripe, ceo, marketing, outreach, factory, linkedin_intake, leads, brevo, product_marketing, dist_attribution, dist, thd_consulting
 
-app = FastAPI(title="Micro SaaS Engine API", version="0.1.0")
+log = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Applies supabase/migrations/*.sql before this app serves any
+    # traffic -- see core/migrate.py's own docstring and GAPS.md #15 in
+    # kdavis-agentic-platform (the other half of that same gap: this repo
+    # had no migration runner at all until now, confirmed twice in one
+    # session by migrations sitting applied-in-code but not-in-database
+    # for a day-plus). DATABASE_URL must be set on this service for the
+    # app to boot -- deliberately fails closed (no try/except here) if
+    # it's missing or a migration's own SQL raises, matching db/migrate.py's
+    # "a loud crashed deploy is correct" reasoning in the sibling repo.
+    database_url = os.environ["DATABASE_URL"]
+    from core.migrate import run_pending_migrations
+    await run_pending_migrations(database_url)
+    log.info("[Startup] Migrations complete, serving traffic")
+    yield
+
+
+app = FastAPI(title="Micro SaaS Engine API", version="0.1.0", lifespan=lifespan)
 
 # Registration order matters: Starlette prepends each added middleware, so
 # whichever is added LAST ends up OUTERMOST at runtime. CORSMiddleware must
