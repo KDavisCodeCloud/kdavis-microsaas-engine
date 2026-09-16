@@ -24,12 +24,18 @@ const SOURCE_LABEL: Record<DmSequence["lead_source"], string> = {
   apollo: "Email",
   linkedin_manual: "LinkedIn",
   linkedin_engager: "LinkedIn · Engager",
+  // Infra-consulting ICP (thdagentic-consulting) -- distinct label so these
+  // read differently at a glance from every other product's outreach; the
+  // amber/red tone below (vs. the calmer teal/green of the others) is the
+  // "needs a closer personal read before approval" signal Kelvin asked for.
+  job_posting_signal: "⚠ CONSULTING · Infra",
 };
 
 const SOURCE_COLOR: Record<DmSequence["lead_source"], string> = {
   apollo: "#5eead4",
   linkedin_manual: "#e8963f",
   linkedin_engager: "#6fce8f",
+  job_posting_signal: "#e05d5d",
 };
 
 type SequencePreview = { touch_1: string; touch_2: string; has_footer: boolean };
@@ -267,6 +273,12 @@ export default function OutreachPage() {
                           </div>
                           <p className="text-[12px] whitespace-pre-line" style={{ color: "#aab4bd" }}>{touch2}</p>
                         </div>
+                        {seq.touch_3 && (
+                          <div className="rounded-[8px] p-3 mt-1.5" style={{ backgroundColor: "#10151b", border: "1px solid #1c222b" }}>
+                            <p className="text-[10px] font-mono uppercase mb-1" style={{ color: "#5b6673" }}>Touch 3 (+5 days, only if no reply)</p>
+                            <p className="text-[12px] whitespace-pre-line" style={{ color: "#aab4bd" }}>{seq.touch_3}</p>
+                          </div>
+                        )}
                       </>
                     );
                   })()}
@@ -353,6 +365,12 @@ export default function OutreachPage() {
                       <p className="text-[10px] font-mono uppercase mb-1" style={{ color: "#5b6673" }}>Touch 2 (+3 days)</p>
                       <p className="text-[12px]" style={{ color: "#aab4bd" }}>{seq.touch_2}</p>
                     </div>
+                    {seq.touch_3 && (
+                      <div className="rounded-[8px] p-3 mt-1.5" style={{ backgroundColor: "#10151b", border: "1px solid #1c222b" }}>
+                        <p className="text-[10px] font-mono uppercase mb-1" style={{ color: "#5b6673" }}>Touch 3 (+5 days, only if no reply)</p>
+                        <p className="text-[12px]" style={{ color: "#aab4bd" }}>{seq.touch_3}</p>
+                      </div>
+                    )}
                   </div>
                 );
               })

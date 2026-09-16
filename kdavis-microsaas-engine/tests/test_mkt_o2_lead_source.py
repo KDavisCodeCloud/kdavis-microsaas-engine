@@ -252,8 +252,12 @@ def test_run_o2_for_linkedin_leads_pulls_lead_finder_leads_filtered_to_verified_
         product_id="prod-1", research_report=_research_report(), supabase_client=fake_db,
     )
 
-    assert calls == ["lead_finder"]
-    assert result["by_source"] == {"linkedin_engager": 0, "linkedin_manual": 0, "lead_finder": 1}
+    # job_posting_signal (added 2026-09-16) also fires here, same
+    # FakeSupabase-doesn't-enforce-.eq()-filters limitation this test's own
+    # comment already documents for lead_finder above -- both queries hit
+    # the same seeded "mse_leads" response.
+    assert calls == ["lead_finder", "job_posting_signal"]
+    assert result["by_source"] == {"linkedin_engager": 0, "linkedin_manual": 0, "lead_finder": 1, "job_posting_signal": 1}
 
     lead_finder_select = [c for c in fake_db.executed if c.table_name == "mse_leads" and c.calls[0][0] == "select"][0]
     assert ("email_status", "verified") in lead_finder_select._filters
@@ -285,6 +289,7 @@ def test_run_o2_for_linkedin_leads_processes_engagers_before_manual(monkeypatch)
     )
 
     assert calls == ["linkedin_engager", "linkedin_manual"]
-    # lead_finder is 0 here since mse_leads isn't seeded in this test --
-    # run_o2_for_linkedin_leads now also checks it (2026-08-14).
-    assert result["by_source"] == {"linkedin_engager": 1, "linkedin_manual": 1, "lead_finder": 0}
+    # lead_finder/job_posting_signal are both 0 here since mse_leads isn't
+    # seeded in this test -- run_o2_for_linkedin_leads now also checks both
+    # (2026-08-14 and 2026-09-16 respectively).
+    assert result["by_source"] == {"linkedin_engager": 1, "linkedin_manual": 1, "lead_finder": 0, "job_posting_signal": 0}

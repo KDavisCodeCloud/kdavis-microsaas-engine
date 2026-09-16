@@ -146,11 +146,17 @@ export interface DmSequence {
   id: string;
   lead_id: string | null;
   linkedin_lead_id: string | null;
-  lead_source: "apollo" | "linkedin_manual" | "linkedin_engager";
+  // "job_posting_signal" added 2026-09-16 for the infra-consulting ICP
+  // (mse_products.slug='thdagentic-consulting') -- see
+  // agents/marketing/mkt_o2_cold_dm_writer.py's _INFRA_CONSULTING_SYSTEM_PROMPT.
+  lead_source: "apollo" | "linkedin_manual" | "linkedin_engager" | "job_posting_signal";
   product_id: string;
   campaign_build_id: string | null;
   touch_1: string;
   touch_2: string;
+  // Only ever populated for lead_source="job_posting_signal" (3-touch
+  // sequence) -- null/undefined for every other source's 2-touch rows.
+  touch_3?: string | null;
   status: string;
   hitl_approved_by: string | null;
   hitl_approved_at: string | null;

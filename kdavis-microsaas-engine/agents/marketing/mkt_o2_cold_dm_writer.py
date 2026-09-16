@@ -91,6 +91,68 @@ Rules, non-negotiable:
 - touch_1 leads with the interaction reference then the pain signal; touch_2 leads with the specific
   dollar value prop"""
 
+# Infra-consulting ICP (mse_products.slug='thdagentic-consulting', see
+# thd_lead_scout.py's INFRA_CONSULTING_ICP), added 2026-09-16. Genuinely
+# different shape from the standard 2-touch sequence above: 3 touches,
+# shorter and more direct, a LinkedIn connection-request note as touch_1
+# (not a cold DM opener), and no "make more money + dollar amount" framing
+# — Kelvin's own spec for this ICP never asked for a dollar figure, and
+# CTOs/VPs Eng evaluating infrastructure consulting aren't the same buyer
+# psychology as the dollar-value-prop framing was written for.
+#
+# Career-history grounding: Kelvin's real, documented background is Boeing,
+# Honeywell Aerospace, and currently CorVel (kdavis-agentic-platform's own
+# MKT-LI1 system prompt: "career history... is texture that proves pattern
+# recognition and real-world engineering depth... not his identity or his
+# headline"). No specific dollar figure, project, or quantified outcome at
+# any of these three companies is documented anywhere in this platform —
+# only the real fact that the work was aerospace-grade/regulated-industry
+# production infrastructure. The prompt below is deliberately worded to
+# reference THAT real credibility signal, not to invent a specific "outcome
+# delivered" the way Kelvin's task description phrased it — inventing one
+# would violate this platform's own repeated "never fabricate a metric or
+# outcome" rule (see e.g. kdavis-agentic-platform's Pillar 5 content rules).
+TOUCH_1_INFRA_MAX_CHARS = 300  # LinkedIn's own connection-note character cap
+TOUCH_2_INFRA_MAX_CHARS = 500
+TOUCH_3_INFRA_MAX_CHARS = 300
+
+_INFRA_CONSULTING_SYSTEM_PROMPT = f"""You are writing a 3-touch LinkedIn cold outreach sequence for Kelvin \
+Davis, a senior cloud/platform engineer, targeting a CTO/VP Engineering/Engineering Director/Head of \
+Platform/Founder+CTO at a funded startup (20-200 employees) about infrastructure consulting work. Return \
+ONLY a single JSON object — no prose, no markdown fences — matching exactly this schema:
+
+{{
+  "touch_1": str,
+  "touch_2": str,
+  "touch_3": str
+}}
+
+touch_1 = LinkedIn CONNECTION REQUEST NOTE, max {TOUCH_1_INFRA_MAX_CHARS} chars. Reference something \
+specific and real about their company or a real post they made (from the lead/signal context given below \
+— never invent a detail not present in it). One sentence on what Kelvin does. No pitch, no ask.
+
+touch_2 = sent 3 days after the connection request is accepted, max {TOUCH_2_INFRA_MAX_CHARS} chars. Lead \
+with a specific observation about their infrastructure challenge, inferred ONLY from the real signal given \
+(a job posting they're running, their funding stage, or real LinkedIn content) — never invent a challenge \
+the signal doesn't support. Then exactly one sentence establishing credibility: Kelvin's background \
+includes production infrastructure work in aerospace and other regulated environments (Boeing, Honeywell \
+Aerospace) and currently at CorVel — reference this as real professional context, NEVER invent a specific \
+dollar figure, project name, or quantified outcome at any of these companies, since none is documented or \
+true to claim. End with exactly this soft ask, adapted naturally to fit the message: "Worth a 20-minute \
+call?"
+
+touch_3 = sent 5 days after touch_2 ONLY IF there has been no reply, max {TOUCH_3_INFRA_MAX_CHARS} chars. \
+One line. A different angle than touch_2 — reference the specific pain point again, briefly. This is the \
+final message in the sequence; no further follow-up happens after it, so the ask here is the last one.
+
+Rules, non-negotiable:
+- Never use dollar-amount/"make more money" framing — this ICP is not that buyer
+- Every specific claim about the company (their hiring, their funding, their content) must come from the \
+signal context given below — never invented
+- No hype words ("game-changing", "revolutionary"), no generic flattery, no "I noticed you..." as a \
+generic opener with nothing specific behind it
+- The sequence stops entirely if they reply at any point — touch_3 is only ever sent on zero reply"""
+
 
 def _analyze(system: str, user: str, anthropic_client=None, max_tokens: int = 1024) -> str:
     if anthropic_client is None:
@@ -178,6 +240,37 @@ def _write_dm_for_lead(lead: dict, research_context: dict, lead_source: str = "a
     }
 
 
+def _write_infra_consulting_dm_for_lead(lead: dict, anthropic_client=None) -> dict:
+    """lead_source='job_posting_signal' only (mse_products.slug=
+    'thdagentic-consulting') — separate return shape (touch_1/2/3) from
+    _write_dm_for_lead's 2-touch contract above, so this never has to be
+    force-fit into the standard sequence's schema. No research_context
+    argument: this ICP's signal (the job posting itself) already lives on
+    the lead row (job_posting_title/job_posting_url), unlike the dollar-
+    value-prop sequence's dependency on a separate research_report."""
+    safe_lead = DataSanitizationShield.clean({
+        "company": lead.get("company"),
+        "title": lead.get("title"),
+        "job_posting_title": lead.get("job_posting_title"),
+        "job_posting_url": lead.get("job_posting_url"),
+    })
+
+    user_prompt = (
+        f"Lead + real signal context (never invent anything beyond this):\n{json.dumps(safe_lead, indent=2)}\n\n"
+        "Write the 3-touch sequence now."
+    )
+    raw = _analyze(_INFRA_CONSULTING_SYSTEM_PROMPT, user_prompt, anthropic_client=anthropic_client, max_tokens=1024)
+    parsed = json.loads(_strip_fences(raw))
+    if not isinstance(parsed, dict) or not all(k in parsed for k in ("touch_1", "touch_2", "touch_3")):
+        raise ValueError(f"MKT-O2 (infra consulting) expected {{touch_1, touch_2, touch_3}}, got: {raw[:200]}")
+
+    return {
+        "touch_1": str(parsed["touch_1"])[:TOUCH_1_INFRA_MAX_CHARS],
+        "touch_2": str(parsed["touch_2"])[:TOUCH_2_INFRA_MAX_CHARS],
+        "touch_3": str(parsed["touch_3"])[:TOUCH_3_INFRA_MAX_CHARS],
+    }
+
+
 def run_o2_cold_dm_writer(
     product_id: str,
     research_report: dict,
@@ -238,7 +331,12 @@ def run_o2_cold_dm_writer(
     rows: list[dict] = []
     try:
         for lead in leads:
-            sequence = _write_dm_for_lead(lead, research_context, lead_source=lead_source, anthropic_client=anthropic_client)
+            if lead_source == "job_posting_signal":
+                # Infra-consulting ICP -- 3-touch, no research_report dependency
+                # (see _write_infra_consulting_dm_for_lead's own docstring).
+                sequence = _write_infra_consulting_dm_for_lead(lead, anthropic_client=anthropic_client)
+            else:
+                sequence = _write_dm_for_lead(lead, research_context, lead_source=lead_source, anthropic_client=anthropic_client)
             row = {
                 "product_id": product_id,
                 "campaign_build_id": campaign_build_id,
@@ -246,9 +344,13 @@ def run_o2_cold_dm_writer(
                 "touch_1": sequence["touch_1"],
                 "touch_2": sequence["touch_2"],
             }
+            if "touch_3" in sequence:
+                row["touch_3"] = sequence["touch_3"]
             if lead_source == "apollo":
                 row["lead_id"] = lead["id"]
-            elif lead_source == "lead_finder":
+            elif lead_source in ("lead_finder", "job_posting_signal"):
+                # Both sources live in mse_leads -- same lead-reference column,
+                # migration 20260916000045 didn't need a new one.
                 row["lead_finder_lead_id"] = lead["id"]
             else:
                 row["linkedin_lead_id"] = lead["id"]
@@ -259,11 +361,18 @@ def run_o2_cold_dm_writer(
             if not insert_result.data:
                 raise RuntimeError("Insert into mse_dm_sequences returned no data")
 
-        if lead_source == "lead_finder":
+        if lead_source in ("lead_finder", "job_posting_signal"):
             # Two-stage lifecycle unique to mse_leads (see module
             # docstring): a sequence now exists for each of these leads,
             # advance them out of "nothing drafted yet" so MKT-O2's own
             # next run doesn't redraft a sequence that already exists.
+            # job_posting_signal reuses 'pending_email' too despite the
+            # name -- there's no separate "drafted, awaiting manual
+            # LinkedIn send" status in mse_leads' vocabulary, and nothing
+            # auto-acts on this value; the actual send-vs-manual decision
+            # is api/routers/outreach.py's approve endpoint routing this
+            # sequence's OWN status to 'approved_manual' (not
+            # 'approved_hitl'), which MKT-O5 already never polls for.
             for lead in leads:
                 db.table("mse_leads").update({"status": "pending_email"}).eq("id", lead["id"]).execute()
 
@@ -364,6 +473,35 @@ def run_o2_for_linkedin_leads(
         by_source["lead_finder"] = result["sequences_written"]
     else:
         by_source["lead_finder"] = 0
+
+    # job_posting_signal (infra-consulting ICP, added 2026-09-16) -- deliberately
+    # its own query, NOT folded into lead_finder_leads above: these leads are
+    # LinkedIn-DM-intended and typically have no verified (or any) email, so
+    # lead_finder_leads' email_status='verified' filter would otherwise
+    # correctly-but-silently exclude every one of them forever. research_report
+    # isn't passed through to the writer for this source (see
+    # _write_infra_consulting_dm_for_lead's own docstring for why).
+    job_posting_leads = (
+        db.table("mse_leads")
+        .select("*")
+        .eq("product_id", product_id)
+        .eq("status", "pending_dm")
+        .eq("source", "job_posting_signal")
+        .order("created_at")
+        .execute()
+        .data
+        or []
+    )
+    if job_posting_leads:
+        result = run_o2_cold_dm_writer(
+            product_id=product_id, research_report=research_report, leads=job_posting_leads,
+            campaign_build_id=None, lead_source="job_posting_signal",
+            supabase_client=db, anthropic_client=anthropic_client,
+        )
+        total_written += result["sequences_written"]
+        by_source["job_posting_signal"] = result["sequences_written"]
+    else:
+        by_source["job_posting_signal"] = 0
 
     return {"status": "ready_for_hitl", "sequences_written": total_written, "by_source": by_source}
 

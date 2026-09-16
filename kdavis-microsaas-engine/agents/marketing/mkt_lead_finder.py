@@ -41,9 +41,11 @@ responsible for their own quota awareness.
 """
 
 import logging
+import re
 from dataclasses import asdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from core.email_finder import find_email, verify_email
 from core.supabase_client import get_supabase
@@ -377,3 +379,224 @@ def run(research_report: dict, campaign_build: dict) -> dict:
     build.
     """
     return run_lead_finder_for_product(product_id=campaign_build["product_id"])
+
+
+# ── Job posting signal scraper, added 2026-09-16 for the infra-consulting
+# ICP (mse_products.slug='thdagentic-consulting', see agents/marketing/
+# thd_lead_scout.py's INFRA_CONSULTING_ICP for the human-readable ICP
+# definition and supabase/migrations/20260916000045_consulting_infra_icp.sql
+# for the real mse_icp_configs row this reads) ─────────────────────────────
+#
+# Google Custom Search ONLY — explicitly NOT LinkedIn Jobs or Indeed
+# scraping. Kelvin's own confirmation (2026-09-16): reuse the existing
+# compliant pattern (scrapers/google_search.py, official Google API, never
+# scraped HTML) rather than overriding this repo's standing "no LinkedIn/
+# Indeed scraping" rule (this module's own docstring above, and
+# thd_lead_scout.py's identical rule). A search_template like
+# '"{title}" hiring "cloud architect" {location}' surfaces public job-board
+# and company-career-page results indexed by Google — the same lawful
+# mechanism GoogleSearchScraper already uses for every other MSE product,
+# just aimed at job-posting-shaped queries instead of people-search queries.
+#
+# Honest limitation, stated plainly rather than faked: Google's Custom
+# Search JSON API does not reliably return a structured job-posting date or
+# employee count for arbitrary third-party pages. This extracts both on a
+# best-effort basis (schema.org/OpenGraph metatags when Google's response
+# includes them, or an explicit date/relative-time phrase in the result
+# snippet) and never fabricates either — a candidate whose posting date
+# can't be determined is dropped rather than assumed recent, since the
+# spec's own "last 30 days" filter cannot be honestly applied to a result
+# with no ascertainable date.
+
+_RELATIVE_DAYS_RE = re.compile(r"(\d+)\s+day", re.IGNORECASE)
+_RELATIVE_HOURS_RE = re.compile(r"\d+\s+hour", re.IGNORECASE)
+_ABS_DATE_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
+_EMPLOYEE_RANGE_RE = re.compile(r"\b(\d{1,4})\s*[-–to]{1,3}\s*(\d{1,4})\s+employees\b", re.IGNORECASE)
+
+JOB_POSTING_QUERY_TITLES = ["cloud architect", "platform engineer", "AI infrastructure", "MLOps engineer", "cloud migration"]
+
+
+def _extract_posting_date(item: dict, today: date) -> Optional[date]:
+    """Best-effort only -- see module-level note above. Checks (in order):
+    an explicit ISO date in the snippet, Google's own metatags block for a
+    published/updated-time field, then a relative "N days/hours ago" phrase
+    in the title+snippet (Google surfaces this for pages with schema.org
+    JobPosting markup). Returns None — never a guess — if nothing usable
+    is found."""
+    text = f"{item.get('title', '')} {item.get('snippet', '')}"
+
+    abs_match = _ABS_DATE_RE.search(text)
+    if abs_match:
+        try:
+            return datetime.strptime(abs_match.group(1), "%Y-%m-%d").date()
+        except ValueError:
+            pass
+
+    metatags = (item.get("pagemap", {}) or {}).get("metatags") or [{}]
+    for key in ("article:published_time", "datepublished", "og:updated_time"):
+        raw = metatags[0].get(key) if metatags else None
+        if raw:
+            try:
+                return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+            except ValueError:
+                continue
+
+    if _RELATIVE_HOURS_RE.search(text):
+        return today
+    days_match = _RELATIVE_DAYS_RE.search(text)
+    if days_match:
+        return today - timedelta(days=int(days_match.group(1)))
+
+    return None
+
+
+def _extract_employee_estimate(item: dict) -> Optional[str]:
+    text = f"{item.get('title', '')} {item.get('snippet', '')}"
+    match = _EMPLOYEE_RANGE_RE.search(text)
+    return f"{match.group(1)}-{match.group(2)}" if match else None
+
+
+def _company_name_from_result(item: dict, domain: str) -> str:
+    title = item.get("title", "")
+    for sep in (" - ", " | ", " hiring ", " is hiring "):
+        if sep in title:
+            return title.split(sep)[0].strip()
+    return domain
+
+
+def find_job_posting_signals(
+    product_id: str,
+    icp_config: dict,
+    max_age_days: int = 30,
+    google_daily_query_count: int = 0,
+    _stats: Optional[dict] = None,
+) -> list[dict]:
+    """
+    Pure "given this ICP, find job-posting signals" function — does not
+    write to mse_leads itself (same contract as find_leads above), so it
+    stays independently testable/CLI-callable. Returns dicts shaped for
+    mse_leads' job_posting_url/job_posting_title/job_posting_date columns
+    (migration 20260916000045), source='job_posting_signal'.
+
+    Filters: posting date within max_age_days (a candidate with no
+    ascertainable date is dropped, not assumed-recent — see module note);
+    company size under icp_config['max_company_size'] when an estimate was
+    actually extracted from the result (undetectable size is NOT treated
+    as a disqualifier — the spec's own "under 200 if detectable" wording).
+    """
+    scraper = GoogleSearchScraper(daily_query_count=google_daily_query_count)
+    if not scraper.api_key or not scraper.engine_id:
+        if _stats is not None:
+            _stats["raw_found"] = 0
+            _stats["google_daily_query_count"] = google_daily_query_count
+        return []  # skip gracefully -- same shape as every other Google-CSE-gated path in this codebase
+
+    titles = icp_config.get("job_titles") or [""]
+    locations = icp_config.get("locations") or [""]
+    templates = icp_config.get("search_templates") or [
+        f'"{{title}}" hiring "{kw}" {{location}}' for kw in JOB_POSTING_QUERY_TITLES
+    ]
+    max_company_size = icp_config.get("max_company_size")
+    today = date.today()
+    cutoff = today - timedelta(days=max_age_days)
+
+    raw_found = 0
+    seen_urls: set[str] = set()
+    signals: list[dict] = []
+
+    for template in templates:
+        for title in titles:
+            for location in locations:
+                items = scraper._search(template.format(title=title, location=location))
+                raw_found += len(items)
+                for item in items:
+                    link = item.get("link", "")
+                    if not link or link in seen_urls:
+                        continue
+                    seen_urls.add(link)
+
+                    posting_date = _extract_posting_date(item, today)
+                    if posting_date is None or posting_date < cutoff:
+                        continue
+
+                    employee_estimate = _extract_employee_estimate(item)
+                    if employee_estimate and max_company_size:
+                        try:
+                            upper = int(employee_estimate.split("-")[1])
+                            if upper > max_company_size:
+                                continue
+                        except (ValueError, IndexError):
+                            pass
+
+                    domain = urlparse(link).netloc.replace("www.", "")
+                    signals.append({
+                        "product_id": product_id,
+                        "company": _company_name_from_result(item, domain),
+                        "domain": domain,
+                        "title": title,
+                        "source": "job_posting_signal",
+                        "location": location,
+                        "job_posting_url": link,
+                        "job_posting_title": title,
+                        "job_posting_date": posting_date.isoformat(),
+                        "confidence_score": 0.5,
+                    })
+
+    if _stats is not None:
+        _stats["raw_found"] = raw_found
+        _stats["duplicates"] = raw_found - len(signals)
+        _stats["google_daily_query_count"] = scraper.daily_query_count
+
+    return signals
+
+
+def run_job_posting_signal_finder(product_id: str, supabase_client: Optional[Any] = None) -> dict:
+    """
+    Production entry point — pulls this product's mse_icp_configs row (same
+    lookup as run_lead_finder_for_product), runs find_job_posting_signals
+    with real cross-call Google-quota bookkeeping, dedupes against existing
+    mse_leads (by job_posting_url — a company can post more than one
+    matching role, and re-surfacing the same posting isn't a new signal),
+    and writes qualified rows to mse_leads with source='job_posting_signal'.
+    Raises if no ICP config exists for this product, same fail-fast
+    contract as run_lead_finder_for_product.
+    """
+    db = supabase_client if supabase_client is not None else get_supabase()
+
+    icp_config = _get_icp_config(db, product_id)
+    if not icp_config:
+        raise RuntimeError(f"MKT-LEAD-FINDER (job postings) found no ICP config for product {product_id}")
+
+    existing_urls = {
+        r["job_posting_url"]
+        for r in (db.table("mse_leads").select("job_posting_url").eq("source", "job_posting_signal").execute().data or [])
+        if r.get("job_posting_url")
+    }
+
+    already_used_today = _todays_google_query_count(db)
+    stats: dict = {}
+    signals = find_job_posting_signals(product_id, icp_config, google_daily_query_count=already_used_today, _stats=stats)
+    deduped = [s for s in signals if s["job_posting_url"] not in existing_urls]
+
+    queries_this_run = max(0, stats.get("google_daily_query_count", already_used_today) - already_used_today)
+    if queries_this_run:
+        _emit_event(db, "google_cse_queries_used", {"date": date.today().isoformat(), "count": queries_this_run})
+
+    inserted = []
+    if deduped:
+        insert_result = db.table("mse_leads").insert(deduped).execute()
+        if not insert_result.data:
+            raise RuntimeError("Insert into mse_leads (job_posting_signal) returned no data")
+        inserted = insert_result.data
+        _log_found_activities(db, product_id, inserted)
+
+    _write_audit(db, "win", product_id, {
+        "raw_found": stats.get("raw_found", 0), "duplicates_within_run": stats.get("duplicates", 0),
+        "duplicates_vs_existing": len(signals) - len(deduped), "leads_written": len(inserted),
+    })
+    _emit_event(db, "job_posting_signal_run_completed", {"product_id": product_id, "leads_written": len(inserted)})
+
+    return {
+        "status": "complete", "leads_found": len(signals), "leads_written": len(inserted),
+        "raw_found": stats.get("raw_found", 0),
+    }
