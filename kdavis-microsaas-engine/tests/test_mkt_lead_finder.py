@@ -129,6 +129,103 @@ def test_run_lead_finder_for_product_writes_leads_and_completes_run():
     assert activity_inserts[0]._payload[0]["product_id"] == "prod-1"
 
 
+def test_find_leads_reports_progress_for_search_and_verify_phases():
+    """2026-09-17: Kelvin reported no status bar for a running lead-finder
+    job -- on_progress is the mechanism that fixes it. One call per
+    location scraped, one call per deduplicated lead verified, plus a
+    final 'Finalizing results' call at 100%."""
+    fake_db = FakeSupabase(responses={"mse_leads": []})
+    icp_two_locations = {**VALID_ICP_CONFIG, "locations": ["Phoenix AZ", "Tucson AZ"]}
+    raw = [
+        RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="google_search", location="Phoenix AZ"),
+        RawLead(name="John Smith", linkedin_url="https://linkedin.com/in/johnsmith", source="google_search", location="Tucson AZ"),
+    ]
+    calls = []
+
+    with patch.object(mlf, "GoogleSearchScraper", return_value=_fake_google_scraper(raw)), \
+         patch.object(mlf, "get_vertical_scraper", return_value=None):
+        mlf.find_leads("prod-1", icp_two_locations, limit=10, supabase_client=fake_db, on_progress=lambda *a: calls.append(a))
+
+    # Search phase: one call per location, completed 0..locations-1, total pinned at 2 (locations_count)
+    search_calls = [c for c in calls if "Searching" in c[0]]
+    assert len(search_calls) == 2
+    assert search_calls[0] == (search_calls[0][0], 0, 2)
+    assert search_calls[1] == (search_calls[1][0], 1, 2)
+    assert "Phoenix AZ" in search_calls[0][0]
+
+    # Verify phase: one call per deduplicated lead (2 raw leads, no existing dupes -> 2),
+    # completed continues counting up from locations_count (2), total becomes 2 + 2 = 4
+    verify_calls = [c for c in calls if "Verifying" in c[0]]
+    assert len(verify_calls) == 2
+    assert verify_calls[0] == (verify_calls[0][0], 2, 4)
+    assert verify_calls[1] == (verify_calls[1][0], 3, 4)
+
+    # Final call signals 100% complete
+    assert calls[-1] == ("Finalizing results", 4, 4)
+
+
+def test_run_lead_finder_for_product_writes_progress_columns_and_clears_them_on_completion():
+    fake_db = FakeSupabase(responses={
+        "mse_icp_configs": [{"product_id": "prod-1", **VALID_ICP_CONFIG}],
+        "mse_lead_finder_runs": [{"id": "run-1"}],
+        "mse_leads": [{"id": "lead-row-1"}],
+        "usage_events": [],
+    })
+    raw = [RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="google_search", location="Phoenix AZ")]
+
+    with patch.object(mlf, "GoogleSearchScraper", return_value=_fake_google_scraper(raw)), \
+         patch.object(mlf, "get_vertical_scraper", return_value=None):
+        mlf.run_lead_finder_for_product("prod-1", supabase_client=fake_db)
+
+    run_updates = [c for c in fake_db.executed if c.table_name == "mse_lead_finder_runs" and c.calls[0][0] == "update"]
+
+    # At least one progress write happened with real step/total data before completion
+    progress_updates = [c for c in run_updates if "current_step" in c._payload and c._payload.get("current_step")]
+    assert progress_updates, "expected at least one live progress write during the run"
+    assert progress_updates[0]._payload["total_steps"] is not None
+    assert "estimated_seconds_remaining" in progress_updates[0]._payload
+
+    # Final update clears the in-progress fields so the UI doesn't show a stale step
+    final_update = run_updates[-1]._payload
+    assert final_update["status"] == "complete"
+    assert final_update["current_step"] is None
+    assert final_update["estimated_seconds_remaining"] == 0
+
+
+def test_run_lead_finder_for_product_tolerates_a_progress_write_failure():
+    """A transient DB hiccup on a progress write must never abort a
+    real, otherwise-successful lead-finding run -- same discipline as the
+    existing activity-logging-failure tolerance test below."""
+    class BrokenProgressDB(FakeSupabase):
+        def table(self, name):
+            if name == "mse_lead_finder_runs":
+                real = super().table(name)
+                orig_update = real.update
+
+                def flaky_update(payload):
+                    if payload.get("current_step") == "Starting search…":
+                        raise Exception("simulated transient write failure")
+                    return orig_update(payload)
+
+                real.update = flaky_update
+                return real
+            return super().table(name)
+
+    fake_db = BrokenProgressDB(responses={
+        "mse_icp_configs": [{"product_id": "prod-1", **VALID_ICP_CONFIG}],
+        "mse_lead_finder_runs": [{"id": "run-1"}],
+        "mse_leads": [{"id": "lead-row-1"}],
+        "usage_events": [],
+    })
+    raw = [RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="google_search", location="Phoenix AZ")]
+
+    with patch.object(mlf, "GoogleSearchScraper", return_value=_fake_google_scraper(raw)), \
+         patch.object(mlf, "get_vertical_scraper", return_value=None):
+        result = mlf.run_lead_finder_for_product("prod-1", supabase_client=fake_db)
+
+    assert result["status"] == "complete"
+
+
 def test_run_lead_finder_for_product_tolerates_activity_logging_failure():
     """A real lead-finder run that already succeeded at finding and saving
     leads must not fail just because best-effort mse_activities logging

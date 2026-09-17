@@ -44,18 +44,26 @@ import logging
 import re
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
-from core.email_finder import find_email, verify_email
+from core.email_finder import MAX_VERIFY_DELAY_SECONDS, MIN_VERIFY_DELAY_SECONDS, find_email, verify_email
 from core.supabase_client import get_supabase
 from scrapers.base import RawLead
-from scrapers.google_search import GoogleSearchScraper
+from scrapers.google_search import MAX_DELAY_SECONDS, MAX_QUERIES_PER_CALL, MIN_DELAY_SECONDS, GoogleSearchScraper
 from scrapers.verticals import get_vertical_scraper
 
 log = logging.getLogger(__name__)
 
 AGENT_ID = "mkt-lead-finder"
+
+# Rough per-step time estimates for the ETA shown on the dashboard's
+# progress bar -- not exact (the search phase's real cost depends on how
+# many queries a location actually needs, capped by MAX_QUERIES_PER_CALL),
+# but grounded in this module's own real, already-enforced delay
+# constants rather than a guess.
+_AVG_VERIFY_SECONDS = (MIN_VERIFY_DELAY_SECONDS + MAX_VERIFY_DELAY_SECONDS) / 2
+_AVG_SEARCH_SECONDS_PER_LOCATION = MAX_QUERIES_PER_CALL * ((MIN_DELAY_SECONDS + MAX_DELAY_SECONDS) / 2)
 
 _CONFIDENCE_BY_STATUS = {"verified": 0.95, "catch_all": 0.4, "unverified": 0.2, "invalid": 0.0}
 
@@ -199,6 +207,7 @@ def find_leads(
     supabase_client: Optional[Any] = None,
     google_daily_query_count: int = 0,
     _stats: Optional[dict] = None,
+    on_progress: Optional[Callable[[str, int, int], None]] = None,
 ) -> list[dict]:
     """
     Runs Source 1 (Google Custom Search) and, if icp_config["vertical"]
@@ -216,6 +225,19 @@ def find_leads(
     run_lead_finder_for_product can capture bookkeeping (dedup count,
     Google quota usage) without widening this function's public return
     type past `list[dict]`.
+
+    `on_progress`, if given, is called as (current_step_text,
+    completed_steps, total_steps) at two granularities: once per location
+    scraped (search phase — the finest granularity that doesn't require
+    threading a callback through every concrete BaseScraper subclass's
+    fixed `scrape(location, filters)` interface, which all 5 scrapers in
+    this package implement identically), and once per deduplicated lead
+    verified (verify phase — this is where a real run actually spends
+    most of its wall-clock time, per core/email_finder.py's 3-6 minute
+    per-lead SMTP throttle, so per-lead granularity matters most here).
+    `total_steps` is revised upward once verification starts, since the
+    real count of leads to verify isn't knowable until search + dedup
+    finish.
     """
     db = supabase_client if supabase_client is not None else get_supabase()
 
@@ -226,13 +248,22 @@ def find_leads(
         "exclude_domains": icp_config.get("exclude_domains") or [],
         "license_types": icp_config.get("license_types"),
     }
+    titles = filters["job_titles"] or [""]
 
     google_scraper = GoogleSearchScraper(daily_query_count=google_daily_query_count)
     vertical_scraper_cls = get_vertical_scraper(icp_config.get("vertical", ""))
     vertical_scraper = vertical_scraper_cls() if vertical_scraper_cls else None
 
+    search_steps = max(len(locations), 1)
+
     raw_leads: list[RawLead] = []
-    for location in locations:
+    for i, location in enumerate(locations):
+        if on_progress:
+            on_progress(
+                f"Searching {location} for {len(titles)} job title(s) across "
+                f"{len(filters['search_templates'])} query pattern(s)",
+                i, search_steps,
+            )
         raw_leads.extend(google_scraper.scrape(location, filters))
         if vertical_scraper:
             raw_leads.extend(vertical_scraper.scrape(location, filters))
@@ -243,7 +274,19 @@ def find_leads(
     deduped, duplicate_count = _dedupe_raw_leads(raw_leads, existing_urls, existing_emails)
     deduped = deduped[:limit]
 
-    leads = [_verify_lead_email(asdict(raw), db) for raw in deduped]
+    verify_total = search_steps + len(deduped)
+    leads: list[dict] = []
+    for i, raw in enumerate(deduped):
+        if on_progress:
+            label = raw.company or raw.domain or raw.name or raw.linkedin_url or "candidate"
+            on_progress(
+                f"Verifying email {i + 1}/{len(deduped)} — {label}",
+                search_steps + i, verify_total,
+            )
+        leads.append(_verify_lead_email(asdict(raw), db))
+
+    if on_progress:
+        on_progress("Finalizing results", verify_total, verify_total)
 
     if _stats is not None:
         _stats["raw_found"] = len(raw_leads)
@@ -294,6 +337,37 @@ def run_lead_finder_for_product(product_id: str, supabase_client: Optional[Any] 
 
     _emit_event(db, "lead_finder_run_started", {"product_id": product_id, "run_id": run_id})
 
+    locations_count = max(len(icp_config.get("locations") or []), 1)
+
+    def _on_progress(step_text: str, completed: int, total: int) -> None:
+        # Best-effort -- a progress-write failure must never abort the
+        # actual lead-finding work. In the search phase (completed <
+        # locations_count) the ETA is a rough upper bound from this
+        # module's own enforced delay constants; once verification starts
+        # it's a real estimate from a known remaining count and a known
+        # per-lead delay range.
+        remaining_search_locations = max(locations_count - completed, 0)
+        remaining_verify_leads = max(total - locations_count, 0) - max(completed - locations_count, 0)
+        eta_seconds = None
+        if completed < locations_count:
+            eta_seconds = round(
+                remaining_search_locations * _AVG_SEARCH_SECONDS_PER_LOCATION
+                + max(total - locations_count, 0) * _AVG_VERIFY_SECONDS
+            )
+        elif total > locations_count:
+            eta_seconds = round(max(remaining_verify_leads, 0) * _AVG_VERIFY_SECONDS)
+        try:
+            db.table("mse_lead_finder_runs").update({
+                "current_step": step_text,
+                "completed_steps": completed,
+                "total_steps": total,
+                "estimated_seconds_remaining": eta_seconds,
+            }).eq("id", run_id).execute()
+        except Exception:
+            log.warning("MKT-LEAD-FINDER progress write failed for run %s -- continuing", run_id, exc_info=True)
+
+    _on_progress("Starting search…", 0, locations_count)
+
     try:
         limit = icp_config.get("target_count") or 100
         already_used_today = _todays_google_query_count(db)
@@ -302,6 +376,7 @@ def run_lead_finder_for_product(product_id: str, supabase_client: Optional[Any] 
         leads = find_leads(
             product_id, icp_config, limit=limit, supabase_client=db,
             google_daily_query_count=already_used_today, _stats=stats,
+            on_progress=_on_progress,
         )
 
         queries_this_run = max(0, stats.get("google_daily_query_count", already_used_today) - already_used_today)
@@ -343,6 +418,8 @@ def run_lead_finder_for_product(product_id: str, supabase_client: Optional[Any] 
             "leads_deduplicated": stats.get("duplicates", 0),
             "sources_used": sources_used,
             "status": "complete",
+            "current_step": None,
+            "estimated_seconds_remaining": 0,
         }).eq("id", run_id).execute()
 
     except Exception as exc:
@@ -350,6 +427,8 @@ def run_lead_finder_for_product(product_id: str, supabase_client: Optional[Any] 
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "status": "failed",
             "error_message": str(exc),
+            "current_step": None,
+            "estimated_seconds_remaining": None,
         }).eq("id", run_id).execute()
         _write_audit(db, "lose", product_id, {"run_id": run_id, "error": str(exc)})
         _emit_event(db, "lead_finder_run_failed", {"product_id": product_id, "run_id": run_id, "error": str(exc)})
