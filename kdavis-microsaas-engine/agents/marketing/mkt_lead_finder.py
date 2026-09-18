@@ -1,20 +1,29 @@
 """
 MKT Lead Finder — self-hosted lead generation, replacing MKT-O1 (Apollo)
 as the lead source for every MSE product (2026-08-14). Apollo's Free plan
-has no API access; this is a zero-ongoing-cost replacement built entirely
-on public data: Google Custom Search results (scrapers/google_search.py,
-official API, never scraped HTML — see that module's own docstring for
-why), public professional license/registry databases per vertical
-(scrapers/verticals/), and email pattern-finding + real SMTP verification
-(core/email_finder.py). No paid third-party lead API, no LinkedIn
-scraping.
+has no API access; this is a low/zero-ongoing-cost replacement built
+entirely on public data: Brave Search API results
+(scrapers/brave_search.py, official API, never scraped HTML — see that
+module's own docstring for why), public professional license/registry
+databases per vertical (scrapers/verticals/), and email pattern-finding +
+real SMTP verification (core/email_finder.py). No paid third-party lead
+API, no LinkedIn scraping.
+
+Source 1 was Google Custom Search until 2026-09-18 — switched to Brave
+because Google discontinued "Search the entire web" for newly-created
+Programmable Search Engines (2026-01-20), which broke this module's
+open-web queries (arbitrary company/brokerage/directory sites, not a
+fixed domain list). See
+knowledge/sops/devops/2026-09-18-brave-search-replaces-google-cse.md
+(kdavis-agentic-platform) for the full incident record.
+scrapers/google_search.py is kept, dormant, not deleted.
 
 Orchestrates all applicable sources for a product's ICP config
 (mse_icp_configs), deduplicates against existing mse_leads rows (by
 linkedin_url and email — same app-level + real-constraint belt-and-
 suspenders pattern as mkt_li_intake.py), verifies every found email via
 core/email_finder.py, and writes results to mse_leads. Only Sources 1 and
-2 (google_search, real_estate_db) land here — LinkedIn-collected leads
+2 (brave_search, real_estate_db) land here — LinkedIn-collected leads
 (manual CSV, engager lists) still go through mse_linkedin_leads via
 mkt_li_intake.py, unchanged. Only the lead source changes; the rest of the
 pipeline (MKT-O2, MKT-O5, HITL, CAN-SPAM) stays exactly as-is.
@@ -26,18 +35,21 @@ leads) can take multiple hours if many candidates need more than one
 pattern tried. This is why n8n/lead_finder_workflow.json runs weekly, not
 on a live user-facing request path.
 
-Google Custom Search quota tracking: GoogleSearchScraper enforces the
-always-free 100 queries/day cap, but that cap is a per-API-key daily
-total shared across every product a weekly run touches — an in-process
-counter reset to 0 on every function call would let multiple products in
-the same n8n run collectively exceed it. run_lead_finder_for_product
-(the real production entry point) reads today's already-used count from
-usage_events before scraping and writes back the new total after, so the
-cap is actually enforced across an entire day's calls, not just within
-one. find_leads (the lower-level "run once against this ICP" utility,
-useful standalone/in tests) does not do this cross-call bookkeeping —
-callers hitting it directly and repeatedly in the same day are
-responsible for their own quota awareness.
+Brave Search quota tracking: BraveSearchScraper enforces a hard
+FREE_TIER_MONTHLY_CAP (900, under Brave's ~1,000-query/~$5 monthly free
+credit — Brave retired its free tier in Feb 2026, this is real money
+past the cap, not just a courtesy limit like Google's was), but that cap
+is a per-API-key MONTHLY total shared across every product a weekly run
+touches — an in-process counter reset to 0 on every function call would
+let multiple products in the same n8n run collectively exceed it.
+run_lead_finder_for_product (the real production entry point) reads this
+month's already-used count from usage_events before scraping and writes
+back the new total after, so the cap is actually enforced across an
+entire month's calls, not just within one. find_leads (the lower-level
+"run once against this ICP" utility, useful standalone/in tests) does
+not do this cross-call bookkeeping — callers hitting it directly and
+repeatedly in the same month are responsible for their own quota
+awareness.
 """
 
 import logging
@@ -50,7 +62,7 @@ from urllib.parse import urlparse
 from core.email_finder import MAX_VERIFY_DELAY_SECONDS, MIN_VERIFY_DELAY_SECONDS, find_email, verify_email
 from core.supabase_client import get_supabase
 from scrapers.base import RawLead
-from scrapers.google_search import MAX_DELAY_SECONDS, MAX_QUERIES_PER_CALL, MIN_DELAY_SECONDS, GoogleSearchScraper
+from scrapers.brave_search import MAX_DELAY_SECONDS, MAX_QUERIES_PER_CALL, MIN_DELAY_SECONDS, BraveSearchScraper
 from scrapers.verticals import get_vertical_scraper
 
 log = logging.getLogger(__name__)
@@ -156,12 +168,14 @@ def _dedupe_raw_leads(raw_leads: list[RawLead], existing_urls: set, existing_ema
     return unique, duplicates
 
 
-def _todays_google_query_count(db) -> int:
-    today = date.today().isoformat()
+def _this_months_brave_query_count(db) -> int:
+    """Monthly, not daily -- Brave's free credit (see module docstring)
+    resets on a monthly billing cycle, unlike Google CSE's old daily quota."""
+    this_month = date.today().isoformat()[:7]  # "YYYY-MM"
     rows = (
         db.table("usage_events")
         .select("metadata")
-        .eq("event_type", "google_cse_queries_used")
+        .eq("event_type", "brave_search_queries_used")
         .execute()
         .data
         or []
@@ -169,7 +183,7 @@ def _todays_google_query_count(db) -> int:
     return sum(
         row["metadata"].get("count", 0)
         for row in rows
-        if isinstance(row.get("metadata"), dict) and row["metadata"].get("date") == today
+        if isinstance(row.get("metadata"), dict) and row["metadata"].get("month") == this_month
     )
 
 
@@ -205,12 +219,12 @@ def find_leads(
     icp_config: dict,
     limit: int = 100,
     supabase_client: Optional[Any] = None,
-    google_daily_query_count: int = 0,
+    brave_query_count: int = 0,
     _stats: Optional[dict] = None,
     on_progress: Optional[Callable[[str, int, int], None]] = None,
 ) -> list[dict]:
     """
-    Runs Source 1 (Google Custom Search) and, if icp_config["vertical"]
+    Runs Source 1 (Brave Search) and, if icp_config["vertical"]
     has one registered, Source 2 (a public license/registry database
     scraper) across every location in the ICP config, deduplicates the
     raw results against each other and against every existing mse_leads
@@ -221,9 +235,9 @@ def find_leads(
     callable on its own (including from tests) without a run-tracking row.
 
     `_stats`, if given, is written into with {"raw_found", "duplicates",
-    "google_daily_query_count"} — an internal escape hatch so
+    "brave_query_count"} — an internal escape hatch so
     run_lead_finder_for_product can capture bookkeeping (dedup count,
-    Google quota usage) without widening this function's public return
+    Brave quota usage) without widening this function's public return
     type past `list[dict]`.
 
     `on_progress`, if given, is called as (current_step_text,
@@ -250,7 +264,7 @@ def find_leads(
     }
     titles = filters["job_titles"] or [""]
 
-    google_scraper = GoogleSearchScraper(daily_query_count=google_daily_query_count)
+    brave_scraper = BraveSearchScraper(query_count=brave_query_count)
     vertical_scraper_cls = get_vertical_scraper(icp_config.get("vertical", ""))
     vertical_scraper = vertical_scraper_cls() if vertical_scraper_cls else None
 
@@ -264,7 +278,7 @@ def find_leads(
                 f"{len(filters['search_templates'])} query pattern(s)",
                 i, search_steps,
             )
-        raw_leads.extend(google_scraper.scrape(location, filters))
+        raw_leads.extend(brave_scraper.scrape(location, filters))
         if vertical_scraper:
             raw_leads.extend(vertical_scraper.scrape(location, filters))
         if len(raw_leads) >= limit:
@@ -291,7 +305,7 @@ def find_leads(
     if _stats is not None:
         _stats["raw_found"] = len(raw_leads)
         _stats["duplicates"] = duplicate_count
-        _stats["google_daily_query_count"] = google_scraper.daily_query_count
+        _stats["brave_query_count"] = brave_scraper.query_count
 
     return leads
 
@@ -300,7 +314,7 @@ def run_lead_finder_for_product(product_id: str, supabase_client: Optional[Any] 
     """
     Production entry point (n8n/lead_finder_workflow.json and
     POST /marketing/leads/find both call this). Pulls this product's
-    ICP config, runs find_leads with real cross-call Google-quota
+    ICP config, runs find_leads with real cross-call Brave-quota
     bookkeeping (see module docstring), writes results to mse_leads,
     records a mse_lead_finder_runs row start-to-finish, and returns a
     summary. Raises if no ICP config exists for this product — nothing
@@ -370,18 +384,18 @@ def run_lead_finder_for_product(product_id: str, supabase_client: Optional[Any] 
 
     try:
         limit = icp_config.get("target_count") or 100
-        already_used_today = _todays_google_query_count(db)
+        already_used_this_month = _this_months_brave_query_count(db)
 
         stats: dict = {}
         leads = find_leads(
             product_id, icp_config, limit=limit, supabase_client=db,
-            google_daily_query_count=already_used_today, _stats=stats,
+            brave_query_count=already_used_this_month, _stats=stats,
             on_progress=_on_progress,
         )
 
-        queries_this_run = max(0, stats.get("google_daily_query_count", already_used_today) - already_used_today)
+        queries_this_run = max(0, stats.get("brave_query_count", already_used_this_month) - already_used_this_month)
         if queries_this_run:
-            _emit_event(db, "google_cse_queries_used", {"date": date.today().isoformat(), "count": queries_this_run})
+            _emit_event(db, "brave_search_queries_used", {"month": date.today().isoformat()[:7], "count": queries_this_run})
 
         rows = []
         for lead in leads:
@@ -466,21 +480,22 @@ def run(research_report: dict, campaign_build: dict) -> dict:
 # definition and supabase/migrations/20260916000045_consulting_infra_icp.sql
 # for the real mse_icp_configs row this reads) ─────────────────────────────
 #
-# Google Custom Search ONLY — explicitly NOT LinkedIn Jobs or Indeed
-# scraping. Kelvin's own confirmation (2026-09-16): reuse the existing
-# compliant pattern (scrapers/google_search.py, official Google API, never
-# scraped HTML) rather than overriding this repo's standing "no LinkedIn/
+# Brave Search ONLY — explicitly NOT LinkedIn Jobs or Indeed
+# scraping. Kelvin's own confirmation (2026-09-16, and the 2026-09-18
+# Google->Brave switch that followed): reuse the existing compliant
+# pattern (scrapers/brave_search.py, official Brave API, never scraped
+# HTML) rather than overriding this repo's standing "no LinkedIn/
 # Indeed scraping" rule (this module's own docstring above, and
 # thd_lead_scout.py's identical rule). A search_template like
 # '"{title}" hiring "cloud architect" {location}' surfaces public job-board
-# and company-career-page results indexed by Google — the same lawful
-# mechanism GoogleSearchScraper already uses for every other MSE product,
+# and company-career-page results indexed by Brave — the same lawful
+# mechanism BraveSearchScraper already uses for every other MSE product,
 # just aimed at job-posting-shaped queries instead of people-search queries.
 #
-# Honest limitation, stated plainly rather than faked: Google's Custom
-# Search JSON API does not reliably return a structured job-posting date or
-# employee count for arbitrary third-party pages. This extracts both on a
-# best-effort basis (schema.org/OpenGraph metatags when Google's response
+# Honest limitation, stated plainly rather than faked: Brave's Search API
+# does not reliably return a structured job-posting date or employee count
+# for arbitrary third-party pages (nor did Google's). This extracts both on a
+# best-effort basis (schema.org/OpenGraph metatags when the response
 # includes them, or an explicit date/relative-time phrase in the result
 # snippet) and never fabricates either — a candidate whose posting date
 # can't be determined is dropped rather than assumed recent, since the
@@ -497,11 +512,12 @@ JOB_POSTING_QUERY_TITLES = ["cloud architect", "platform engineer", "AI infrastr
 
 def _extract_posting_date(item: dict, today: date) -> Optional[date]:
     """Best-effort only -- see module-level note above. Checks (in order):
-    an explicit ISO date in the snippet, Google's own metatags block for a
-    published/updated-time field, then a relative "N days/hours ago" phrase
-    in the title+snippet (Google surfaces this for pages with schema.org
-    JobPosting markup). Returns None — never a guess — if nothing usable
-    is found."""
+    an explicit ISO date in the snippet, item.get("pagemap") metatags for a
+    published/updated-time field (a Google CSE-specific field -- always
+    empty for Brave results, kept only because it's a free, harmless check
+    and scrapers/google_search.py is still dormant-not-deleted), then a
+    relative "N days/hours ago" phrase in the title+snippet. Returns
+    None — never a guess — if nothing usable is found."""
     text = f"{item.get('title', '')} {item.get('snippet', '')}"
 
     abs_match = _ABS_DATE_RE.search(text)
@@ -547,7 +563,7 @@ def find_job_posting_signals(
     product_id: str,
     icp_config: dict,
     max_age_days: int = 30,
-    google_daily_query_count: int = 0,
+    brave_query_count: int = 0,
     _stats: Optional[dict] = None,
 ) -> list[dict]:
     """
@@ -563,12 +579,12 @@ def find_job_posting_signals(
     actually extracted from the result (undetectable size is NOT treated
     as a disqualifier — the spec's own "under 200 if detectable" wording).
     """
-    scraper = GoogleSearchScraper(daily_query_count=google_daily_query_count)
-    if not scraper.api_key or not scraper.engine_id:
+    scraper = BraveSearchScraper(query_count=brave_query_count)
+    if not scraper.api_key:
         if _stats is not None:
             _stats["raw_found"] = 0
-            _stats["google_daily_query_count"] = google_daily_query_count
-        return []  # skip gracefully -- same shape as every other Google-CSE-gated path in this codebase
+            _stats["brave_query_count"] = brave_query_count
+        return []  # skip gracefully -- same shape as every other quota/credential-gated path in this codebase
 
     titles = icp_config.get("job_titles") or [""]
     locations = icp_config.get("locations") or [""]
@@ -624,7 +640,7 @@ def find_job_posting_signals(
     if _stats is not None:
         _stats["raw_found"] = raw_found
         _stats["duplicates"] = raw_found - len(signals)
-        _stats["google_daily_query_count"] = scraper.daily_query_count
+        _stats["brave_query_count"] = scraper.query_count
 
     return signals
 
@@ -633,7 +649,7 @@ def run_job_posting_signal_finder(product_id: str, supabase_client: Optional[Any
     """
     Production entry point — pulls this product's mse_icp_configs row (same
     lookup as run_lead_finder_for_product), runs find_job_posting_signals
-    with real cross-call Google-quota bookkeeping, dedupes against existing
+    with real cross-call Brave-quota bookkeeping, dedupes against existing
     mse_leads (by job_posting_url — a company can post more than one
     matching role, and re-surfacing the same posting isn't a new signal),
     and writes qualified rows to mse_leads with source='job_posting_signal'.
@@ -652,14 +668,14 @@ def run_job_posting_signal_finder(product_id: str, supabase_client: Optional[Any
         if r.get("job_posting_url")
     }
 
-    already_used_today = _todays_google_query_count(db)
+    already_used_this_month = _this_months_brave_query_count(db)
     stats: dict = {}
-    signals = find_job_posting_signals(product_id, icp_config, google_daily_query_count=already_used_today, _stats=stats)
+    signals = find_job_posting_signals(product_id, icp_config, brave_query_count=already_used_this_month, _stats=stats)
     deduped = [s for s in signals if s["job_posting_url"] not in existing_urls]
 
-    queries_this_run = max(0, stats.get("google_daily_query_count", already_used_today) - already_used_today)
+    queries_this_run = max(0, stats.get("brave_query_count", already_used_this_month) - already_used_this_month)
     if queries_this_run:
-        _emit_event(db, "google_cse_queries_used", {"date": date.today().isoformat(), "count": queries_this_run})
+        _emit_event(db, "brave_search_queries_used", {"month": date.today().isoformat()[:7], "count": queries_this_run})
 
     inserted = []
     if deduped:

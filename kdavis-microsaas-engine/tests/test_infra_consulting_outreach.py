@@ -28,25 +28,24 @@ INFRA_ICP_CONFIG = {
 }
 
 
-class _FakeGoogleSearchScraper:
-    """Stands in for scrapers.google_search.GoogleSearchScraper -- only
-    the surface find_job_posting_signals actually touches (api_key/
-    engine_id presence, .daily_query_count, ._search(query))."""
+class _FakeBraveSearchScraper:
+    """Stands in for scrapers.brave_search.BraveSearchScraper -- only
+    the surface find_job_posting_signals actually touches (api_key
+    presence, .query_count, ._search(query))."""
 
-    def __init__(self, items_by_query=None, daily_query_count=0):
+    def __init__(self, items_by_query=None, query_count=0):
         self.api_key = "fake-key"
-        self.engine_id = "fake-engine"
-        self.daily_query_count = daily_query_count
+        self.query_count = query_count
         self._items_by_query = items_by_query or {}
         self.queries = []
 
     def _search(self, query):
         self.queries.append(query)
-        self.daily_query_count += 1
+        self.query_count += 1
         return self._items_by_query.get(query, [])
 
 
-def _cse_item(link, title="Acme Corp - Careers", snippet="", pagemap=None):
+def _search_item(link, title="Acme Corp - Careers", snippet="", pagemap=None):
     item = {"link": link, "title": title, "snippet": snippet}
     if pagemap:
         item["pagemap"] = pagemap
@@ -56,22 +55,21 @@ def _cse_item(link, title="Acme Corp - Careers", snippet="", pagemap=None):
 # ── find_job_posting_signals ──────────────────────────────────────────────
 
 def test_no_api_key_returns_empty_gracefully(monkeypatch):
-    class _NoKeyScraper(_FakeGoogleSearchScraper):
+    class _NoKeyScraper(_FakeBraveSearchScraper):
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
             self.api_key = None
-            self.engine_id = None
 
-    monkeypatch.setattr(lead_finder_module, "GoogleSearchScraper", _NoKeyScraper)
+    monkeypatch.setattr(lead_finder_module, "BraveSearchScraper", _NoKeyScraper)
     signals = find_job_posting_signals("prod-1", INFRA_ICP_CONFIG)
     assert signals == []
 
 
 def test_relative_days_ago_within_cutoff_is_kept(monkeypatch):
     query = '"CTO" hiring "cloud architect" United States'
-    item = _cse_item("https://boards.greenhouse.io/acme/jobs/123", snippet="Posted 5 days ago")
-    scraper = _FakeGoogleSearchScraper(items_by_query={query: [item]})
-    monkeypatch.setattr(lead_finder_module, "GoogleSearchScraper", lambda **kw: scraper)
+    item = _search_item("https://boards.greenhouse.io/acme/jobs/123", snippet="Posted 5 days ago")
+    scraper = _FakeBraveSearchScraper(items_by_query={query: [item]})
+    monkeypatch.setattr(lead_finder_module, "BraveSearchScraper", lambda **kw: scraper)
 
     signals = find_job_posting_signals("prod-1", INFRA_ICP_CONFIG)
     assert len(signals) == 1
@@ -83,9 +81,9 @@ def test_relative_days_ago_within_cutoff_is_kept(monkeypatch):
 
 def test_no_ascertainable_date_is_dropped_not_assumed_recent(monkeypatch):
     query = '"CTO" hiring "cloud architect" United States'
-    item = _cse_item("https://example.com/jobs/1", snippet="Great opportunity, apply now")
-    scraper = _FakeGoogleSearchScraper(items_by_query={query: [item]})
-    monkeypatch.setattr(lead_finder_module, "GoogleSearchScraper", lambda **kw: scraper)
+    item = _search_item("https://example.com/jobs/1", snippet="Great opportunity, apply now")
+    scraper = _FakeBraveSearchScraper(items_by_query={query: [item]})
+    monkeypatch.setattr(lead_finder_module, "BraveSearchScraper", lambda **kw: scraper)
 
     signals = find_job_posting_signals("prod-1", INFRA_ICP_CONFIG)
     assert signals == []
@@ -93,9 +91,9 @@ def test_no_ascertainable_date_is_dropped_not_assumed_recent(monkeypatch):
 
 def test_stale_posting_beyond_max_age_is_dropped(monkeypatch):
     query = '"CTO" hiring "cloud architect" United States'
-    item = _cse_item("https://example.com/jobs/1", snippet="Posted 90 days ago")
-    scraper = _FakeGoogleSearchScraper(items_by_query={query: [item]})
-    monkeypatch.setattr(lead_finder_module, "GoogleSearchScraper", lambda **kw: scraper)
+    item = _search_item("https://example.com/jobs/1", snippet="Posted 90 days ago")
+    scraper = _FakeBraveSearchScraper(items_by_query={query: [item]})
+    monkeypatch.setattr(lead_finder_module, "BraveSearchScraper", lambda **kw: scraper)
 
     signals = find_job_posting_signals("prod-1", INFRA_ICP_CONFIG, max_age_days=30)
     assert signals == []
@@ -103,9 +101,9 @@ def test_stale_posting_beyond_max_age_is_dropped(monkeypatch):
 
 def test_employee_count_over_max_is_excluded_when_detected(monkeypatch):
     query = '"CTO" hiring "cloud architect" United States'
-    item = _cse_item("https://example.com/jobs/1", snippet="Posted 2 days ago. 800-1000 employees.")
-    scraper = _FakeGoogleSearchScraper(items_by_query={query: [item]})
-    monkeypatch.setattr(lead_finder_module, "GoogleSearchScraper", lambda **kw: scraper)
+    item = _search_item("https://example.com/jobs/1", snippet="Posted 2 days ago. 800-1000 employees.")
+    scraper = _FakeBraveSearchScraper(items_by_query={query: [item]})
+    monkeypatch.setattr(lead_finder_module, "BraveSearchScraper", lambda **kw: scraper)
 
     signals = find_job_posting_signals("prod-1", INFRA_ICP_CONFIG)
     assert signals == []
@@ -115,9 +113,9 @@ def test_undetectable_employee_count_is_not_treated_as_disqualifying(monkeypatch
     # Spec's own wording: "company size under 200 if detectable" -- an
     # undetected size must never silently exclude an otherwise-real candidate.
     query = '"CTO" hiring "cloud architect" United States'
-    item = _cse_item("https://example.com/jobs/1", snippet="Posted 2 days ago.")
-    scraper = _FakeGoogleSearchScraper(items_by_query={query: [item]})
-    monkeypatch.setattr(lead_finder_module, "GoogleSearchScraper", lambda **kw: scraper)
+    item = _search_item("https://example.com/jobs/1", snippet="Posted 2 days ago.")
+    scraper = _FakeBraveSearchScraper(items_by_query={query: [item]})
+    monkeypatch.setattr(lead_finder_module, "BraveSearchScraper", lambda **kw: scraper)
 
     signals = find_job_posting_signals("prod-1", INFRA_ICP_CONFIG)
     assert len(signals) == 1
@@ -125,9 +123,9 @@ def test_undetectable_employee_count_is_not_treated_as_disqualifying(monkeypatch
 
 def test_duplicate_urls_within_run_are_deduped(monkeypatch):
     query = '"CTO" hiring "cloud architect" United States'
-    item = _cse_item("https://example.com/jobs/1", snippet="Posted 1 day ago")
-    scraper = _FakeGoogleSearchScraper(items_by_query={query: [item, item]})
-    monkeypatch.setattr(lead_finder_module, "GoogleSearchScraper", lambda **kw: scraper)
+    item = _search_item("https://example.com/jobs/1", snippet="Posted 1 day ago")
+    scraper = _FakeBraveSearchScraper(items_by_query={query: [item, item]})
+    monkeypatch.setattr(lead_finder_module, "BraveSearchScraper", lambda **kw: scraper)
 
     signals = find_job_posting_signals("prod-1", INFRA_ICP_CONFIG)
     assert len(signals) == 1
@@ -137,9 +135,9 @@ def test_duplicate_urls_within_run_are_deduped(monkeypatch):
 
 def test_run_job_posting_signal_finder_writes_to_mse_leads(monkeypatch):
     query = '"CTO" hiring "cloud architect" United States'
-    item = _cse_item("https://boards.greenhouse.io/acme/jobs/1", title="Acme Corp - Careers", snippet="Posted 1 day ago")
-    scraper = _FakeGoogleSearchScraper(items_by_query={query: [item]})
-    monkeypatch.setattr(lead_finder_module, "GoogleSearchScraper", lambda **kw: scraper)
+    item = _search_item("https://boards.greenhouse.io/acme/jobs/1", title="Acme Corp - Careers", snippet="Posted 1 day ago")
+    scraper = _FakeBraveSearchScraper(items_by_query={query: [item]})
+    monkeypatch.setattr(lead_finder_module, "BraveSearchScraper", lambda **kw: scraper)
 
     db = FakeSupabase(responses={
         "mse_icp_configs": [{"product_id": "prod-1", **INFRA_ICP_CONFIG}],

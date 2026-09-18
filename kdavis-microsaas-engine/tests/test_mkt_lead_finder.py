@@ -20,18 +20,18 @@ VALID_ICP_CONFIG = {
 }
 
 
-def _fake_google_scraper(leads):
+def _fake_brave_scraper(leads):
     scraper = MagicMock()
     scraper.scrape.return_value = leads
-    scraper.daily_query_count = 1
+    scraper.query_count = 1
     return scraper
 
 
 def test_find_leads_returns_leads_for_a_valid_icp_config():
     fake_db = FakeSupabase(responses={"mse_leads": []})
-    raw = [RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="google_search", location="Phoenix AZ")]
+    raw = [RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="brave_search", location="Phoenix AZ")]
 
-    with patch.object(mlf, "GoogleSearchScraper", return_value=_fake_google_scraper(raw)), \
+    with patch.object(mlf, "BraveSearchScraper", return_value=_fake_brave_scraper(raw)), \
          patch.object(mlf, "get_vertical_scraper", return_value=None), \
          patch.object(mlf, "verify_email", return_value=None), \
          patch.object(mlf, "find_email", return_value=EmailResult(email=None, pattern_used=None, verification_status="unverified", confidence_score=0.0)):
@@ -40,7 +40,7 @@ def test_find_leads_returns_leads_for_a_valid_icp_config():
     assert len(leads) == 1
     assert leads[0]["name"] == "Jane Doe"
     assert leads[0]["linkedin_url"] == "https://linkedin.com/in/janedoe"
-    assert leads[0]["source"] == "google_search"
+    assert leads[0]["source"] == "brave_search"
 
 
 def test_find_leads_deduplicates_same_linkedin_url_against_existing_leads():
@@ -48,11 +48,11 @@ def test_find_leads_deduplicates_same_linkedin_url_against_existing_leads():
         "mse_leads": [{"linkedin_url": "https://linkedin.com/in/janedoe", "email": None}],
     })
     raw = [
-        RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="google_search", location="Phoenix AZ"),
-        RawLead(name="John Smith", linkedin_url="https://linkedin.com/in/johnsmith", source="google_search", location="Phoenix AZ"),
+        RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="brave_search", location="Phoenix AZ"),
+        RawLead(name="John Smith", linkedin_url="https://linkedin.com/in/johnsmith", source="brave_search", location="Phoenix AZ"),
     ]
 
-    with patch.object(mlf, "GoogleSearchScraper", return_value=_fake_google_scraper(raw)), \
+    with patch.object(mlf, "BraveSearchScraper", return_value=_fake_brave_scraper(raw)), \
          patch.object(mlf, "get_vertical_scraper", return_value=None):
         leads = mlf.find_leads("prod-1", VALID_ICP_CONFIG, limit=10, supabase_client=fake_db)
 
@@ -65,11 +65,11 @@ def test_find_leads_deduplicates_same_linkedin_url_against_existing_leads():
 def test_find_leads_deduplicates_within_the_same_batch():
     fake_db = FakeSupabase(responses={"mse_leads": []})
     raw = [
-        RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="google_search", location="Phoenix AZ"),
+        RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="brave_search", location="Phoenix AZ"),
         RawLead(name="Jane Doe Again", linkedin_url="https://linkedin.com/in/janedoe", source="real_estate_db", location="Phoenix AZ"),
     ]
 
-    with patch.object(mlf, "GoogleSearchScraper", return_value=_fake_google_scraper(raw)), \
+    with patch.object(mlf, "BraveSearchScraper", return_value=_fake_brave_scraper(raw)), \
          patch.object(mlf, "get_vertical_scraper", return_value=None):
         leads = mlf.find_leads("prod-1", VALID_ICP_CONFIG, limit=10, supabase_client=fake_db)
 
@@ -84,7 +84,7 @@ def test_find_leads_uses_vertical_scraper_when_configured():
     vertical_scraper.scrape.return_value = [vertical_lead]
     vertical_scraper_cls = MagicMock(return_value=vertical_scraper)
 
-    with patch.object(mlf, "GoogleSearchScraper", return_value=_fake_google_scraper([])), \
+    with patch.object(mlf, "BraveSearchScraper", return_value=_fake_brave_scraper([])), \
          patch.object(mlf, "get_vertical_scraper", return_value=vertical_scraper_cls):
         leads = mlf.find_leads("prod-1", VALID_ICP_CONFIG, limit=10, supabase_client=fake_db)
 
@@ -108,9 +108,9 @@ def test_run_lead_finder_for_product_writes_leads_and_completes_run():
         "mse_leads": [{"id": "lead-row-1"}],
         "usage_events": [],
     })
-    raw = [RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="google_search", location="Phoenix AZ")]
+    raw = [RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="brave_search", location="Phoenix AZ")]
 
-    with patch.object(mlf, "GoogleSearchScraper", return_value=_fake_google_scraper(raw)), \
+    with patch.object(mlf, "BraveSearchScraper", return_value=_fake_brave_scraper(raw)), \
          patch.object(mlf, "get_vertical_scraper", return_value=None):
         result = mlf.run_lead_finder_for_product("prod-1", supabase_client=fake_db)
 
@@ -137,12 +137,12 @@ def test_find_leads_reports_progress_for_search_and_verify_phases():
     fake_db = FakeSupabase(responses={"mse_leads": []})
     icp_two_locations = {**VALID_ICP_CONFIG, "locations": ["Phoenix AZ", "Tucson AZ"]}
     raw = [
-        RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="google_search", location="Phoenix AZ"),
-        RawLead(name="John Smith", linkedin_url="https://linkedin.com/in/johnsmith", source="google_search", location="Tucson AZ"),
+        RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="brave_search", location="Phoenix AZ"),
+        RawLead(name="John Smith", linkedin_url="https://linkedin.com/in/johnsmith", source="brave_search", location="Tucson AZ"),
     ]
     calls = []
 
-    with patch.object(mlf, "GoogleSearchScraper", return_value=_fake_google_scraper(raw)), \
+    with patch.object(mlf, "BraveSearchScraper", return_value=_fake_brave_scraper(raw)), \
          patch.object(mlf, "get_vertical_scraper", return_value=None):
         mlf.find_leads("prod-1", icp_two_locations, limit=10, supabase_client=fake_db, on_progress=lambda *a: calls.append(a))
 
@@ -171,9 +171,9 @@ def test_run_lead_finder_for_product_writes_progress_columns_and_clears_them_on_
         "mse_leads": [{"id": "lead-row-1"}],
         "usage_events": [],
     })
-    raw = [RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="google_search", location="Phoenix AZ")]
+    raw = [RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="brave_search", location="Phoenix AZ")]
 
-    with patch.object(mlf, "GoogleSearchScraper", return_value=_fake_google_scraper(raw)), \
+    with patch.object(mlf, "BraveSearchScraper", return_value=_fake_brave_scraper(raw)), \
          patch.object(mlf, "get_vertical_scraper", return_value=None):
         mlf.run_lead_finder_for_product("prod-1", supabase_client=fake_db)
 
@@ -217,9 +217,9 @@ def test_run_lead_finder_for_product_tolerates_a_progress_write_failure():
         "mse_leads": [{"id": "lead-row-1"}],
         "usage_events": [],
     })
-    raw = [RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="google_search", location="Phoenix AZ")]
+    raw = [RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="brave_search", location="Phoenix AZ")]
 
-    with patch.object(mlf, "GoogleSearchScraper", return_value=_fake_google_scraper(raw)), \
+    with patch.object(mlf, "BraveSearchScraper", return_value=_fake_brave_scraper(raw)), \
          patch.object(mlf, "get_vertical_scraper", return_value=None):
         result = mlf.run_lead_finder_for_product("prod-1", supabase_client=fake_db)
 
@@ -243,9 +243,9 @@ def test_run_lead_finder_for_product_tolerates_activity_logging_failure():
         "mse_leads": [{"id": "lead-row-1"}],
         "usage_events": [],
     })
-    raw = [RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="google_search", location="Phoenix AZ")]
+    raw = [RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="brave_search", location="Phoenix AZ")]
 
-    with patch.object(mlf, "GoogleSearchScraper", return_value=_fake_google_scraper(raw)), \
+    with patch.object(mlf, "BraveSearchScraper", return_value=_fake_brave_scraper(raw)), \
          patch.object(mlf, "get_vertical_scraper", return_value=None):
         result = mlf.run_lead_finder_for_product("prod-1", supabase_client=fake_db)
 

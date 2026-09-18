@@ -7,6 +7,7 @@ response shape.
 from unittest.mock import MagicMock, patch
 
 from scrapers.base import RawLead
+from scrapers.brave_search import BraveSearchScraper
 from scrapers.google_search import GoogleSearchScraper
 from scrapers.verticals.real_estate import RealEstateScraper, _parse_results_table
 
@@ -91,6 +92,95 @@ def test_google_search_scraper_skips_excluded_domains():
 def test_google_search_scraper_hard_stops_at_daily_cap():
     http_get = MagicMock()
     scraper = GoogleSearchScraper(api_key="key", engine_id="cx", http_get=http_get, daily_query_count=100)
+    leads = scraper.scrape("Phoenix AZ", {"search_templates": ["{title} {location}"], "job_titles": ["agent"]})
+    assert leads == []
+    http_get.assert_not_called()
+
+
+# ── brave_search (Source 1, 2026-09-18 — replaces google_search above,
+#    which is now dormant/unused; kept side by side for comparison) ────
+
+def _fake_brave_response(results=None, text="", status_code=200):
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = {"web": {"results": results or []}}
+    resp.text = text
+    resp.raise_for_status = MagicMock()
+    return resp
+
+
+def test_brave_search_scraper_skips_gracefully_without_credentials():
+    scraper = BraveSearchScraper(api_key=None)
+    result = scraper.scrape("Phoenix AZ", {"search_templates": ["{title} {location}"], "job_titles": ["agent"]})
+    assert result == []
+
+
+def test_brave_search_scraper_parses_linkedin_result_without_fetching_it():
+    brave_response = _fake_brave_response(results=[
+        {"title": "Jane Doe - Buyer's Agent | LinkedIn", "url": "https://www.linkedin.com/in/janedoe", "description": ""}
+    ])
+    http_get = MagicMock(return_value=brave_response)
+
+    with patch("scrapers.brave_search.time.sleep"):
+        scraper = BraveSearchScraper(api_key="key", http_get=http_get)
+        leads = scraper.scrape("Phoenix AZ", {
+            "search_templates": ['site:linkedin.com/in "{title}" "{location}"'],
+            "job_titles": ["buyer's agent"],
+        })
+
+    assert len(leads) == 1
+    lead = leads[0]
+    assert isinstance(lead, RawLead)
+    assert lead.linkedin_url == "https://www.linkedin.com/in/janedoe"
+    assert lead.name == "Jane Doe"
+    assert lead.source == "brave_search"
+    # Never fetched the LinkedIn URL itself -- only one HTTP call total (the Brave query).
+    assert http_get.call_count == 1
+    # X-Subscription-Token, not Authorization: Bearer -- Brave's own auth convention.
+    _, kwargs = http_get.call_args
+    assert kwargs["headers"]["X-Subscription-Token"] == "key"
+
+
+def test_brave_search_scraper_follows_public_page_and_extracts_email():
+    brave_response = _fake_brave_response(results=[
+        {"title": "Jane Doe - Realtor | Acme Realty", "url": "https://acmerealty.com/agents/jane", "description": ""}
+    ])
+    robots_response = _fake_response(status_code=404)  # no robots.txt -> allowed
+    page_response = _fake_response(text="<html><body>Contact Jane at jane@acmerealty.com</body></html>")
+
+    http_get = MagicMock(side_effect=[brave_response, robots_response, page_response])
+
+    with patch("scrapers.brave_search.time.sleep"):
+        scraper = BraveSearchScraper(api_key="key", http_get=http_get)
+        leads = scraper.scrape("Phoenix AZ", {
+            "search_templates": ['"{title}" "{location}" email site:acmerealty.com'],
+            "job_titles": ["realtor"],
+        })
+
+    assert len(leads) == 1
+    assert leads[0].email == "jane@acmerealty.com"
+    assert leads[0].domain == "acmerealty.com"
+
+
+def test_brave_search_scraper_skips_excluded_domains():
+    brave_response = _fake_brave_response(results=[
+        {"title": "Jane Doe", "url": "https://www.zillow.com/agent/jane", "description": ""}
+    ])
+    http_get = MagicMock(return_value=brave_response)
+
+    with patch("scrapers.brave_search.time.sleep"):
+        scraper = BraveSearchScraper(api_key="key", http_get=http_get)
+        leads = scraper.scrape("Phoenix AZ", {
+            "search_templates": ["{title} {location}"], "job_titles": ["agent"],
+            "exclude_domains": ["zillow.com"],
+        })
+
+    assert leads == []
+
+
+def test_brave_search_scraper_hard_stops_at_monthly_cap():
+    http_get = MagicMock()
+    scraper = BraveSearchScraper(api_key="key", http_get=http_get, query_count=900)
     leads = scraper.scrape("Phoenix AZ", {"search_templates": ["{title} {location}"], "job_titles": ["agent"]})
     assert leads == []
     http_get.assert_not_called()

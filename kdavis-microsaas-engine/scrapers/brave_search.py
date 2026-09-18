@@ -1,45 +1,36 @@
 """
-Google Custom Search scraper (Source 1) — DORMANT as of 2026-09-18.
+Brave Search API scraper (Source 1 replacement, 2026-09-18).
 
-No longer wired into agents/marketing/mkt_lead_finder.py. Google
-discontinued "Search the entire web" for newly-created Programmable
-Search Engines on 2026-01-20 — new engines are capped at up to 50
-specific domains, which cannot serve this scraper's open-web queries
-(arbitrary company/brokerage/directory sites, not a fixed domain list).
-scrapers/brave_search.py (Brave Search API) is the active Source 1
-replacement. Kept here, not deleted, in case a domain-scoped CSE
-becomes useful later or Google's policy changes again before existing
-engines' 2027-01-01 grandfather deadline. See
+Replaces scrapers/google_search.py as the primary open-web lead source.
+Google discontinued "Search the entire web" for newly-created Programmable
+Search Engines as of 2026-01-20 (existing engines keep it only until
+2027-01-01) — new engines are capped at up to 50 specific domains, which
+cannot do what this scraper's queries need (arbitrary company/brokerage/
+directory sites, not a fixed domain list). See
 knowledge/sops/devops/2026-09-18-brave-search-replaces-google-cse.md
-(kdavis-agentic-platform) for the full record.
+(kdavis-agentic-platform) for the full incident/decision record.
 
-Uses Google's OFFICIAL Programmable Search Engine / Custom Search JSON API
-(https://developers.google.com/custom-search/v1/overview), never
-`googlesearch-python`-style scraping of Google's own search-results HTML —
-that violates Google's Terms of Service even though it never touches
-LinkedIn directly, in direct tension with the "no rules broken" constraint
-this whole system is built under. Kelvin's explicit call (2026-08-14):
-stay inside Google's ToS and hard-cap usage at the always-free 100
-queries/day quota (FREE_TIER_DAILY_CAP below), so this never bills and
-never risks the Railway IP getting CAPTCHA-challenged or rate-limited by
-Google for automated querying.
+Uses Brave's official Web Search API (https://api.search.brave.com/res/v1/web/search),
+same "official API only, never scrape search-results HTML" discipline as
+the Google CSE scraper it replaces — this is a paid-API swap, not a ToS
+workaround.
 
-Requires GOOGLE_CSE_API_KEY + GOOGLE_CSE_ENGINE_ID (a free Google Cloud
-project + Programmable Search Engine — one-time owner setup, same
-"skip gracefully without a paid/unavailable credential" shape as MKT-O1
-without APOLLO_API_KEY) — both unset means this scraper returns no leads
-rather than raising.
+Real, stated cost tradeoff (different from Google CSE's genuinely-free
+100/day): as of Feb 2026 Brave retired its free monthly tier for good —
+every plan is metered pay-as-you-go, ~$5 of free credit per month
+(roughly 1,000 queries at Brave's own ~$5/1,000 base rate), then billed
+to the card on file. FREE_TIER_MONTHLY_CAP below is a hard stop set
+below that credit (900, not 1,000) to leave margin against exact pricing
+uncertainty — this scraper will NEVER silently run past it into paid
+usage; it skips gracefully (returns no results) instead, same shape as
+every other quota-gated path in this codebase. Real spend still requires
+someone to raise this cap deliberately.
 
-For `site:linkedin.com/in` results, only the search result's own
-title/snippet metadata (already returned by the Custom Search API) is
-used — this scraper never fetches a linkedin.com URL directly, per the
-explicit "no LinkedIn scraping" constraint. For every other public page
-(brokerage sites, directory listings), it checks robots.txt before
-following the link, and only extracts what's plainly present in the
-page's own visible text (an email address) — never anything behind a
-login or a paywall.
+Requires BRAVE_API_KEY. Unset means this scraper returns no leads rather
+than raising -- same graceful-skip contract Google CSE had.
 """
 
+import logging
 import os
 import random
 import re
@@ -53,19 +44,21 @@ from bs4 import BeautifulSoup
 
 from scrapers.base import BaseScraper, RawLead
 
-CSE_URL = "https://www.googleapis.com/customsearch/v1"
+log = logging.getLogger(__name__)
 
-# Free tier is exactly 100 queries/day -- this is the hard stop that keeps
-# ongoing cost at genuinely $0, never a soft warning.
-FREE_TIER_DAILY_CAP = 100
-# "10-15 Google queries per hour max" from the task spec, enforced here as
-# a per-scrape()-call ceiling (mkt_lead_finder.py calls scrape() once per
-# location per weekly run, not continuously, so a per-call cap is the
-# meaningful unit -- true rolling-hourly enforcement across an entire run
-# would need shared, wall-clock-aware state this class doesn't own).
+BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
+
+# Brave retired the free tier in Feb 2026 -- see module docstring. Kept
+# well under the ~1,000-query/~$5 monthly credit on purpose.
+FREE_TIER_MONTHLY_CAP = 900
+# Brave's published free/base-tier rate limit is ~1 query/second (their
+# production capacity is 50 QPS, but that's a paid-tier number, not what
+# this key should assume) -- MIN/MAX_DELAY_SECONDS keep this comfortably
+# under 1 QPS per call, same spirit as the Google CSE scraper's own
+# self-imposed throttling.
 MAX_QUERIES_PER_CALL = 15
-MIN_DELAY_SECONDS = 2
-MAX_DELAY_SECONDS = 5
+MIN_DELAY_SECONDS = 1.2
+MAX_DELAY_SECONDS = 2.5
 
 _USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
@@ -78,7 +71,10 @@ _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 
 def _robots_allowed(url: str, user_agent: str, get_fn) -> bool:
     """Fail-closed: any error fetching/parsing robots.txt means treat the
-    page as disallowed rather than crawl it anyway."""
+    page as disallowed rather than crawl it anyway. Identical logic to
+    scrapers/google_search.py's own helper -- duplicated rather than
+    imported since that module is now dormant (see this file's docstring)
+    and not worth coupling an active scraper to."""
     parsed = urlparse(url)
     robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
     try:
@@ -99,46 +95,54 @@ def _extract_email_from_page(html: str) -> Optional[str]:
 
 
 def _name_from_result_title(title: str) -> Optional[str]:
-    # Google result titles are typically "Name - Title | Site" or similar
-    # separator-delimited shapes -- the leading segment is the closest
-    # thing to a plain name without guessing further.
     cleaned = title.split(" - ")[0].split(" | ")[0].strip()
     return cleaned or None
 
 
-class GoogleSearchScraper(BaseScraper):
-    source_name = "google_search"
+def _brave_headers(api_key: str) -> dict:
+    return {"Accept": "application/json", "X-Subscription-Token": api_key}
+
+
+class BraveSearchScraper(BaseScraper):
+    source_name = "brave_search"
 
     def __init__(
         self,
         api_key: Optional[str] = None,
-        engine_id: Optional[str] = None,
         http_get=None,
-        daily_query_count: int = 0,
+        query_count: int = 0,
     ):
-        self.api_key = api_key or os.environ.get("GOOGLE_CSE_API_KEY")
-        self.engine_id = engine_id or os.environ.get("GOOGLE_CSE_ENGINE_ID")
+        self.api_key = api_key or os.environ.get("BRAVE_API_KEY")
         self._get = http_get or (lambda url, **kw: httpx.get(url, **kw))
         # Caller (mkt_lead_finder.py) persists and passes this back in
-        # across calls within one run so the free-tier cap is respected
-        # across every location/vertical a single run touches, not just
-        # within one scrape() call.
-        self.daily_query_count = daily_query_count
+        # across calls within the same billing month so the free-credit
+        # cap is enforced across an entire month's calls, not just one.
+        self.query_count = query_count
 
     def _search(self, query: str) -> list[dict]:
-        if self.daily_query_count >= FREE_TIER_DAILY_CAP:
+        """Returns items normalized to the same {"link", "title", "snippet"}
+        shape scrapers/google_search.py's CSE results had, so
+        mkt_lead_finder.py's find_job_posting_signals (which reads those
+        keys directly, not through RawLead) needs no changes beyond which
+        scraper it constructs."""
+        if self.query_count >= FREE_TIER_MONTHLY_CAP:
             return []
         response = self._get(
-            CSE_URL,
-            params={"key": self.api_key, "cx": self.engine_id, "q": query, "num": 10},
+            BRAVE_SEARCH_URL,
+            params={"q": query, "count": 10},
+            headers=_brave_headers(self.api_key),
             timeout=15,
         )
-        self.daily_query_count += 1
+        self.query_count += 1
         response.raise_for_status()
-        return response.json().get("items", []) or []
+        results = (response.json().get("web", {}) or {}).get("results", []) or []
+        return [
+            {"link": r.get("url", ""), "title": r.get("title", ""), "snippet": r.get("description", "")}
+            for r in results
+        ]
 
     def scrape(self, location: str, filters: dict) -> list[RawLead]:
-        if not self.api_key or not self.engine_id:
+        if not self.api_key:
             return []  # skip gracefully -- same shape as MKT-O1 without APOLLO_API_KEY
 
         templates = filters.get("search_templates") or []
@@ -149,7 +153,7 @@ class GoogleSearchScraper(BaseScraper):
         queries_run = 0
         for template in templates:
             for title in titles:
-                if self.daily_query_count >= FREE_TIER_DAILY_CAP or queries_run >= MAX_QUERIES_PER_CALL:
+                if self.query_count >= FREE_TIER_MONTHLY_CAP or queries_run >= MAX_QUERIES_PER_CALL:
                     return leads
 
                 query = template.format(title=title, location=location)
@@ -173,8 +177,8 @@ class GoogleSearchScraper(BaseScraper):
             return None
 
         if "linkedin.com/in/" in link:
-            # Never fetch li.com directly -- only the metadata Google's
-            # own API already returned for this result.
+            # Never fetch li.com directly -- only the metadata Brave's own
+            # API already returned for this result.
             return RawLead(
                 name=_name_from_result_title(item.get("title", "")),
                 linkedin_url=link,
@@ -212,4 +216,4 @@ def scrape(location: str, filters: dict) -> list[RawLead]:
     """Module-level convenience wrapper matching the task spec's exact
     `scrape(location, filters) -> list[RawLead]` signature — builds a
     scraper from environment config on each call."""
-    return GoogleSearchScraper().scrape(location, filters)
+    return BraveSearchScraper().scrape(location, filters)
