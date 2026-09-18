@@ -24,10 +24,10 @@ class _FakeSignals:
     outdated_stack_hint: str | None = None
 
 
-def _fake_google_scraper(leads):
+def _fake_brave_scraper(leads):
     scraper = MagicMock()
     scraper.scrape.return_value = leads
-    scraper.daily_query_count = 1
+    scraper.query_count = 1
     return scraper
 
 
@@ -84,9 +84,9 @@ def test_score_lead_unreachable_site_gets_a_small_floor_not_a_penalty():
 
 def test_find_and_score_leads_filters_below_min_signal_score():
     fake_db = FakeSupabase(responses={"thd_consulting_leads": []})
-    raw = [RawLead(name="Jane Doe", company="acme.com", domain="acme.com", source="google_search", location="construction:Dallas TX")]
+    raw = [RawLead(name="Jane Doe", company="acme.com", domain="acme.com", source="brave_search", location="construction:Dallas TX")]
 
-    with patch.object(scout, "GoogleSearchScraper", return_value=_fake_google_scraper(raw)), \
+    with patch.object(scout, "BraveSearchScraper", return_value=_fake_brave_scraper(raw)), \
          patch.object(scout, "TradesScraper", return_value=MagicMock(scrape=MagicMock(return_value=[]))), \
          patch.object(scout, "fetch_company_signals", return_value=CompanySignals(reachable=True, mentions_msp=True, mentions_security_cert=True)), \
          patch.object(scout, "find_email", return_value=EmailResult(email=None, pattern_used=None, verification_status="unverified", confidence_score=0.0)):
@@ -101,9 +101,9 @@ def test_find_and_score_leads_filters_below_min_signal_score():
 
 def test_find_and_score_leads_keeps_qualifying_leads():
     fake_db = FakeSupabase(responses={"thd_consulting_leads": []})
-    raw = [RawLead(name="Jane Doe", company="acme.com", domain="acme.com", source="google_search", location="construction:Dallas TX")]
+    raw = [RawLead(name="Jane Doe", company="acme.com", domain="acme.com", source="brave_search", location="construction:Dallas TX")]
 
-    with patch.object(scout, "GoogleSearchScraper", return_value=_fake_google_scraper(raw)), \
+    with patch.object(scout, "BraveSearchScraper", return_value=_fake_brave_scraper(raw)), \
          patch.object(scout, "TradesScraper", return_value=MagicMock(scrape=MagicMock(return_value=[]))), \
          patch.object(scout, "fetch_company_signals", return_value=CompanySignals(reachable=True)), \
          patch.object(scout, "find_email", return_value=EmailResult(email=None, pattern_used=None, verification_status="unverified", confidence_score=0.0)):
@@ -120,9 +120,9 @@ def test_find_and_score_leads_keeps_qualifying_leads():
 
 def test_find_and_score_leads_deduplicates_by_domain_against_existing():
     fake_db = FakeSupabase(responses={"thd_consulting_leads": [{"domain": "acme.com"}]})
-    raw = [RawLead(name="Jane Doe", company="acme.com", domain="acme.com", source="google_search", location="construction:Dallas TX")]
+    raw = [RawLead(name="Jane Doe", company="acme.com", domain="acme.com", source="brave_search", location="construction:Dallas TX")]
 
-    with patch.object(scout, "GoogleSearchScraper", return_value=_fake_google_scraper(raw)), \
+    with patch.object(scout, "BraveSearchScraper", return_value=_fake_brave_scraper(raw)), \
          patch.object(scout, "TradesScraper", return_value=MagicMock(scrape=MagicMock(return_value=[]))):
         leads = scout.find_and_score_leads(
             {"industries": ["construction"], "locations": ["Dallas TX"], "min_signal_score": 1},
@@ -142,9 +142,9 @@ def test_run_lead_scout_writes_qualified_leads_and_completes_run():
         "usage_events": [],
         "thd_consulting_scrape_runs": [{"id": "run-1"}],
     })
-    raw = [RawLead(name="Jane Doe", company="acme.com", domain="acme.com", source="google_search", location="construction:Dallas TX")]
+    raw = [RawLead(name="Jane Doe", company="acme.com", domain="acme.com", source="brave_search", location="construction:Dallas TX")]
 
-    with patch.object(scout, "GoogleSearchScraper", return_value=_fake_google_scraper(raw)), \
+    with patch.object(scout, "BraveSearchScraper", return_value=_fake_brave_scraper(raw)), \
          patch.object(scout, "TradesScraper", return_value=MagicMock(scrape=MagicMock(return_value=[]))), \
          patch.object(scout, "fetch_company_signals", return_value=CompanySignals(reachable=True)), \
          patch.object(scout, "find_email", return_value=EmailResult(email=None, pattern_used=None, verification_status="unverified", confidence_score=0.0)):

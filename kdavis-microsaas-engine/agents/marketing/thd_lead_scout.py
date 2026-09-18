@@ -4,20 +4,25 @@ security hygiene (no dedicated IT, no MSP relationship, no security
 certifications) for Kelvin's own IT-security-implementation service line.
 
 Sourcing follows agents/marketing/mkt_lead_finder.py's exact house rule,
-reused rather than re-litigated: Google Custom Search (scrapers/
-google_search.py, official API, shares the same GOOGLE_CSE_API_KEY /
-100-queries-day free-tier cap with every other lead-finder consumer — see
-_todays_google_query_count below) as Source 1, one vertical scraper
+reused rather than re-litigated: Brave Search (scrapers/brave_search.py,
+official API, shares the same BRAVE_API_KEY / ~900-query monthly free-
+credit cap with every other lead-finder consumer — see
+_this_months_brave_query_count below) as Source 1, one vertical scraper
 (scrapers/verticals/trades.py, construction) as an optional Source 2, and
 core/email_finder.py (pattern-guessing + real SMTP verification) for
-contact email. NO LinkedIn/Indeed/Glassdoor/Yelp/Clutch scraping and NO
-Apollo/Hunter integration — both explicitly ruled out already in this
-codebase (mkt_lead_finder.py's own module docstring: "No paid third-party
-lead API, no LinkedIn scraping") and in kdavis-agentic-platform's
-api/routes/outreach.py compliance boundary. Google Places/Apollo/Hunter API
-keys named in the original task spec are deliberately not wired for the
-same reason Apollo was already dropped here: no free tier, recurring cost
-for a feature that already has a zero-cost, real-API equivalent.
+contact email. Switched from Google Custom Search 2026-09-18 (Kelvin's
+explicit instruction: one Brave key for all lead sourcing, no
+exceptions) — Google discontinued "Search the entire web" for newly-
+created Programmable Search Engines on 2026-01-20, breaking the open-web
+queries this module also depends on. NO LinkedIn/Indeed/Glassdoor/Yelp/
+Clutch scraping and NO Apollo/Hunter integration — both explicitly ruled
+out already in this codebase (mkt_lead_finder.py's own module docstring:
+"No paid third-party lead API, no LinkedIn scraping") and in
+kdavis-agentic-platform's api/routes/outreach.py compliance boundary.
+Google Places/Apollo/Hunter API keys named in the original task spec are
+deliberately not wired for the same reason Apollo was already dropped
+here: no free tier, recurring cost for a feature that already has a
+low/zero-cost, real-API equivalent.
 
 Unlike mkt_lead_finder.py, this module also SCORES each candidate (1-10,
 signal_breakdown) before writing it — the MSE lead finder scores lead
@@ -37,8 +42,8 @@ from typing import Any, Optional
 from core.email_finder import find_email, verify_email
 from core.supabase_client import get_supabase
 from scrapers.base import RawLead
+from scrapers.brave_search import BraveSearchScraper
 from scrapers.company_signals import fetch_company_signals
-from scrapers.google_search import GoogleSearchScraper
 from scrapers.verticals.trades import TradesScraper
 
 log = logging.getLogger(__name__)
@@ -51,7 +56,7 @@ _CONFIDENCE_BY_STATUS = {"verified": 0.95, "catch_all": 0.4, "unverified": 0.2, 
 # Industries this service targets, and the vertical scraper (if any) each
 # one can also draw from. Only "construction" has a real Source-2 scraper
 # today (scrapers/verticals/trades.py) — every other industry gets Source 1
-# (Google Custom Search) only, same graceful-degradation behavior
+# (Brave Search) only, same graceful-degradation behavior
 # mkt_lead_finder.py already uses for verticals with no registered scraper.
 TARGET_INDUSTRIES: dict[str, Optional[str]] = {
     "food_production": None,
@@ -96,12 +101,13 @@ INFRA_CONSULTING_ICP = {
         "no tech presence",
         "already using Palantir/Databricks at scale (not the right fit)",
     ],
-    # Job-posting signal sourcing is Google Custom Search ONLY (see
+    # Job-posting signal sourcing is Brave Search ONLY (see
     # agents/marketing/mkt_lead_finder.py's find_job_posting_signals) --
     # explicitly not LinkedIn Jobs/Indeed scraping, per Kelvin's own
     # confirmation (2026-09-16) not to override this file's and
-    # mkt_lead_finder.py's existing no-scraping compliance rule.
-    "job_posting_source": "google_custom_search",
+    # mkt_lead_finder.py's existing no-scraping compliance rule. Was
+    # "google_custom_search" until the 2026-09-18 Brave switch.
+    "job_posting_source": "brave_search",
 }
 
 # The non-IT person actually holding access at a company like this — matches
@@ -163,18 +169,20 @@ def _write_audit(db, outcome: str, metadata: dict) -> None:
     }).execute()
 
 
-def _todays_google_query_count(db) -> int:
+def _this_months_brave_query_count(db) -> int:
     """Reads the SAME usage_events rows mkt_lead_finder.py writes
-    (event_type='google_cse_queries_used') — the 100/day free-tier cap is
-    shared across every consumer of GOOGLE_CSE_API_KEY, MSE products and
-    THD Consulting alike. Two independent daily counters would let the two
-    together blow past the real cap Google enforces."""
-    today = date.today().isoformat()
-    rows = db.table("usage_events").select("metadata").eq("event_type", "google_cse_queries_used").execute().data or []
+    (event_type='brave_search_queries_used') — the ~900-query monthly
+    free-credit cap is shared across every consumer of BRAVE_API_KEY, MSE
+    products and THD Consulting alike. Two independent counters would let
+    the two together blow past the real cap and start billing. Monthly,
+    not daily -- Brave's free credit resets on a monthly billing cycle
+    (2026-09-18 switch from Google CSE's old daily quota)."""
+    this_month = date.today().isoformat()[:7]  # "YYYY-MM"
+    rows = db.table("usage_events").select("metadata").eq("event_type", "brave_search_queries_used").execute().data or []
     return sum(
         row["metadata"].get("count", 0)
         for row in rows
-        if isinstance(row.get("metadata"), dict) and row["metadata"].get("date") == today
+        if isinstance(row.get("metadata"), dict) and row["metadata"].get("month") == this_month
     )
 
 
@@ -227,7 +235,7 @@ def _resolve_contact_email(lead: dict, db) -> dict:
 def find_and_score_leads(
     filters: dict,
     supabase_client: Optional[Any] = None,
-    google_daily_query_count: int = 0,
+    brave_query_count: int = 0,
     _stats: Optional[dict] = None,
 ) -> list[dict]:
     """
@@ -247,7 +255,7 @@ def find_and_score_leads(
     min_signal_score = filters.get("min_signal_score", _DEFAULT_MIN_SIGNAL_SCORE)
     employee_range = filters.get("employee_range", "25-150")
 
-    google_scraper = GoogleSearchScraper(daily_query_count=google_daily_query_count)
+    brave_scraper = BraveSearchScraper(query_count=brave_query_count)
     trades_scraper = TradesScraper()
 
     search_filters = {
@@ -261,12 +269,12 @@ def find_and_score_leads(
     for industry in industries:
         vertical = TARGET_INDUSTRIES.get(industry)
         for location in locations:
-            found = google_scraper.scrape(location, search_filters)
+            found = brave_scraper.scrape(location, search_filters)
             for lead in found:
                 lead.location = f"{industry}:{location}"  # carries industry through to scoring below
             raw_leads.extend(found)
             if found:
-                sources_used.add("google_search")
+                sources_used.add("brave_search")
 
             if vertical == "trades":
                 trades_found = trades_scraper.scrape(location, search_filters)
@@ -303,7 +311,7 @@ def find_and_score_leads(
     if _stats is not None:
         _stats["raw_found"] = len(raw_leads)
         _stats["duplicates"] = duplicate_count
-        _stats["google_daily_query_count"] = google_scraper.daily_query_count
+        _stats["brave_query_count"] = brave_scraper.query_count
         _stats["sources_used"] = sorted(sources_used)
 
     return qualified
@@ -333,15 +341,15 @@ def run_lead_scout(filters: dict, supabase_client: Optional[Any] = None, run_id:
     _emit_event(db, "thd_lead_scout_run_started", {"run_id": run_id, "filters": filters})
 
     try:
-        already_used_today = _todays_google_query_count(db)
+        already_used_this_month = _this_months_brave_query_count(db)
         stats: dict = {}
         leads = find_and_score_leads(
-            filters, supabase_client=db, google_daily_query_count=already_used_today, _stats=stats,
+            filters, supabase_client=db, brave_query_count=already_used_this_month, _stats=stats,
         )
 
-        queries_this_run = max(0, stats.get("google_daily_query_count", already_used_today) - already_used_today)
+        queries_this_run = max(0, stats.get("brave_query_count", already_used_this_month) - already_used_this_month)
         if queries_this_run:
-            _emit_event(db, "google_cse_queries_used", {"date": date.today().isoformat(), "count": queries_this_run})
+            _emit_event(db, "brave_search_queries_used", {"month": date.today().isoformat()[:7], "count": queries_this_run})
 
         rows = [
             {
