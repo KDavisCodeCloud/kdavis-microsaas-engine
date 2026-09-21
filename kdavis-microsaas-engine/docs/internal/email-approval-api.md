@@ -144,15 +144,44 @@ Query param: `product_id` (optional).
 `mse_email_sends`/`mse_email_clicks` table. Do not render these as "0"
 in the dashboard; render "not tracked yet."
 
-## What this API does NOT cover (see GAPS.md-equivalent writeup, session 2026-09-21)
+## Update, 2026-09-21 (same day, W2.5 follow-up) — product-ID reconciliation shipped
 
-- No gate ties campaign generation to an approved `mse_positioning` row
-  (the build spec's Locked Decision 3). The real trigger
-  (`mkt_orch_campaign_orchestrator.py`) fires off `opportunity_pipeline`
-  approval, a different concept. Wiring the intended gate requires first
-  resolving the three-way product-ID mismatch above — attempting it
-  without that would have risked gating the wrong thing on a live,
-  n8n-triggered production path.
+The three-way ID mismatch above is now resolved. **Locked decision:
+`mse_products.id` is canonical product identity for all campaign/email
+tables and the positioning gate; `opportunity_pipeline` rows map TO
+products, they never own campaign identity.**
+
+- `mse_products` gained a nullable `opportunity_id` column (migration
+  `20260921000052`), backfilled for the 2 confirmed matches
+  (`tradesdesk` → `b1ebd730...`, `small-portfolio-hub` → `9d26abed...`).
+  All other products stay `NULL` — confirmed no_match (hand-conceived
+  Decoded Empire / internal / consumer products, or TradesDesk
+  sub-verticals with no opportunity of their own).
+- A real launched product, **Showing Signal**, was found with no
+  `mse_products` row at all (it predates the registry) and has been
+  registered (`slug: showing-signal`, `opportunity_id: 797adb70...`).
+- Both orphan `mse_email_sequences` rows from the section above are now
+  repointed to real `mse_products.id` values, and `product_id` now
+  carries a **validated foreign key** to `mse_products(id)`. `product`
+  in the API response above will now resolve for every row, going
+  forward — `resolved: false` should not occur again barring new bugs
+  upstream.
+- **The positioning gate is now wired** (migration `20260921000053`): a
+  real Postgres trigger on `mse_email_sequences` INSERT rejects any row
+  whose product has no `mse_positioning` row with `status='approved'`.
+  This is DB-level enforcement (fires even for the backend's own
+  service_role connection — triggers are not bypassed by RLS bypass).
+  As of today, this means MKT-O3 email-sequence generation will fail for
+  every product except `small-portfolio-hub` until more positioning
+  briefs are approved — **working as intended**, not a bug.
+  `agents/marketing/mkt_orch_campaign_orchestrator.py`'s
+  `_DOWNSTREAM_AGENTS` was reordered so mkt-o3 (email) fires **last**,
+  specifically so this new, now-common rejection can never collaterally
+  prevent lead-finding/DM/SEO/social from running for the same campaign
+  build. See `tests/test_mkt_orch_campaign_orchestrator.py` and
+  `tests/sql/test_positioning_gate_live.sql`.
+
+## What this API still does NOT cover
 - No click tracking, no send tracking, no subscriber/enrollment engine,
   no 15-minute scheduler loop. Nothing currently reads `activated` rows
   and turns them into real Brevo/Resend sends.

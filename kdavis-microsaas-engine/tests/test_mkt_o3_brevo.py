@@ -9,6 +9,8 @@ core.brevo_client, so we assert exactly what MKT-O3 itself passes in).
 import json
 from unittest.mock import MagicMock
 
+import pytest
+
 import agents.marketing.mkt_o3_email_sequence_loader as mkt_o3
 from core.brevo_client import BrevoContactResult
 from tests.conftest import FakeSupabase
@@ -71,6 +73,51 @@ def test_run_o3_drafts_and_saves_sequence_without_any_systeme_io_call():
 def test_systeme_io_client_is_flagged_deprecated_and_unused_by_active_flow():
     assert mkt_o3.DEPRECATED is True
     assert mkt_o3._SystemeIOClient is not None  # retained for reference, not deleted
+
+
+class _RaisingInsertQuery:
+    """Minimal double for the one query chain this test needs to fail --
+    FakeQuery/FakeSupabase (conftest.py) only supports simulating an
+    insert failure for opportunity_pipeline specifically, hardcoded to
+    that table name, so a real DB exception on mse_email_sequences (e.g.
+    migration 053's positioning-gate trigger rejecting an unapproved
+    product) needs its own tiny double instead of stretching that one."""
+    def insert(self, payload):
+        raise Exception(
+            "enforce_positioning_before_email_sequence: product prod-1 has no "
+            "approved positioning brief -- campaign generation blocked"
+        )
+
+
+class _RaisingInsertSupabase(FakeSupabase):
+    def table(self, name):
+        if name == "mse_email_sequences":
+            return _RaisingInsertQuery()
+        return super().table(name)
+
+
+def test_run_o3_positioning_gate_rejection_fails_the_same_way_any_other_insert_failure_does(monkeypatch):
+    """2026-09-21: migration 053 added a DB trigger that can now make
+    this exact insert raise for a real, expected reason (no approved
+    positioning brief). run_o3_email_sequence_loader's own exception
+    handling is unchanged -- this confirms the gate's rejection is
+    handled via the EXISTING failure path (audit 'lose', campaign_builds
+    marked 'failed', re-raised as RuntimeError), not a new one."""
+    fake_db = _RaisingInsertSupabase(responses={"campaign_builds": [{"id": "cb-1"}]})
+    anthropic_client = FakeAnthropic(responses=[SEQUENCE_JSON])
+
+    with pytest.raises(RuntimeError, match="MKT-O3 email sequence load failed"):
+        mkt_o3.run_o3_email_sequence_loader(
+            product_id="prod-1", research_report=_research_report(), campaign_build_id="cb-1",
+            supabase_client=fake_db, anthropic_client=anthropic_client,
+        )
+
+    audit_writes = [c for c in fake_db.executed if c.table_name == "audit_log"]
+    assert audit_writes and audit_writes[0]._payload["outcome"] == "lose"
+    assert "no approved positioning brief" in audit_writes[0]._payload["metadata"]["error"]
+
+    cb_updates = [c for c in fake_db.executed if c.table_name == "campaign_builds" and c.calls[0][0] == "update"]
+    assert cb_updates[-1]._payload == {"email_sequence_status": "failed"}
 
 
 # ── enroll_trial_in_sequence ───────────────────────────────────────────

@@ -60,17 +60,31 @@ def _resolve_lead_source_module(research_report: dict) -> str:
 # resolved per-campaign by _resolve_lead_source_module (its
 # research_report may ask for the deprecated Apollo builder instead), see
 # the dispatch loop in run_campaign_orchestrator below.
+# Order matters (2026-09-21): mkt-o3 is LAST, deliberately. Migration
+# 053 added a DB-level trigger that makes mkt-o3's insert raise for any
+# product without an approved mse_positioning row -- and this loop (see
+# run_campaign_orchestrator below) has no per-agent isolation: an
+# uncaught exception from one agent aborts every agent still to come.
+# Before this reordering, mkt-o3 sat in the middle, so a positioning-gate
+# rejection (now the normal case for every product except
+# small-portfolio-hub, the only one with an approved brief as of
+# 2026-09-21) would have silently prevented mkt-s1 (SEO) and mkt-v1
+# (social) from ever firing for that campaign build, even though neither
+# has anything to do with email or positioning. Running mkt-o3 last means
+# every other agent's existing behavior is provably unchanged by the new
+# gate -- they always run to completion before mkt-o3 gets a chance to
+# raise. See tests/test_mkt_orch_campaign_orchestrator.py.
 _DOWNSTREAM_AGENTS: list[tuple[str, str, str, Callable[[list[str]], bool]]] = [
     ("mkt-lead-finder", _LEAD_FINDER_MODULE, "lead_finder_status",
      lambda channels: "linkedin_dm" in channels),
     ("mkt-o2", "agents.marketing.mkt_o2_cold_dm_writer", "dm_sequence_status",
      lambda channels: "linkedin_dm" in channels),
-    ("mkt-o3", "agents.marketing.mkt_o3_email_sequence_loader", "email_sequence_status",
-     lambda channels: "email" in channels),
     ("mkt-s1", "agents.marketing.mkt_s1_seo_content_factory", "seo_factory_status",
      lambda channels: "seo" in channels),
     ("mkt-v1", "agents.marketing.mkt_v1_content_multiplier", "social_status",
      lambda channels: "reddit" in channels or "facebook" in channels),
+    ("mkt-o3", "agents.marketing.mkt_o3_email_sequence_loader", "email_sequence_status",
+     lambda channels: "email" in channels),
 ]
 
 

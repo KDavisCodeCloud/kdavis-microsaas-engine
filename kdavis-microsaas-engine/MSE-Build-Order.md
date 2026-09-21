@@ -451,10 +451,108 @@ being traced to the real cause (not a regression from this session's
 code changes).
 
 **Kelvin-only actions from this session:**
-- Decide the product-ID reconciliation above before the positioning
-  gate can be wired for real.
-- `BREVO_API_KEY` still unset — MKT-O3 sequences remain
-  `loaded_unactivated` (or now `pending_hitl`) forever until this is
-  provisioned; see `BREVO_SETUP.md`.
+- `BREVO_API_KEY` still unset — MKT-O3 sequences remain `pending_hitl`
+  forever until this is provisioned; see `BREVO_SETUP.md`.
 - Confirm migration `20260921000051` applied on the next `mse-api`
   deploy (see above — could not be verified locally).
+- Approve more `mse_positioning` briefs — the new gate (below) means
+  MKT-O3 email generation is now blocked for every product except
+  `small-portfolio-hub`.
+
+---
+
+## W2.5 — Product-ID reconciliation + positioning gate wiring (2026-09-21, same day)
+
+Follow-up to the section above, per Kelvin's locked decision:
+**`mse_products.id` is canonical product identity for all campaign/email
+tables and the positioning gate; `opportunity_pipeline` rows map TO
+products, they never own campaign identity.**
+
+### Final canonical mapping (confirmed by Kelvin before any write)
+
+| `mse_products.id` | slug | `opportunity_id` | basis |
+|---|---|---|---|
+| `ccc66fa2-ce86-4eb7-9b7c-6cbae9404c2e` | tradesdesk | `b1ebd730-a83b-48f8-96f0-e2701449677b` | exact — brief `52cfbaf2` product_name/slug match, content matches opportunity verbatim |
+| `5ba0639e-4c9c-4205-be3d-7904f4dbc9b5` | small-portfolio-hub | `9d26abed-7a8a-427f-8493-be487f7eb641` | exact — brief `175e4d78` already had `opportunity_id` set |
+| `7e1c9343-be82-4da6-bf38-909f8665d55d` (**new row**) | showing-signal | `797adb70-f518-41e9-8a9c-d5141691076f` | exact — real launched product, own repo, brief `cb6f9203`, never registered until this session |
+| `b555a9db`, `b614ef27`, `a7e9e74b` (tradesdesk-hvac/plumbing/electrical) | — | `NULL` | no_match — sub-vertical positioning variants, no dedicated opportunity row |
+| `da79dcfa` (decodedsix), `9b6c8f36` (thdagentic-consulting), `96e169fe` (ada-title-ii), `2f2ff5c8` (bible-devotional), `777a1852` (cloud-decoded) | — | `NULL` | no_match — hand-conceived / internal / consumer / non-MSE products, never went through Dispatch/Verdict |
+
+Both orphan `mse_email_sequences` rows repointed: `29d8bab1...` (was
+stamped with `mse_build_briefs.id`) → `tradesdesk`; `4817dba9...` (was
+stamped with `opportunity_pipeline.id`) → the new `showing-signal` row.
+FK `mse_email_sequences.product_id → mse_products.id` now enforced
+(migration `20260921000052`).
+
+**Guessed and flagged, not sourced:** `showing-signal`'s
+`activation_definition` ("First automated CRM/SMS follow-up fired from a
+ShowingTime event") is inferred from build brief `cb6f9203`'s pitch —
+build briefs have no explicit activation-definition field. Confirm/correct
+if wrong; it has no functional effect today (nothing reads it yet).
+
+### Positioning gate (migration `20260921000053`)
+
+Real Postgres `BEFORE INSERT` trigger on `mse_email_sequences`, backed by
+a `has_approved_positioning(product_id)` helper — rejects any insert for
+a product with no `mse_positioning` row at `status='approved'`. Fires
+regardless of caller, including the backend's own service_role
+connection (triggers are never bypassed by RLS bypass — the actual
+DB-level backstop the DIST pattern calls for). No `role='admin'` check
+*inside this trigger* — the caller here is always backend agent code via
+service_role with no per-request JWT to check; the human-facing,
+role-gated action this depends on is the existing `approve_positioning()`
+function, unchanged and already role-gated. Tested with real JWTs via
+`tests/sql/test_positioning_gate_live.sql` (same `set_config('request.jwt.claims', ...)`
+convention as `tests/sql/test_dist_phase8_live.sql` — not wired into CI,
+run manually against a branch/local Postgres).
+
+**Real collateral-damage bug found and fixed while wiring this**:
+`run_campaign_orchestrator`'s `_DOWNSTREAM_AGENTS` fan-out loop has no
+per-agent isolation — one agent's uncaught exception aborts every agent
+still to come. mkt-o3 (email) sat in the *middle* of that list. Since
+the new gate now rejects every product except `small-portfolio-hub`,
+leaving the order unchanged would have silently stopped mkt-s1 (SEO) and
+mkt-v1 (social) from ever firing again for any other product's campaign
+runs — a real regression, not a hypothetical one. Fixed by moving mkt-o3
+to the end of the list (see the comment on `_DOWNSTREAM_AGENTS` itself);
+lead-finder/DM/SEO/social now always run to completion regardless of the
+email gate's outcome. Covered by new
+`tests/test_mkt_orch_campaign_orchestrator.py` (this file had **zero**
+prior real test coverage of the fan-out loop — `test_brief_generation.py`
+only ever monkeypatches `run_campaign_orchestrator` out entirely).
+
+### Still open, NOT resolved this session — for Kelvin, not something to silently fix
+
+- Two more `mse_build_briefs` rows exist with no `mse_products` row and
+  unclear current status: `64ed7a59` ("Series Scheduler Pro" — likely
+  the Calendly recurring-booking BUILD) and `10f49a2d` ("Pulse Message
+  Bridge" — plausibly the Intercom SMS/WhatsApp BUILD by content,
+  unconfirmed). Their originating `opportunity_pipeline` rows have since
+  been deleted (only 4 remain live total). Not registered, not mapped —
+  deliberately left alone since their real-world status (launched? dead?
+  still pending?) couldn't be established from the DB alone.
+- Which Railway project actually hosts the live "Showing Signal" backend
+  is unconfirmed — two candidates exist under Railway's auto-generated
+  names (`zooming-appreciation`, `hospitable-endurance`) in the same
+  workspace, neither renamed to anything identifiable. Not chased down
+  this session; doesn't block anything above since the new
+  `mse_products` row doesn't need a Railway project reference.
+
+### Tests / deploy
+
+Full suite: 629 passed, 1 skipped, 0 failed (clean env — see the testing
+note above about not sourcing `.env` before pytest). 5 new tests added
+this pass (4 in `test_mkt_orch_campaign_orchestrator.py`, 1 in
+`test_mkt_o3_brevo.py`), zero regressions against the 624-passing
+baseline from the same-day W2 session earlier.
+
+Migrations `052`/`053` have **not been confirmed applied to the live
+DB** as of this writing — same blocker as `051`: this repo's `mse-api`
+Railway service is not GitHub-webhook-auto-deployed (confirmed this
+session — no deployment record was ever created for commit `5c43fcd`
+despite being pushed and waited on), and manual `railway up` deploys
+attempted earlier today both failed at Railway's build stage
+(`railpack prepare exited with an error`, no further detail surfaced in
+available logs) before ever reaching the app. See the deploy attempt
+right after this commit for whether a third attempt succeeded or
+produced a fuller error to investigate.
