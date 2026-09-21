@@ -56,6 +56,22 @@ async def unsubscribe(email: str, token: str):
     return HTMLResponse(_UNSUB_PAGE.format(email=html.escape(email)))
 
 
+@router.post("/unsubscribe")
+async def unsubscribe_one_click(email: str, token: str):
+    """RFC 8058 one-click unsubscribe target. A conforming mail client
+    POSTs here directly (body `List-Unsubscribe=One-Click`, per the
+    List-Unsubscribe-Post header core/email_compliance.py's
+    build_list_unsubscribe_headers sets) instead of a human clicking
+    through the GET landing page above -- same token verification, plain
+    200 response since there's no human to show a page to."""
+    if not verify_unsubscribe_token(email, token):
+        raise HTTPException(status_code=400, detail="Invalid unsubscribe token")
+
+    db = get_supabase()
+    suppress_email(db, email, reason="unsubscribed")
+    return {"status": "unsubscribed"}
+
+
 class ResearchRequest(BaseModel):
     product_id: str
     niche_keywords: list[str] = []

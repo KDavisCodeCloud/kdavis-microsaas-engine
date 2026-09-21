@@ -2,6 +2,7 @@ import pytest
 
 from core.email_compliance import (
     append_compliance_footer,
+    build_list_unsubscribe_headers,
     build_unsubscribe_url,
     daily_send_cap,
     generate_unsubscribe_token,
@@ -41,6 +42,13 @@ def test_build_unsubscribe_url_contains_email_and_valid_token():
     assert "email=lead%40example.com" in url
     token = generate_unsubscribe_token("lead@example.com")
     assert f"token={token}" in url
+
+
+def test_build_list_unsubscribe_headers_rfc_8058():
+    headers = build_list_unsubscribe_headers("lead@example.com")
+    assert headers["List-Unsubscribe-Post"] == "List-Unsubscribe=One-Click"
+    url = build_unsubscribe_url("lead@example.com")
+    assert headers["List-Unsubscribe"] == f"<{url}>"
 
 
 def test_is_suppressed_true_when_row_exists(fake_db):

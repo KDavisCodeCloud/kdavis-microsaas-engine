@@ -68,6 +68,13 @@ def test_touch_1_sends_email_and_updates_status(fake_db):
     assert fake_resend.Emails.sent[0]["subject"] == "Quick question, Jamie"
     assert "4k/mo" in fake_resend.Emails.sent[0]["text"]
 
+    # RFC 8058 one-click unsubscribe headers (2026-09-21) -- every
+    # marketing send must carry these, not just the in-body link.
+    headers = fake_resend.Emails.sent[0]["headers"]
+    assert headers["List-Unsubscribe-Post"] == "List-Unsubscribe=One-Click"
+    assert "marketing/unsubscribe" in headers["List-Unsubscribe"]
+    assert generate_unsubscribe_token("lead@example.com") in headers["List-Unsubscribe"]
+
     final_update = _update_to(fake_db, "touch_1_sent")
     assert final_update._payload["touch_1_sent_at"] is not None
 

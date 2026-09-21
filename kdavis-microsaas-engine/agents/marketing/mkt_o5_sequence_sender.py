@@ -40,7 +40,13 @@ from typing import Any, Optional
 
 import resend
 
-from core.email_compliance import append_compliance_footer, daily_send_cap, is_suppressed, sends_today
+from core.email_compliance import (
+    append_compliance_footer,
+    build_list_unsubscribe_headers,
+    daily_send_cap,
+    is_suppressed,
+    sends_today,
+)
 from core.sanitization import DataSanitizationShield
 from core.supabase_client import get_supabase
 
@@ -69,12 +75,18 @@ def _write_audit(db, outcome: str, product_id: str, metadata: dict) -> None:
 
 
 def _send_email(resend_client, to_email: str, subject: str, body: str) -> None:
+    # RFC 8058 one-click headers (2026-09-21) -- required on every
+    # marketing send, not just the in-body unsubscribe link
+    # append_compliance_footer already adds. See
+    # core/email_compliance.py's build_list_unsubscribe_headers.
+    headers = build_list_unsubscribe_headers(to_email)
     if resend_client is not None:
         resend_client.Emails.send({
             "from": os.environ.get("RESEND_FROM_EMAIL", "outreach@resend.dev"),
             "to": to_email,
             "subject": subject,
             "text": body,
+            "headers": headers,
         })
         return
     resend.api_key = os.environ["RESEND_API_KEY"]
@@ -83,6 +95,7 @@ def _send_email(resend_client, to_email: str, subject: str, body: str) -> None:
         "to": to_email,
         "subject": subject,
         "text": body,
+        "headers": headers,
     })
 
 

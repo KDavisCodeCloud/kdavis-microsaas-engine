@@ -123,3 +123,35 @@ def test_unsubscribe_escapes_email_in_html_response(fake_db, monkeypatch):
 
     assert "<script>" not in resp.text
     assert "&lt;script&gt;" in resp.text
+
+
+# ── POST /marketing/unsubscribe — RFC 8058 one-click target, same
+# public/no-auth shape as the GET landing page above ────────────────────
+
+def test_one_click_unsubscribe_is_a_public_path_source():
+    import inspect
+    source = inspect.getsource(tenant_context_middleware)
+    # Same PUBLIC_PATHS entry covers both verbs (path-only match) -- this
+    # just documents that the POST route relies on that, not a second entry.
+    assert "/marketing/unsubscribe" in source
+
+
+def test_one_click_unsubscribe_with_valid_token_suppresses(fake_db, monkeypatch):
+    monkeypatch.setattr(marketing_router, "get_supabase", lambda: fake_db)
+    token = generate_unsubscribe_token("lead@example.com")
+
+    resp = client.post(f"/marketing/unsubscribe?email=lead@example.com&token={token}")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "unsubscribed"}
+    upserts = [c for c in fake_db.executed if c.table_name == "mse_email_suppressions" and c.calls[0][0] == "upsert"]
+    assert upserts[0]._payload == {"email": "lead@example.com", "reason": "unsubscribed"}
+
+
+def test_one_click_unsubscribe_rejects_invalid_token(fake_db, monkeypatch):
+    monkeypatch.setattr(marketing_router, "get_supabase", lambda: fake_db)
+
+    resp = client.post("/marketing/unsubscribe?email=lead@example.com&token=forged-token")
+
+    assert resp.status_code == 400
+    assert [c for c in fake_db.executed if c.table_name == "mse_email_suppressions"] == []

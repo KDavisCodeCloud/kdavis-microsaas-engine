@@ -70,6 +70,20 @@ def suppress_email(db, email: str, reason: str = "unsubscribed") -> None:
     ).execute()
 
 
+def build_list_unsubscribe_headers(email: str) -> dict[str, str]:
+    """RFC 8058 one-click unsubscribe headers -- required on every
+    marketing send per the 2026-09-21 email-campaign-system build
+    (Cloud Decoded's equivalent build locked the same requirement). A
+    conforming mail client POSTs to the https URI below with body
+    `List-Unsubscribe=One-Click` instead of making the human click through
+    a landing page; api/routers/marketing.py's POST /marketing/unsubscribe
+    handler is the corresponding server-side half of this."""
+    return {
+        "List-Unsubscribe": f"<{build_unsubscribe_url(email)}>",
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    }
+
+
 def append_compliance_footer(body: str, email: str) -> str:
     """
     Appends the CAN-SPAM-required physical mailing address and a one-click

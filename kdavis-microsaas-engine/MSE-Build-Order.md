@@ -371,3 +371,90 @@ This file remains the place for narrative batch write-ups (what was tested, what
 - Model routing: Haiku for high-volume scraping, Sonnet for analysis — do not swap
 - DataSanitizationShield before every LLM call — no exceptions
 - No autonomous outbound — every build, brief-generation, or outreach action requires a named human (`triggered_by`) and admin role; this is enforced in code, not just policy
+
+---
+
+## Email Campaign HITL Queue API + RFC 8058 compliance (2026-09-21)
+
+Session goal (part of a 3-repo cross-cutting build — see
+`kdavis-agentic-platform`'s CEO Decoded dashboard, which consumes this):
+give the CEO dashboard a real API to review/approve MSE's lifecycle email
+sequences, and close a real CAN-SPAM/RFC 8058 gap on the one channel that
+actually sends live email today.
+
+**Shipped, safe, additive, tested (624 passed / 1 skipped / 0 failed,
+clean env — see note below):**
+- `core/email_compliance.py`: `build_list_unsubscribe_headers()` — RFC
+  8058 `List-Unsubscribe` + `List-Unsubscribe-Post` headers.
+- `agents/marketing/mkt_o5_sequence_sender.py`: wired those headers into
+  every real Resend send (the only live commercial-email sender in this
+  repo — MKT-O3/Brevo has never sent anything real, `BREVO_API_KEY` is
+  unset).
+- `api/routers/marketing.py`: `POST /marketing/unsubscribe` — the RFC
+  8058 one-click POST target (existing `GET` landing page unchanged).
+- `api/routers/marketing_internal.py` (new, registered in `api/main.py`):
+  admin-JWT-gated `GET/POST /marketing/internal/email-templates[...]`,
+  `/campaign-status`, `/email-metrics`. Full contract:
+  `docs/internal/email-approval-api.md`.
+- Migration `20260921000051_email_sequence_grounding.sql`: additive
+  `origin`/`source_script`/`grounding_sources` columns on
+  `mse_email_sequences`, plus a `retired` status option. **Not yet
+  confirmed applied to the live DB** — this repo has no `DATABASE_URL`
+  in the local `.env` (only set on the `mse-api` Railway service itself),
+  so it could not be dry-run locally; `core/migrate.py` applies it
+  automatically on next deploy. Confirm post-deploy via
+  `mse_schema_migrations` or by checking the new columns exist.
+
+**Real architecture finding — deliberately NOT worked around this
+session, needs a decision before the next email-system session:**
+Three unrelated "product_id" spaces coexist in this repo with no
+resolving FK between them: (1) `opportunity_pipeline.id` — what the live
+campaign trigger (`mkt_orch_campaign_orchestrator.py`, fired from
+`POST /products/{id}/run-campaign`) actually keys on; (2)
+`mse_products.id` — the DIST positioning-gate registry (`mse_positioning`,
+10 products, only `small-portfolio-hub` has an approved brief as of
+today); (3) whatever `mse_email_sequences.product_id` actually is on its
+2 existing rows (0/2 match `mse_products.id`, both pre-date that
+registry). The build spec this session was written against wanted
+campaign generation hard-gated on an approved `mse_positioning` row
+(Locked Decision 3) — that gate is genuinely NOT wired, because doing so
+correctly requires resolving which of these three ID spaces
+`mkt_orch_campaign_orchestrator.py` should actually check against, and
+guessing wrong risks silently blocking (or failing to block) a live,
+n8n-triggered production path for real products. Needs Kelvin's call:
+either add an explicit `mse_products_id` FK to `opportunity_pipeline`
+and `campaign_builds`, or accept slug-based matching as good enough, then
+wire the gate for real.
+
+**Also NOT built this session, and why:** a parallel
+`mse_email_templates`/subscribers/enrollments/sends/clicks schema, a
+15-minute scheduler, and click tracking. The build spec assumed these
+don't exist; in fact `mse_email_sequences` + `campaign_builds` + MKT-O3
+already cover most of the same ground under different names, and
+building a second schema alongside it would recreate the exact
+kind of duplicate-system problem this cross-repo build was explicitly
+trying to avoid on the Cloud Decoded side (see that repo's own
+reconciliation decisions, same session). Recommend extending
+`mse_email_sequences` (per-step rows instead of one JSONB blob, plus
+new `mse_email_clicks`/`mse_email_sends` tables) as a properly-scoped
+follow-up, once BREVO_API_KEY is actually set and MKT-O3 sequences have
+something real to track.
+
+**Testing note for future sessions:** do not `source .env` before running
+`pytest` in this repo — the real `SUPABASE_JWT_SECRET`/service keys in
+`.env` silently override `tests/conftest.py`'s placeholder values (which
+use `os.environ.setdefault`), breaking every JWT-signing test with
+401s instead of the expected 403s. Run pytest in a clean env
+(`env -i HOME="$HOME" PATH="$PATH" python3 -m pytest`) or simply don't
+source `.env` first — confirmed this cost real time this session before
+being traced to the real cause (not a regression from this session's
+code changes).
+
+**Kelvin-only actions from this session:**
+- Decide the product-ID reconciliation above before the positioning
+  gate can be wired for real.
+- `BREVO_API_KEY` still unset — MKT-O3 sequences remain
+  `loaded_unactivated` (or now `pending_hitl`) forever until this is
+  provisioned; see `BREVO_SETUP.md`.
+- Confirm migration `20260921000051` applied on the next `mse-api`
+  deploy (see above — could not be verified locally).
