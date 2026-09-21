@@ -1,0 +1,14 @@
+# Exclude local dev artifacts and build output from Railway CLI uploads.
+node_modules/
+.venv/
+venv/
+.git/
+__pycache__/
+*.pyc
+
+# Untracked local file (not in git, not in the GitHub-sourced deploy) that
+# causes Railpack's config parser to fail with an encoding error when
+# uploaded via `railway up` from this WSL-mounted Windows drive. Excluding
+# it here keeps `railway up` usable as a fallback deploy path independent
+# of the GitHub webhook trigger.
+railpack.json
