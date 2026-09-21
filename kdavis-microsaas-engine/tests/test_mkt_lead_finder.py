@@ -76,6 +76,47 @@ def test_find_leads_deduplicates_within_the_same_batch():
     assert len(leads) == 1
 
 
+def test_find_leads_drops_a_pattern_guessed_email_that_already_exists():
+    """Real bug found live 2026-09-21 on the first real Brave Search run
+    to ever surface actual leads: a raw lead with NO scraped email (only
+    name+domain) gets one attached by find_email()'s pattern-guessing
+    inside _verify_lead_email -- AFTER _dedupe_raw_leads already ran, so
+    that guess was never checked against mse_leads' real emails.
+    idx_mse_leads_email's UNIQUE constraint then failed the whole bulk
+    insert (not just this one row), losing every lead the run found."""
+    fake_db = FakeSupabase(responses={
+        "mse_leads": [{"linkedin_url": None, "email": "director@freehire.me"}],
+    })
+    raw = [RawLead(name="Jane Doe", domain="freehire.me", source="brave_search", location="Phoenix AZ")]
+
+    with patch.object(mlf, "BraveSearchScraper", return_value=_fake_brave_scraper(raw)), \
+         patch.object(mlf, "get_vertical_scraper", return_value=None), \
+         patch.object(mlf, "find_email", return_value=EmailResult(
+             email="director@freehire.me", pattern_used="role", verification_status="unverified", confidence_score=0.2,
+         )):
+        leads = mlf.find_leads("prod-1", VALID_ICP_CONFIG, limit=10, supabase_client=fake_db)
+
+    assert leads == []
+
+
+def test_find_leads_drops_the_second_of_two_leads_that_resolve_to_the_same_guessed_email():
+    fake_db = FakeSupabase(responses={"mse_leads": []})
+    raw = [
+        RawLead(name="Jane Doe", domain="freehire.me", source="brave_search", location="Phoenix AZ"),
+        RawLead(name="John Smith", domain="freehire.me", source="brave_search", location="Phoenix AZ"),
+    ]
+
+    with patch.object(mlf, "BraveSearchScraper", return_value=_fake_brave_scraper(raw)), \
+         patch.object(mlf, "get_vertical_scraper", return_value=None), \
+         patch.object(mlf, "find_email", return_value=EmailResult(
+             email="director@freehire.me", pattern_used="role", verification_status="unverified", confidence_score=0.2,
+         )):
+        leads = mlf.find_leads("prod-1", VALID_ICP_CONFIG, limit=10, supabase_client=fake_db)
+
+    assert len(leads) == 1
+    assert leads[0]["name"] == "Jane Doe"
+
+
 def test_find_leads_uses_vertical_scraper_when_configured():
     fake_db = FakeSupabase(responses={"mse_leads": []})
     vertical_lead = RawLead(name="Alex Broker", title="Broker", source="real_estate_db", location="Phoenix AZ")

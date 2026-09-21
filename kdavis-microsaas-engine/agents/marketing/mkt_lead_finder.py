@@ -302,9 +302,38 @@ def find_leads(
     if on_progress:
         on_progress("Finalizing results", verify_total, verify_total)
 
+    # Real bug found live 2026-09-21 (first real Brave Search run ever to
+    # find actual leads -- Google CSE had been silently returning zero for
+    # months, so this path was never exercised): _dedupe_raw_leads above
+    # only catches a duplicate email/linkedin_url the SCRAPER already had
+    # in hand. _verify_lead_email can attach a *new* email via
+    # find_email()'s pattern-guessing (a raw lead that scraped with no
+    # email at all, only a name+domain) -- that email was never checked
+    # against existing_emails or against other leads in this same batch,
+    # so two candidates resolving to the same guessed address (or one
+    # resolving to an address already in mse_leads) hit
+    # idx_mse_leads_email's real UNIQUE constraint on insert and failed
+    # run_lead_finder_for_product's single bulk insert *atomically* --
+    # losing every lead in that run, not just the colliding one. Same
+    # "app-level + real-constraint belt-and-suspenders" dedup discipline
+    # as _dedupe_raw_leads above, applied to the email verification only
+    # attaches after that first pass already ran.
+    seen_emails_this_batch: set[str] = set()
+    post_verify_duplicates = 0
+    final_leads: list[dict] = []
+    for lead in leads:
+        email = lead.get("email")
+        if email and (email in existing_emails or email in seen_emails_this_batch):
+            post_verify_duplicates += 1
+            continue
+        if email:
+            seen_emails_this_batch.add(email)
+        final_leads.append(lead)
+    leads = final_leads
+
     if _stats is not None:
         _stats["raw_found"] = len(raw_leads)
-        _stats["duplicates"] = duplicate_count
+        _stats["duplicates"] = duplicate_count + post_verify_duplicates
         _stats["brave_query_count"] = brave_scraper.query_count
 
     return leads
