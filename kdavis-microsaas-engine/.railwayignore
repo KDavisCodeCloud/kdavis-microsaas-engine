@@ -12,3 +12,16 @@ __pycache__/
 # it here keeps `railway up` usable as a fallback deploy path independent
 # of the GitHub webhook trigger.
 railpack.json
+
+# Procfile IS git-tracked and clean in the repo (plain ASCII, verified via
+# xxd) -- the corruption is specific to how `railway up` reads it off this
+# WSL-mounted Windows drive during upload (same class of issue as
+# railpack.json above: "yaml: control characters are not allowed" from
+# Railpack's parser, 2026-09-22). Safe to exclude from `railway up`
+# uploads only: railway.json's deploy.startCommand already duplicates
+# Procfile's one line (`python3 -m uvicorn api.main:app --host 0.0.0.0
+# --port $PORT`) and takes precedence on Railway regardless, so no deploy
+# path loses its start command by skipping Procfile here. The GitHub-
+# sourced deploy is untouched -- it reads Procfile from git directly, not
+# through this file.
+Procfile
