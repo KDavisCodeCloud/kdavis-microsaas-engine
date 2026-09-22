@@ -42,7 +42,7 @@ def test_find_leads_returns_run_id(fake_db, monkeypatch):
     captured = {}
     monkeypatch.setattr(
         leads_router, "_run_lead_finder_background",
-        lambda product_id, run_id: captured.update(product_id=product_id, run_id=run_id),
+        lambda product_id, run_id, limit=None: captured.update(product_id=product_id, run_id=run_id, limit=limit),
     )
 
     resp = client.post("/marketing/leads/find", json={"product_id": "prod-1"}, headers=AUTH)
@@ -55,8 +55,46 @@ def test_find_leads_returns_run_id(fake_db, monkeypatch):
     assert inserts[0]._payload["status"] == "pending"
 
     # Background task ran (TestClient executes it synchronously) with the
-    # real run_id the insert produced -- not a placeholder.
-    assert captured == {"product_id": "prod-1", "run_id": "run-1"}
+    # real run_id the insert produced -- not a placeholder. No limit was
+    # given in the request, so it must reach the background task as None
+    # (run_lead_finder_for_product then falls back to the ICP config's
+    # own target_count).
+    assert captured == {"product_id": "prod-1", "run_id": "run-1", "limit": None}
+
+
+def test_find_leads_threads_limit_through_to_background_task(fake_db, monkeypatch):
+    """Real gap fixed 2026-09-22: `limit` was accepted in the request body
+    but silently dropped before ever reaching the background task, so a
+    caller had no way to request a smaller/faster run than the ICP
+    config's full target_count."""
+    fake_db.responses["mse_lead_finder_runs"] = [{"id": "run-1"}]
+    monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+
+    captured = {}
+    monkeypatch.setattr(
+        leads_router, "_run_lead_finder_background",
+        lambda product_id, run_id, limit=None: captured.update(product_id=product_id, run_id=run_id, limit=limit),
+    )
+
+    resp = client.post("/marketing/leads/find", json={"product_id": "prod-1", "limit": 3}, headers=AUTH)
+
+    assert resp.status_code == 200
+    assert captured == {"product_id": "prod-1", "run_id": "run-1", "limit": 3}
+
+
+def test_run_lead_finder_background_passes_limit_through(monkeypatch):
+    """One layer deeper than the route test above: _run_lead_finder_background
+    itself must forward `limit` into run_lead_finder_for_product (imported
+    locally inside the function, from agents.marketing.mkt_lead_finder),
+    not just accept it."""
+    import agents.marketing.mkt_lead_finder as mlf
+
+    captured = {}
+    monkeypatch.setattr(mlf, "run_lead_finder_for_product", lambda **kwargs: captured.update(kwargs))
+
+    leads_router._run_lead_finder_background("prod-1", "run-1", limit=3)
+
+    assert captured == {"product_id": "prod-1", "run_id": "run-1", "limit": 3}
 
 
 def test_find_leads_500_when_run_row_insert_fails(fake_db, monkeypatch):

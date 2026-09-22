@@ -22,6 +22,12 @@ router = APIRouter(prefix="/marketing", tags=["marketing", "leads"])
 
 class FindLeadsRequest(BaseModel):
     product_id: str
+    # Overrides the ICP config's target_count for this run only -- omit to
+    # use the full configured target_count (the weekly cron's behavior).
+    # Real gap fixed 2026-09-22: this field existed but was silently
+    # dropped before ever reaching run_lead_finder_for_product, so a
+    # caller had no way to ask for a quick handful instead of a full,
+    # multi-hour run (target_count leads at 3-6 min/lead SMTP verification).
     limit: Optional[int] = None
 
 
@@ -47,7 +53,9 @@ async def trigger_lead_finder(
     gets a real run_id to poll immediately — and runs the actual find as
     a background task. A full run can take hours (SMTP verification is
     throttled to 10-20/hour, see mkt_lead_finder.py's own module
-    docstring), far past any reasonable HTTP request timeout.
+    docstring), far past any reasonable HTTP request timeout. Pass
+    `limit` in the request body for a smaller, faster run than the ICP
+    config's full target_count -- e.g. for a manual smoke test.
     """
     require_marketing_api_key(authorization)
     db = get_supabase()
@@ -59,15 +67,15 @@ async def trigger_lead_finder(
         raise HTTPException(status_code=500, detail="Failed to create lead finder run")
     run_id = run_row.data[0]["id"]
 
-    background_tasks.add_task(_run_lead_finder_background, body.product_id, run_id)
+    background_tasks.add_task(_run_lead_finder_background, body.product_id, run_id, body.limit)
     return {"run_id": run_id, "status": "pending"}
 
 
-def _run_lead_finder_background(product_id: str, run_id: str) -> None:
+def _run_lead_finder_background(product_id: str, run_id: str, limit: Optional[int] = None) -> None:
     from agents.marketing.mkt_lead_finder import run_lead_finder_for_product
 
     try:
-        run_lead_finder_for_product(product_id=product_id, run_id=run_id)
+        run_lead_finder_for_product(product_id=product_id, run_id=run_id, limit=limit)
     except Exception:
         pass  # run_lead_finder_for_product already writes the failure to the run row + audit log
 

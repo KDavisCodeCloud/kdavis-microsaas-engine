@@ -170,6 +170,53 @@ def test_run_lead_finder_for_product_writes_leads_and_completes_run():
     assert activity_inserts[0]._payload[0]["product_id"] == "prod-1"
 
 
+def test_run_lead_finder_for_product_limit_overrides_icp_target_count():
+    """Real gap fixed 2026-09-22: POST /marketing/leads/find accepted a
+    `limit` field but it never reached this function, so every run always
+    used the ICP config's full target_count (10 here) regardless of what
+    a caller asked for. VALID_ICP_CONFIG's target_count is 10; two raw
+    leads are returned, so without the override both would survive --
+    passing limit=1 must truncate to exactly one."""
+    fake_db = FakeSupabase(responses={
+        "mse_icp_configs": [{"product_id": "prod-1", **VALID_ICP_CONFIG}],
+        "mse_lead_finder_runs": [{"id": "run-1"}],
+        "mse_leads": [{"id": "lead-row-1"}],
+        "usage_events": [],
+    })
+    raw = [
+        RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="brave_search", location="Phoenix AZ"),
+        RawLead(name="John Smith", linkedin_url="https://linkedin.com/in/johnsmith", source="brave_search", location="Phoenix AZ"),
+    ]
+
+    with patch.object(mlf, "BraveSearchScraper", return_value=_fake_brave_scraper(raw)), \
+         patch.object(mlf, "get_vertical_scraper", return_value=None):
+        result = mlf.run_lead_finder_for_product("prod-1", supabase_client=fake_db, limit=1)
+
+    assert result["leads_found"] == 1
+
+
+def test_run_lead_finder_for_product_uses_target_count_when_no_limit_given():
+    """Companion to the override test above -- confirms the default path
+    (no limit passed, same as the weekly n8n cron's call shape) still
+    uses the ICP config's target_count exactly as before this change."""
+    fake_db = FakeSupabase(responses={
+        "mse_icp_configs": [{"product_id": "prod-1", **VALID_ICP_CONFIG}],
+        "mse_lead_finder_runs": [{"id": "run-1"}],
+        "mse_leads": [{"id": "lead-row-1"}],
+        "usage_events": [],
+    })
+    raw = [
+        RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="brave_search", location="Phoenix AZ"),
+        RawLead(name="John Smith", linkedin_url="https://linkedin.com/in/johnsmith", source="brave_search", location="Phoenix AZ"),
+    ]
+
+    with patch.object(mlf, "BraveSearchScraper", return_value=_fake_brave_scraper(raw)), \
+         patch.object(mlf, "get_vertical_scraper", return_value=None):
+        result = mlf.run_lead_finder_for_product("prod-1", supabase_client=fake_db)
+
+    assert result["leads_found"] == 2
+
+
 def test_find_leads_reports_progress_for_search_and_verify_phases():
     """2026-09-17: Kelvin reported no status bar for a running lead-finder
     job -- on_progress is the mechanism that fixes it. One call per

@@ -339,7 +339,12 @@ def find_leads(
     return leads
 
 
-def run_lead_finder_for_product(product_id: str, supabase_client: Optional[Any] = None, run_id: Optional[str] = None) -> dict:
+def run_lead_finder_for_product(
+    product_id: str,
+    supabase_client: Optional[Any] = None,
+    run_id: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> dict:
     """
     Production entry point (n8n/lead_finder_workflow.json and
     POST /marketing/leads/find both call this). Pulls this product's
@@ -356,6 +361,15 @@ def run_lead_finder_for_product(product_id: str, supabase_client: Optional[Any] 
     docstring's SMTP-throttling tradeoff — so it runs as a FastAPI
     BackgroundTask, and the caller needs a real id to poll before that
     background work has even started, let alone finished).
+
+    `limit`, if given, overrides icp_config["target_count"] for this run
+    only — the ICP config's own target_count is unchanged. Real gap found
+    live 2026-09-22: POST /marketing/leads/find's request body already
+    accepted a `limit` field but silently dropped it before ever reaching
+    this function, so every triggered run — including a deliberate small
+    test run — always used the full target_count (100 for most products),
+    which at 3-6 minutes/lead SMTP verification means hours, with no way
+    to ask for a quick handful instead.
     """
     db = supabase_client if supabase_client is not None else get_supabase()
 
@@ -412,12 +426,12 @@ def run_lead_finder_for_product(product_id: str, supabase_client: Optional[Any] 
     _on_progress("Starting search…", 0, locations_count)
 
     try:
-        limit = icp_config.get("target_count") or 100
+        effective_limit = limit if limit is not None else (icp_config.get("target_count") or 100)
         already_used_this_month = _this_months_brave_query_count(db)
 
         stats: dict = {}
         leads = find_leads(
-            product_id, icp_config, limit=limit, supabase_client=db,
+            product_id, icp_config, limit=effective_limit, supabase_client=db,
             brave_query_count=already_used_this_month, _stats=stats,
             on_progress=_on_progress,
         )
