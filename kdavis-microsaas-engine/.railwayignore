@@ -25,3 +25,14 @@ railpack.json
 # sourced deploy is untouched -- it reads Procfile from git directly, not
 # through this file.
 Procfile
+
+# Same WSL-upload corruption, confirmed live 2026-09-22: railway up read
+# this git-tracked file's content back as five literal NUL bytes
+# ("\0\0\0\0\0") during a real build attempt, which mise's config parser
+# correctly rejected ("contains forbidden character '\0'"). Content on
+# disk and in git is the plain text "3.11" -- verified with xxd both
+# times. This is now the THIRD file (railpack.json, Procfile, this one)
+# to hit this exact WSL-mount-upload corruption class; if a future
+# railway up attempt hits it on a fourth file, that's the pattern to
+# recognize immediately rather than debugging the file itself.
+.python-version
