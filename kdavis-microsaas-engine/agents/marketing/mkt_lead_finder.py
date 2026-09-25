@@ -59,10 +59,19 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
+import httpx
+from bs4 import BeautifulSoup
+
 from core.email_finder import MAX_VERIFY_DELAY_SECONDS, MIN_VERIFY_DELAY_SECONDS, find_email, verify_email
 from core.supabase_client import get_supabase
 from scrapers.base import RawLead
-from scrapers.brave_search import MAX_DELAY_SECONDS, MAX_QUERIES_PER_CALL, MIN_DELAY_SECONDS, BraveSearchScraper
+from scrapers.brave_search import (
+    MAX_DELAY_SECONDS,
+    MAX_QUERIES_PER_CALL,
+    MIN_DELAY_SECONDS,
+    BraveSearchScraper,
+    _robots_allowed,  # reused as-is, not re-duplicated -- same "one trusted implementation" call this module already makes by importing the constants above from the same file
+)
 from scrapers.verticals import get_vertical_scraper
 
 log = logging.getLogger(__name__)
@@ -737,4 +746,450 @@ def run_job_posting_signal_finder(product_id: str, supabase_client: Optional[Any
     return {
         "status": "complete", "leads_found": len(signals), "leads_written": len(inserted),
         "raw_found": stats.get("raw_found", 0),
+    }
+
+
+# ── Cloud Decoded job-signal branch, added 2026-09-25 ──────────────────────
+#
+# A second job-posting-signal branch alongside the infra-consulting one
+# above. JOB_POSTING_QUERY_TITLES, find_job_posting_signals, and
+# run_job_posting_signal_finder are ALL left completely unmodified by
+# everything below -- Kelvin's own instruction: "do not touch the
+# consulting branch's queries or sequence." find_cloud_decoded_job_signals
+# is a fresh, self-contained loop rather than a reuse of
+# find_job_posting_signals -- this branch needs a real MIN company-size
+# filter (consulting only ever needed a max) and JD-text capture +
+# stack-keyword extraction, neither of which exists on that function;
+# duplicating ~15 lines of loop structure is cheaper and lower-risk than
+# growing shared surface into consulting's own tested path. See
+# thd_lead_scout.CLOUD_DECODED_JOB_SIGNAL_ICP for the human-readable ICP
+# definition this mirrors.
+
+CLOUD_DECODED_PRODUCT_ID = "777a1852-f84c-49d8-890e-cd14670b7f6f"  # mse_products.slug='cloud-decoded'
+THDAGENTIC_CONSULTING_PRODUCT_ID = "9b6c8f36-985f-4d7a-a416-c40da89e23af"  # mse_products.slug='thdagentic-consulting'
+
+CLOUD_DECODED_JOB_SIGNAL_QUERY_TITLES = ["DevOps engineer", "SRE", "platform engineer", "cloud engineer"]
+
+# Case-insensitive substring match against the JD text (or, failing that,
+# the search result's title+snippet) -- canonical spelling only, never a
+# variant found in the source text. "Azure DevOps" containing "Azure" as
+# a substring too is expected, not a bug: both are genuinely present.
+_STACK_KEYWORDS = ["Azure", "AWS", "Terraform", "Bicep", "Kubernetes", "GitHub Actions", "Azure DevOps"]
+
+# Routing rule (Kelvin's own spec, 2026-09-25), applied to EVERY posting
+# found by EITHER branch's search -- a "cloud engineer" query can still
+# surface an architect/contract-titled result that belongs in consulting,
+# and a consulting-flavored query can surface an ongoing-ops role that
+# belongs in cloud-decoded. Substring match on the posting's own title,
+# never on which branch's search happened to find it.
+_CONSULTING_ROUTE_KEYWORDS = ("architect", "design", "contract", "consultant", "consulting")
+_CLOUD_DECODED_ROUTE_KEYWORDS = (
+    "devops", "sre", "site reliability", "platform engineer", "cloud engineer",
+    "infrastructure engineer", "operations engineer", "ops engineer",
+)
+
+
+def _route_job_posting_title(title: str) -> str:
+    """
+    Returns "consulting" or "cloud_decoded". Consulting-shaped keywords
+    are checked FIRST and win outright -- this is what makes "ambiguous,
+    or matches both, -> consulting" true without a separate branch: a
+    title matching both keyword sets (e.g. "Contract DevOps Engineer")
+    hits the consulting check first and returns immediately. A title
+    matching NEITHER set also falls through to the same "consulting"
+    default at the bottom -- same tie-break, same reason: Kelvin's own
+    explicit default, not a guess this code is making on its own.
+    """
+    t = (title or "").lower()
+    if any(kw in t for kw in _CONSULTING_ROUTE_KEYWORDS):
+        return "consulting"
+    if any(kw in t for kw in _CLOUD_DECODED_ROUTE_KEYWORDS):
+        return "cloud_decoded"
+    return "consulting"
+
+
+def _extract_stack_keywords(text: Optional[str]) -> list[str]:
+    if not text:
+        return []
+    lowered = text.lower()
+    return [kw for kw in _STACK_KEYWORDS if kw.lower() in lowered]
+
+
+def _fetch_job_posting_text(url: str, http_get=None) -> Optional[str]:
+    """
+    Fetches the real job posting page's visible text for JD capture +
+    stack-keyword extraction, respecting robots.txt (fail-closed, reusing
+    scrapers.brave_search._robots_allowed directly rather than
+    re-duplicating it a third time in this codebase). Returns None on any
+    failure (disallowed, network error, non-200) -- JD capture is
+    enrichment, never a precondition for writing the lead itself, same
+    "never let optional context block the real work" discipline as every
+    other best-effort capture in this codebase. Truncated to 8000 chars --
+    a JD page's visible text, not a whole site.
+    """
+    get_fn = http_get or (lambda u, **kw: httpx.get(u, **kw))
+    user_agent = "Mozilla/5.0 (compatible; CloudDecodedJobSignalBot/1.0)"
+    if not _robots_allowed(url, user_agent, get_fn):
+        return None
+    try:
+        resp = get_fn(url, timeout=15, headers={"User-Agent": user_agent})
+        if resp.status_code >= 400:
+            return None
+        return BeautifulSoup(resp.text, "html.parser").get_text(" ", strip=True)[:8000]
+    except Exception:
+        return None
+
+
+def _existing_job_signal_domains(db) -> set:
+    """Every domain already present across BOTH job-signal pipelines --
+    "one company, one pipeline, ever" (Kelvin's own routing spec): a
+    company already in EITHER consulting's job_posting_signal pipeline or
+    Cloud Decoded's cloud_decoded_job_signal pipeline must never get a
+    second entry in the other, or a repeat in its own. Two separate
+    .eq() reads unioned in Python rather than .in_() -- mirrors this
+    codebase's own "small enough today" precedent (api/routers/leads.py's
+    get_pipeline_summary) for a table this size, and keeps this callable
+    against tests/conftest.py's FakeSupabase, which has no .in_()."""
+    domains: set = set()
+    for source in ("job_posting_signal", "cloud_decoded_job_signal"):
+        rows = db.table("mse_leads").select("domain").eq("source", source).execute().data or []
+        domains |= {r["domain"] for r in rows if r.get("domain")}
+    return domains
+
+
+def find_cloud_decoded_job_signals(
+    max_age_days: int = 30,
+    brave_query_count: int = 0,
+    _stats: Optional[dict] = None,
+    fetch_jd_text: bool = True,
+) -> list[dict]:
+    """
+    Cloud Decoded's own job-posting-signal search -- DevOps/SRE/platform/
+    cloud engineer roles at 20-500 person companies. Pure function, no
+    writes and no routing decision made here -- run_combined_job_signal_scout
+    applies _route_job_posting_title to every candidate this returns
+    before anything is written, since a "cloud engineer" query can still
+    surface an architect/contract-titled posting that belongs in
+    consulting instead.
+
+    Same "drop what can't be date-confirmed" rule as consulting's own
+    find_job_posting_signals -- never assumes a candidate is recent just
+    because its posting date couldn't be determined. `fetch_jd_text=False`
+    skips the real page fetch (JD capture + stack-keyword extraction) --
+    only ever used by tests, so they don't need real network access to
+    exercise the search/date/size-filter logic.
+    """
+    scraper = BraveSearchScraper(query_count=brave_query_count)
+    if not scraper.api_key:
+        if _stats is not None:
+            _stats["raw_found"] = 0
+            _stats["brave_query_count"] = brave_query_count
+        return []  # skip gracefully -- same shape as every other quota/credential-gated path in this codebase
+
+    locations = ["United States"]
+    min_company_size, max_company_size = 20, 500
+    today = date.today()
+    cutoff = today - timedelta(days=max_age_days)
+
+    raw_found = 0
+    seen_urls: set[str] = set()
+    signals: list[dict] = []
+
+    for title in CLOUD_DECODED_JOB_SIGNAL_QUERY_TITLES:
+        for location in locations:
+            items = scraper._search(f'"{title}" hiring {location}')
+            raw_found += len(items)
+            for item in items:
+                link = item.get("link", "")
+                if not link or link in seen_urls:
+                    continue
+                seen_urls.add(link)
+
+                posting_date = _extract_posting_date(item, today)
+                if posting_date is None or posting_date < cutoff:
+                    continue
+
+                employee_estimate = _extract_employee_estimate(item)
+                if employee_estimate:
+                    try:
+                        lower, upper = (int(x) for x in employee_estimate.split("-"))
+                        if upper < min_company_size or lower > max_company_size:
+                            continue
+                    except (ValueError, IndexError):
+                        pass  # undetectable is not disqualifying -- same rule as consulting's own max-only check
+
+                domain = urlparse(link).netloc.replace("www.", "")
+                jd_text = _fetch_job_posting_text(link) if fetch_jd_text else None
+                stack_keywords = _extract_stack_keywords(
+                    jd_text or f"{item.get('title', '')} {item.get('snippet', '')}"
+                )
+
+                signals.append({
+                    "company": _company_name_from_result(item, domain),
+                    "domain": domain,
+                    "title": item.get("title", title),
+                    "job_posting_title": item.get("title", title),
+                    "job_posting_url": link,
+                    "job_posting_date": posting_date.isoformat(),
+                    "job_posting_description": jd_text,
+                    "job_posting_stack_keywords": stack_keywords,
+                    "location": location,
+                    "confidence_score": 0.5,
+                })
+
+    if _stats is not None:
+        _stats["raw_found"] = raw_found
+        _stats["duplicates"] = raw_found - len(signals)
+        _stats["brave_query_count"] = scraper.query_count
+
+    return signals
+
+
+def _find_consulting_postings_for_routing(
+    icp_config: dict,
+    max_age_days: int = 30,
+    brave_query_count: int = 0,
+    _stats: Optional[dict] = None,
+) -> list[dict]:
+    """
+    A parallel, routing-aware version of find_job_posting_signals' own
+    search loop, used ONLY by run_combined_job_signal_scout below --
+    kept entirely separate so find_job_posting_signals and
+    run_job_posting_signal_finder stay byte-for-byte unmodified (per
+    Kelvin's own "do not touch the consulting branch's queries or
+    sequence" instruction). Identical query construction (the SAME
+    icp_config job_titles/locations/search_templates/max_company_size --
+    same resulting queries, same results) and the same max-company-size
+    filter, but ALSO preserves the real result title
+    (item.get("title")) under "posting_title_raw" for
+    _route_job_posting_title to read.
+
+    This matters because find_job_posting_signals' own output does NOT
+    carry the real posting title anywhere -- its "job_posting_title"
+    field is set to the CONTACT-title loop variable (e.g. "CTO"), not
+    the actual result's title, a pre-existing shape unrelated to this
+    branch and left exactly as-is. Routing on that field would always
+    fall through to the "consulting" default, silently defeating "a
+    consulting-flavored query can still surface an ongoing-ops title
+    that belongs in cloud-decoded" -- the whole reason routing exists.
+
+    "posting_title_raw" and "contact_title" below are routing/shaping
+    scratch fields only -- run_combined_job_signal_scout strips them
+    before any mse_leads insert, same as every other field on that table
+    that doesn't correspond to a real column.
+    """
+    scraper = BraveSearchScraper(query_count=brave_query_count)
+    if not scraper.api_key:
+        if _stats is not None:
+            _stats["raw_found"] = 0
+            _stats["brave_query_count"] = brave_query_count
+        return []
+
+    titles = icp_config.get("job_titles") or [""]
+    locations = icp_config.get("locations") or [""]
+    templates = icp_config.get("search_templates") or [
+        f'"{{title}}" hiring "{kw}" {{location}}' for kw in JOB_POSTING_QUERY_TITLES
+    ]
+    max_company_size = icp_config.get("max_company_size")
+    today = date.today()
+    cutoff = today - timedelta(days=max_age_days)
+
+    raw_found = 0
+    seen_urls: set[str] = set()
+    signals: list[dict] = []
+
+    for template in templates:
+        for title in titles:
+            for location in locations:
+                items = scraper._search(template.format(title=title, location=location))
+                raw_found += len(items)
+                for item in items:
+                    link = item.get("link", "")
+                    if not link or link in seen_urls:
+                        continue
+                    seen_urls.add(link)
+
+                    posting_date = _extract_posting_date(item, today)
+                    if posting_date is None or posting_date < cutoff:
+                        continue
+
+                    employee_estimate = _extract_employee_estimate(item)
+                    if employee_estimate and max_company_size:
+                        try:
+                            upper = int(employee_estimate.split("-")[1])
+                            if upper > max_company_size:
+                                continue
+                        except (ValueError, IndexError):
+                            pass
+
+                    domain = urlparse(link).netloc.replace("www.", "")
+                    signals.append({
+                        "company": _company_name_from_result(item, domain),
+                        "domain": domain,
+                        "posting_title_raw": item.get("title", ""),
+                        "contact_title": title,
+                        "location": location,
+                        "job_posting_url": link,
+                        "job_posting_date": posting_date.isoformat(),
+                        "confidence_score": 0.5,
+                    })
+
+    if _stats is not None:
+        _stats["raw_found"] = raw_found
+        _stats["duplicates"] = raw_found - len(signals)
+        _stats["brave_query_count"] = scraper.query_count
+
+    return signals
+
+
+def run_combined_job_signal_scout(supabase_client: Optional[Any] = None) -> dict:
+    """
+    Production entry point for the routed, cross-deduped job-signal
+    pipeline (Kelvin's own spec, 2026-09-25): runs BOTH a routing-aware
+    version of consulting's job-posting search
+    (_find_consulting_postings_for_routing, same queries as
+    find_job_posting_signals -- that function itself is never called or
+    modified here) and Cloud Decoded's new one
+    (find_cloud_decoded_job_signals) above, applies
+    _route_job_posting_title to EVERY candidate from EITHER search
+    (title-based, not search-origin-based), enforces company-level dedup
+    across BOTH destinations ("one company, one pipeline, ever"), then
+    writes each routed candidate to mse_leads under its own product_id +
+    source.
+
+    Consulting's own run_job_posting_signal_finder (which does NOT do
+    cross-branch routing or dedup) is left fully intact and independently
+    callable -- this is an additive new entry point, not a replacement at
+    the code level. A missing consulting mse_icp_configs row degrades to
+    "skip the consulting search, still run Cloud Decoded's" rather than
+    raising -- Cloud Decoded's branch has no such dependency at all
+    (its query set is hardcoded, not config-driven), so one product's
+    missing config shouldn't block the other's real work.
+    """
+    db = supabase_client if supabase_client is not None else get_supabase()
+
+    consulting_icp_config = _get_icp_config(db, THDAGENTIC_CONSULTING_PRODUCT_ID)
+    already_used_this_month = _this_months_brave_query_count(db)
+
+    consulting_stats: dict = {}
+    if consulting_icp_config:
+        consulting_raw = _find_consulting_postings_for_routing(
+            consulting_icp_config, brave_query_count=already_used_this_month, _stats=consulting_stats,
+        )
+    else:
+        log.warning("[CombinedJobSignalScout] no mse_icp_configs row for thdagentic-consulting -- skipping that branch's search")
+        consulting_raw = []
+
+    cd_stats: dict = {}
+    cd_query_count = consulting_stats.get("brave_query_count", already_used_this_month)
+    cloud_decoded_raw = find_cloud_decoded_job_signals(brave_query_count=cd_query_count, _stats=cd_stats)
+
+    # Route every candidate by its REAL posting title -- consulting-
+    # sourced candidates carry that under "posting_title_raw" (see
+    # _find_consulting_postings_for_routing's own docstring for why NOT
+    # "job_posting_title"); Cloud-Decoded-sourced candidates already have
+    # the real title directly under "job_posting_title".
+    routed_consulting: list[dict] = []
+    routed_cloud_decoded: list[dict] = []
+    for signal in consulting_raw:
+        real_title = signal.pop("posting_title_raw", "")
+        contact_title = signal.pop("contact_title", "")
+        destination = _route_job_posting_title(real_title)
+        signal["title"] = contact_title
+        signal["job_posting_title"] = contact_title  # matches find_job_posting_signals' own field semantics, for consistency with every other job_posting_signal row already in the table
+        if destination == "consulting":
+            signal["product_id"] = THDAGENTIC_CONSULTING_PRODUCT_ID
+            signal["source"] = "job_posting_signal"
+            routed_consulting.append(signal)
+        else:
+            # Routed OUT of consulting's own search into cloud-decoded --
+            # job_posting_title becomes the REAL title here instead (Cloud
+            # Decoded's own semantics, see find_cloud_decoded_job_signals),
+            # not the contact-title placeholder that made no sense to keep.
+            signal["title"] = real_title
+            signal["job_posting_title"] = real_title
+            signal["job_posting_description"] = None
+            signal["job_posting_stack_keywords"] = []
+            signal["product_id"] = CLOUD_DECODED_PRODUCT_ID
+            signal["source"] = "cloud_decoded_job_signal"
+            routed_cloud_decoded.append(signal)
+
+    for signal in cloud_decoded_raw:
+        destination = _route_job_posting_title(signal.get("job_posting_title") or "")
+        if destination == "cloud_decoded":
+            signal["product_id"] = CLOUD_DECODED_PRODUCT_ID
+            signal["source"] = "cloud_decoded_job_signal"
+            routed_cloud_decoded.append(signal)
+        else:
+            # Routed OUT of Cloud Decoded's own search into consulting --
+            # reshape to match job_posting_signal's field semantics:
+            # job_posting_title becomes the contact-title placeholder
+            # ("" here, since this candidate was never found via a real
+            # contact-title query) and the CD-only capture fields are
+            # dropped, matching what a real job_posting_signal row looks
+            # like everywhere else in the table.
+            signal["title"] = ""
+            signal["job_posting_title"] = ""
+            signal.pop("job_posting_description", None)
+            signal.pop("job_posting_stack_keywords", None)
+            signal["product_id"] = THDAGENTIC_CONSULTING_PRODUCT_ID
+            signal["source"] = "job_posting_signal"
+            routed_consulting.append(signal)
+
+    # Company-level dedup -- "one company, one pipeline, ever": against
+    # what's already in the DB, AND within this same run (the same
+    # company surfaced by both branches' searches in the same pass).
+    # Consulting checked first so its own "ambiguous/both -> consulting"
+    # tie-break extends naturally to a same-company collision across
+    # branches too.
+    existing_domains = _existing_job_signal_domains(db)
+    seen_this_run: set[str] = set()
+    final_consulting: list[dict] = []
+    final_cloud_decoded: list[dict] = []
+    company_dupes = 0
+    for signal in routed_consulting + routed_cloud_decoded:
+        domain = signal.get("domain")
+        if not domain or domain in existing_domains or domain in seen_this_run:
+            company_dupes += 1
+            continue
+        seen_this_run.add(domain)
+        (final_consulting if signal["source"] == "job_posting_signal" else final_cloud_decoded).append(signal)
+
+    queries_this_run = max(0, cd_stats.get("brave_query_count", cd_query_count) - already_used_this_month)
+    if queries_this_run:
+        _emit_event(db, "brave_search_queries_used", {"month": date.today().isoformat()[:7], "count": queries_this_run})
+
+    written = {"job_posting_signal": 0, "cloud_decoded_job_signal": 0}
+    for source_name, rows in (("job_posting_signal", final_consulting), ("cloud_decoded_job_signal", final_cloud_decoded)):
+        if not rows:
+            continue
+        insert_result = db.table("mse_leads").insert(rows).execute()
+        if not insert_result.data:
+            raise RuntimeError(f"Insert into mse_leads ({source_name}) returned no data")
+        written[source_name] = len(insert_result.data)
+        _log_found_activities(db, rows[0]["product_id"], insert_result.data)
+
+    db.table("audit_log").insert({
+        "agent_id": AGENT_ID, "action": "combined_job_signal_scout", "outcome": "win",
+        "product_id": THDAGENTIC_CONSULTING_PRODUCT_ID,
+        "metadata": {"leads_written": written["job_posting_signal"], "raw_found": consulting_stats.get("raw_found", 0)},
+    }).execute()
+    db.table("audit_log").insert({
+        "agent_id": AGENT_ID, "action": "combined_job_signal_scout", "outcome": "win",
+        "product_id": CLOUD_DECODED_PRODUCT_ID,
+        "metadata": {
+            "leads_written": written["cloud_decoded_job_signal"], "raw_found": cd_stats.get("raw_found", 0),
+            "company_dupes_dropped": company_dupes,
+        },
+    }).execute()
+    _emit_event(db, "combined_job_signal_scout_completed", {
+        "consulting_leads_written": written["job_posting_signal"],
+        "cloud_decoded_leads_written": written["cloud_decoded_job_signal"],
+    })
+
+    return {
+        "status": "complete",
+        "consulting_leads_written": written["job_posting_signal"],
+        "cloud_decoded_leads_written": written["cloud_decoded_job_signal"],
+        "company_dupes_dropped": company_dupes,
     }

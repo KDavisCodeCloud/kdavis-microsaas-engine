@@ -149,7 +149,11 @@ export interface DmSequence {
   // "job_posting_signal" added 2026-09-16 for the infra-consulting ICP
   // (mse_products.slug='thdagentic-consulting') -- see
   // agents/marketing/mkt_o2_cold_dm_writer.py's _INFRA_CONSULTING_SYSTEM_PROMPT.
-  lead_source: "apollo" | "linkedin_manual" | "linkedin_engager" | "job_posting_signal";
+  // "cloud_decoded_job_signal" added 2026-09-25 -- the Cloud Decoded
+  // branch of the same job-posting-signal pipeline, routed by title (see
+  // agents/marketing/mkt_lead_finder.py's _route_job_posting_title);
+  // 2-touch email, not 3-touch LinkedIn like job_posting_signal.
+  lead_source: "apollo" | "linkedin_manual" | "linkedin_engager" | "job_posting_signal" | "cloud_decoded_job_signal";
   product_id: string;
   campaign_build_id: string | null;
   touch_1: string;

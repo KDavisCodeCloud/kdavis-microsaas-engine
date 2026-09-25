@@ -29,6 +29,10 @@ const SOURCE_LABEL: Record<DmSequence["lead_source"], string> = {
   // amber/red tone below (vs. the calmer teal/green of the others) is the
   // "needs a closer personal read before approval" signal Kelvin asked for.
   job_posting_signal: "⚠ CONSULTING · Infra",
+  // Cloud Decoded job-signal branch (added 2026-09-25) -- Kelvin's own
+  // requested label, verbatim, so it's distinguishable from the
+  // consulting job-signal card above at a glance in the same queue.
+  cloud_decoded_job_signal: "[CLOUD DECODED · JobSignal]",
 };
 
 const SOURCE_COLOR: Record<DmSequence["lead_source"], string> = {
@@ -36,6 +40,11 @@ const SOURCE_COLOR: Record<DmSequence["lead_source"], string> = {
   linkedin_manual: "#e8963f",
   linkedin_engager: "#6fce8f",
   job_posting_signal: "#e05d5d",
+  // Cloud Decoded's own brand blue (see kdavis-agentic-platform/CLAUDE.md's
+  // base design tokens: --primary blue #5a96ff) -- distinct from
+  // consulting's amber/red "needs a closer read" tone, since this branch
+  // is a product pitch, not a personal-consulting one.
+  cloud_decoded_job_signal: "#5a96ff",
 };
 
 type SequencePreview = { touch_1: string; touch_2: string; has_footer: boolean };

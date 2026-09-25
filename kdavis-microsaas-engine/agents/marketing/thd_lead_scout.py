@@ -110,6 +110,62 @@ INFRA_CONSULTING_ICP = {
     "job_posting_source": "brave_search",
 }
 
+# ── Third ICP, added 2026-09-25: Cloud Decoded job-signal branch ──────────
+#
+# A company hiring for an ongoing DevOps/SRE/platform/cloud-engineer role
+# is a company Cloud Decoded's 11-agent roster can force-multiply -- NOT
+# the same buying motive as INFRA_CONSULTING_ICP above (one-off,
+# project-scoped infrastructure work, sold as Kelvin's personal
+# consulting time). Same underlying signal source (a job posting) as
+# infra-consulting, different product, different pitch, different
+# channel (email-capable here; infra-consulting is LinkedIn-DM only).
+#
+# Reference/definition only, same as INFRA_CONSULTING_ICP above -- the
+# real, executable search+routing+capture logic lives in
+# agents/marketing/mkt_lead_finder.py's run_combined_job_signal_scout
+# (CLOUD_DECODED_JOB_SIGNAL_QUERY_TITLES, _route_job_posting_title,
+# _extract_stack_keywords, _fetch_job_posting_text). Cloud Decoded's own
+# mse_icp_configs row (product_id=777a1852-f84c-49d8-890e-cd14670b7f6f,
+# mse_products.slug='cloud-decoded') is ALREADY claimed by the regular
+# person-search lead finder (mkt_lead_finder.run_lead_finder_for_product
+# -- finds LinkedIn profiles matching VP Engineering/Head of Platform,
+# fixed 2026-09-23) -- mse_icp_configs.product_id is UNIQUE, so this
+# job-signal query set can't live in that same row without breaking the
+# person-search branch's own job_titles/search_templates. Hardcoded here
+# instead, same reason INFRA_CONSULTING_ICP's job-posting query terms
+# (JOB_POSTING_QUERY_TITLES in mkt_lead_finder.py) also aren't read from
+# a shared config row.
+CLOUD_DECODED_JOB_SIGNAL_ICP = {
+    "mse_products_slug": "cloud-decoded",
+    "product_id": "777a1852-f84c-49d8-890e-cd14670b7f6f",
+    "channel": "email_or_dm",  # MKT-O2 writes a 2-touch email sequence; approve routes to approved_manual (see mkt_o2_cold_dm_writer.py's cloud-decoded branch docstring for why, not approved_hitl auto-send)
+    "target_titles": ["DevOps Engineer", "SRE", "Site Reliability Engineer", "Platform Engineer", "Cloud Engineer"],
+    "target_company_size": {"min": 20, "max": 500},
+    "target_signals": [
+        "job postings for DevOps engineer / SRE / platform engineer / cloud engineer roles -- an ongoing operational hire, not a one-off project",
+    ],
+    "exclude": [
+        "under 20 or over 500 employees",
+    ],
+    # Same Brave Search source as every other lead-sourcing consumer
+    # (2026-09-18 platform-wide switch) -- NOT Google Custom Search, despite
+    # that being this branch's own original task-spec wording; see the
+    # migration comment (20260925000054) for the full explanation.
+    "job_posting_source": "brave_search",
+    "stack_keywords_captured": ["Azure", "AWS", "Terraform", "Bicep", "Kubernetes", "GitHub Actions", "Azure DevOps"],
+    # Routing rule (enforced in mkt_lead_finder.run_combined_job_signal_scout,
+    # applied to EVERY posting found by EITHER branch's search, not just
+    # this one's -- a "cloud engineer" query can still surface an
+    # architect/contract-titled result that belongs in consulting instead):
+    #   architect/design/contract/consultant-shaped title -> consulting
+    #   ongoing-ops-shaped title (devops/sre/platform/cloud engineer) -> cloud-decoded
+    #   ambiguous, or matches both, -> consulting (Kelvin's own tie-break)
+    # Company-level dedupe across BOTH branches: one company, one pipeline,
+    # ever -- a domain already present in either pipeline's mse_leads rows
+    # never gets a second entry in the other.
+    "routing_rule": "title-based, see mkt_lead_finder._route_job_posting_title",
+}
+
 # The non-IT person actually holding access at a company like this — matches
 # the spec's own contact target ("Owner or operations manager... not IT
 # staff"). Also doubles as evidence for scoring: a search that turns up an

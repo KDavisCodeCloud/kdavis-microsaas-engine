@@ -154,6 +154,83 @@ generic opener with nothing specific behind it
 - The sequence stops entirely if they reply at any point — touch_3 is only ever sent on zero reply"""
 
 
+# Cloud Decoded job-signal branch, added 2026-09-25 (agents/marketing/
+# mkt_lead_finder.py's run_combined_job_signal_scout /
+# thd_lead_scout.CLOUD_DECODED_JOB_SIGNAL_ICP). A company hiring an
+# ongoing DevOps/SRE/platform/cloud engineer is signal that Cloud
+# Decoded's 11-agent roster can force-multiply that team -- a
+# fundamentally different pitch from the infra-consulting sequence above
+# (one-off project work, sold as Kelvin's personal time): this is a
+# product, sold as a force MULTIPLIER for the hire/team, never framed as
+# a reason not to hire. 2-touch EMAIL sequence (not LinkedIn connection
+# notes) -- Cloud Decoded has a real signup funnel (theclouddecoded.com)
+# an email CTA links to naturally, unlike the consulting ICP's personal-
+# brand LinkedIn sale. Explicitly does NOT reuse lead_source=
+# "job_posting_signal" (that value is hardcoded above to
+# _write_infra_consulting_dm_for_lead's copy) -- a new, separate
+# lead_source keeps this from ever silently picking up the wrong prompt.
+TOUCH_1_CD_JOB_SIGNAL_MAX_CHARS = 300
+TOUCH_2_CD_JOB_SIGNAL_MAX_CHARS = 500
+
+_CLOUD_DECODED_JOB_SIGNAL_SYSTEM_PROMPT = f"""You are writing a 2-touch cold outreach EMAIL sequence for Cloud \
+Decoded (theclouddecoded.com), an 11-agent DevOps/platform automation product, to a company you found publicly \
+hiring for an ongoing DevOps/SRE/platform/cloud engineer role. Return ONLY a single JSON object — no prose, no \
+markdown fences — matching exactly this schema:
+
+{{
+  "touch_1": str,
+  "touch_2": str
+}}
+
+touch_1 = opening email, max {TOUCH_1_CD_JOB_SIGNAL_MAX_CHARS} chars. Reference the SPECIFIC job posting given \
+below (the role title, and their stated stack keywords if any are present) — never invent a detail the posting \
+context doesn't support. Frame Cloud Decoded as force-multiplication for the team they're building/the person \
+they're hiring — it makes that hire (once made) faster and covers gaps day-to-day, NEVER a substitute for making \
+the hire, and never imply they shouldn't hire. No pitch beyond one sentence on what Cloud Decoded does.
+
+touch_2 = follow-up sent 3 days later, max {TOUCH_2_CD_JOB_SIGNAL_MAX_CHARS} chars. One concrete detail about how \
+Cloud Decoded's agents (CI/CD triage, K8s alert remediation, IAM minimization, FinOps, drift detection — pick \
+whichever is most relevant to their stated stack, only from what's given below) helps a team like theirs. End \
+with a soft call to action pointing to theclouddecoded.com — a single low-friction next step (e.g. "worth a look \
+at theclouddecoded.com?"), never a hard meeting ask.
+
+Rules, non-negotiable:
+- Never frame Cloud Decoded as a substitute for hiring, or the posting/role as unnecessary — force-multiplication
+  for the hire/team only
+- Every specific claim about their stack or the role must come from the job posting context given below — never
+  invented
+- No hype words ("game-changing", "revolutionary"), no generic flattery, no "I noticed you..." as a generic
+  opener with nothing specific behind it
+- End touch_2 with the soft CTA to theclouddecoded.com, not a meeting request"""
+
+
+def _write_cloud_decoded_job_signal_dm_for_lead(lead: dict, anthropic_client=None) -> dict:
+    """lead_source='cloud_decoded_job_signal' only. No research_context
+    argument, same reasoning as _write_infra_consulting_dm_for_lead: this
+    signal (the job posting itself, plus any stack keywords extracted
+    from its JD text) already lives on the lead row."""
+    safe_lead = DataSanitizationShield.clean({
+        "company": lead.get("company"),
+        "job_posting_title": lead.get("job_posting_title"),
+        "job_posting_url": lead.get("job_posting_url"),
+        "job_posting_stack_keywords": lead.get("job_posting_stack_keywords") or [],
+    })
+
+    user_prompt = (
+        f"Lead + real job posting signal (never invent anything beyond this):\n{json.dumps(safe_lead, indent=2)}\n\n"
+        "Write the 2-touch email sequence now."
+    )
+    raw = _analyze(_CLOUD_DECODED_JOB_SIGNAL_SYSTEM_PROMPT, user_prompt, anthropic_client=anthropic_client, max_tokens=1024)
+    parsed = json.loads(_strip_fences(raw))
+    if not isinstance(parsed, dict) or "touch_1" not in parsed or "touch_2" not in parsed:
+        raise ValueError(f"MKT-O2 (cloud-decoded job signal) expected {{touch_1, touch_2}}, got: {raw[:200]}")
+
+    return {
+        "touch_1": str(parsed["touch_1"])[:TOUCH_1_CD_JOB_SIGNAL_MAX_CHARS],
+        "touch_2": str(parsed["touch_2"])[:TOUCH_2_CD_JOB_SIGNAL_MAX_CHARS],
+    }
+
+
 def _analyze(system: str, user: str, anthropic_client=None, max_tokens: int = 1024) -> str:
     if anthropic_client is None:
         return llm_router.analyze(system, user, max_tokens=max_tokens)
@@ -335,6 +412,10 @@ def run_o2_cold_dm_writer(
                 # Infra-consulting ICP -- 3-touch, no research_report dependency
                 # (see _write_infra_consulting_dm_for_lead's own docstring).
                 sequence = _write_infra_consulting_dm_for_lead(lead, anthropic_client=anthropic_client)
+            elif lead_source == "cloud_decoded_job_signal":
+                # Cloud Decoded job-signal ICP -- 2-touch email, force-
+                # multiplication framing (see _write_cloud_decoded_job_signal_dm_for_lead).
+                sequence = _write_cloud_decoded_job_signal_dm_for_lead(lead, anthropic_client=anthropic_client)
             else:
                 sequence = _write_dm_for_lead(lead, research_context, lead_source=lead_source, anthropic_client=anthropic_client)
             row = {
@@ -348,9 +429,10 @@ def run_o2_cold_dm_writer(
                 row["touch_3"] = sequence["touch_3"]
             if lead_source == "apollo":
                 row["lead_id"] = lead["id"]
-            elif lead_source in ("lead_finder", "job_posting_signal"):
-                # Both sources live in mse_leads -- same lead-reference column,
-                # migration 20260916000045 didn't need a new one.
+            elif lead_source in ("lead_finder", "job_posting_signal", "cloud_decoded_job_signal"):
+                # All three sources live in mse_leads -- same lead-reference
+                # column, migrations 20260916000045/20260925000054 didn't
+                # need a new one.
                 row["lead_finder_lead_id"] = lead["id"]
             else:
                 row["linkedin_lead_id"] = lead["id"]
@@ -361,18 +443,26 @@ def run_o2_cold_dm_writer(
             if not insert_result.data:
                 raise RuntimeError("Insert into mse_dm_sequences returned no data")
 
-        if lead_source in ("lead_finder", "job_posting_signal"):
+        if lead_source in ("lead_finder", "job_posting_signal", "cloud_decoded_job_signal"):
             # Two-stage lifecycle unique to mse_leads (see module
             # docstring): a sequence now exists for each of these leads,
             # advance them out of "nothing drafted yet" so MKT-O2's own
             # next run doesn't redraft a sequence that already exists.
-            # job_posting_signal reuses 'pending_email' too despite the
-            # name -- there's no separate "drafted, awaiting manual
-            # LinkedIn send" status in mse_leads' vocabulary, and nothing
-            # auto-acts on this value; the actual send-vs-manual decision
-            # is api/routers/outreach.py's approve endpoint routing this
-            # sequence's OWN status to 'approved_manual' (not
-            # 'approved_hitl'), which MKT-O5 already never polls for.
+            # job_posting_signal and cloud_decoded_job_signal both reuse
+            # 'pending_email' despite the name -- there's no separate
+            # "drafted, awaiting manual send" status in mse_leads'
+            # vocabulary, and nothing auto-acts on this value; the actual
+            # send-vs-manual decision is api/routers/outreach.py's approve
+            # endpoint routing this sequence's OWN status. Both
+            # job_posting_signal and cloud_decoded_job_signal fall to
+            # that endpoint's default 'approved_manual' branch today
+            # (neither is in its explicit approved_hitl allowlist) --
+            # deliberate for cloud_decoded_job_signal too: most job
+            # postings don't expose a real contact email, so auto-send
+            # would crash on a missing address for most of these leads
+            # far more often than it would succeed. An operator sends
+            # manually (email if a real one was found, LinkedIn/company
+            # site otherwise), same as the consulting branch already does.
             for lead in leads:
                 db.table("mse_leads").update({"status": "pending_email"}).eq("id", lead["id"]).execute()
 
@@ -502,6 +592,33 @@ def run_o2_for_linkedin_leads(
         by_source["job_posting_signal"] = result["sequences_written"]
     else:
         by_source["job_posting_signal"] = 0
+
+    # cloud_decoded_job_signal (added 2026-09-25) -- same reasoning as the
+    # job_posting_signal block above: a dedicated query rather than
+    # folding into lead_finder_leads, since these leads typically have no
+    # verified (or any) email either and that filter would otherwise
+    # silently exclude every one of them forever.
+    cloud_decoded_job_signal_leads = (
+        db.table("mse_leads")
+        .select("*")
+        .eq("product_id", product_id)
+        .eq("status", "pending_dm")
+        .eq("source", "cloud_decoded_job_signal")
+        .order("created_at")
+        .execute()
+        .data
+        or []
+    )
+    if cloud_decoded_job_signal_leads:
+        result = run_o2_cold_dm_writer(
+            product_id=product_id, research_report=research_report, leads=cloud_decoded_job_signal_leads,
+            campaign_build_id=None, lead_source="cloud_decoded_job_signal",
+            supabase_client=db, anthropic_client=anthropic_client,
+        )
+        total_written += result["sequences_written"]
+        by_source["cloud_decoded_job_signal"] = result["sequences_written"]
+    else:
+        by_source["cloud_decoded_job_signal"] = 0
 
     return {"status": "ready_for_hitl", "sequences_written": total_written, "by_source": by_source}
 
