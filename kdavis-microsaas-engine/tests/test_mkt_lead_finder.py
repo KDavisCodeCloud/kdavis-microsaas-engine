@@ -170,6 +170,51 @@ def test_run_lead_finder_for_product_writes_leads_and_completes_run():
     assert activity_inserts[0]._payload[0]["product_id"] == "prod-1"
 
 
+def test_run_lead_finder_for_product_persists_funnel_stats():
+    """Lead yield tuning (2026-09-27): mse_lead_finder_runs.funnel_stats
+    must carry the real per-stage counts (queries fired, raw Brave
+    results, drop reasons, dedup, email-found-before/after-verify,
+    verified) so a collapse can be diagnosed from the DB after the fact,
+    not just from an in-memory dict discarded at the end of the run."""
+    fake_db = FakeSupabase(responses={
+        "mse_icp_configs": [{"product_id": "prod-1", **VALID_ICP_CONFIG}],
+        "mse_lead_finder_runs": [{"id": "run-1"}],
+        "mse_leads": [{"id": "lead-row-1"}],
+        "usage_events": [],
+    })
+    raw = [RawLead(name="Jane Doe", linkedin_url="https://linkedin.com/in/janedoe", source="brave_search", location="Phoenix AZ")]
+
+    scraper = _fake_brave_scraper(raw)
+    scraper.queries_this_run = 6
+    scraper.stats = {
+        "raw_results_returned": 20,
+        "dropped_no_link": 1,
+        "dropped_excluded_domain": 2,
+        "dropped_robots_disallowed": 3,
+        "dropped_fetch_failed": 4,
+        "passed_scrape_filters": 10,
+    }
+
+    with patch.object(mlf, "BraveSearchScraper", return_value=scraper), \
+         patch.object(mlf, "get_vertical_scraper", return_value=None):
+        result = mlf.run_lead_finder_for_product("prod-1", supabase_client=fake_db)
+
+    funnel = result["funnel_stats"]
+    assert funnel["queries_fired"] == 6
+    assert funnel["raw_results_returned"] == 20
+    assert funnel["dropped_no_link"] == 1
+    assert funnel["dropped_excluded_domain"] == 2
+    assert funnel["dropped_robots_disallowed"] == 3
+    assert funnel["dropped_fetch_failed"] == 4
+    assert funnel["passed_scrape_filters"] == 10
+    assert funnel["after_dedup"] == 1
+    assert funnel["email_found_pre_verify"] == 0  # the RawLead above has no email, only a linkedin_url
+    assert funnel["email_verified"] == 0
+
+    run_updates = [c for c in fake_db.executed if c.table_name == "mse_lead_finder_runs" and c.calls[0][0] == "update"]
+    assert run_updates[-1]._payload["funnel_stats"] == funnel
+
+
 def test_run_lead_finder_for_product_limit_overrides_icp_target_count():
     """Real gap fixed 2026-09-22: POST /marketing/leads/find accepted a
     `limit` field but it never reached this function, so every run always

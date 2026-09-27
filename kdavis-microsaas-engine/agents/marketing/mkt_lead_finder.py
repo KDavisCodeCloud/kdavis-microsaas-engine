@@ -67,7 +67,7 @@ from core.supabase_client import get_supabase
 from scrapers.base import RawLead
 from scrapers.brave_search import (
     MAX_DELAY_SECONDS,
-    MAX_QUERIES_PER_CALL,
+    MAX_QUERIES_PER_RUN,
     MIN_DELAY_SECONDS,
     BraveSearchScraper,
     _robots_allowed,  # reused as-is, not re-duplicated -- same "one trusted implementation" call this module already makes by importing the constants above from the same file
@@ -80,11 +80,13 @@ AGENT_ID = "mkt-lead-finder"
 
 # Rough per-step time estimates for the ETA shown on the dashboard's
 # progress bar -- not exact (the search phase's real cost depends on how
-# many queries a location actually needs, capped by MAX_QUERIES_PER_CALL),
-# but grounded in this module's own real, already-enforced delay
-# constants rather than a guess.
+# many queries an ICP config's title/template combos actually need, up to
+# MAX_QUERIES_PER_RUN total across every location -- see
+# _AVG_SEARCH_SECONDS_PER_LOCATION's own note below), but grounded in
+# this module's own real, already-enforced delay constants rather than a
+# guess.
 _AVG_VERIFY_SECONDS = (MIN_VERIFY_DELAY_SECONDS + MAX_VERIFY_DELAY_SECONDS) / 2
-_AVG_SEARCH_SECONDS_PER_LOCATION = MAX_QUERIES_PER_CALL * ((MIN_DELAY_SECONDS + MAX_DELAY_SECONDS) / 2)
+_AVG_SEARCH_SECONDS_PER_QUERY = (MIN_DELAY_SECONDS + MAX_DELAY_SECONDS) / 2
 
 _CONFIDENCE_BY_STATUS = {"verified": 0.95, "catch_all": 0.4, "unverified": 0.2, "invalid": 0.0}
 
@@ -297,6 +299,13 @@ def find_leads(
     deduped, duplicate_count = _dedupe_raw_leads(raw_leads, existing_urls, existing_emails)
     deduped = deduped[:limit]
 
+    # Lead yield tuning (2026-09-27) -- how many candidates already had a
+    # scraped-off-the-page email BEFORE _verify_lead_email's pattern-
+    # guessing/SMTP pass, so a low final-verified count can be attributed
+    # to "we never had an email to try" vs "we had emails but SMTP
+    # rejected them."
+    email_found_pre_verify = sum(1 for raw in deduped if raw.email)
+
     verify_total = search_steps + len(deduped)
     leads: list[dict] = []
     for i, raw in enumerate(deduped):
@@ -344,6 +353,19 @@ def find_leads(
         _stats["raw_found"] = len(raw_leads)
         _stats["duplicates"] = duplicate_count + post_verify_duplicates
         _stats["brave_query_count"] = brave_scraper.query_count
+        # Lead yield tuning (2026-09-27) -- the full per-stage funnel,
+        # persisted by run_lead_finder_for_product to
+        # mse_lead_finder_runs.funnel_stats so a collapse (e.g. queries
+        # fired vs. final leads) can be diagnosed after the fact instead
+        # of needing a fresh instrumented re-run every time.
+        _stats["funnel"] = {
+            "queries_fired": brave_scraper.queries_this_run,
+            **brave_scraper.stats,
+            "after_dedup": len(deduped),
+            "email_found_pre_verify": email_found_pre_verify,
+            "email_found_post_verify": sum(1 for lead in leads if lead.get("email")),
+            "email_verified": sum(1 for lead in leads if lead.get("email_status") == "verified"),
+        }
 
     return leads
 
@@ -404,6 +426,11 @@ def run_lead_finder_for_product(
     _emit_event(db, "lead_finder_run_started", {"product_id": product_id, "run_id": run_id})
 
     locations_count = max(len(icp_config.get("locations") or []), 1)
+    # MAX_QUERIES_PER_RUN is a whole-run budget shared across every
+    # location (see scrapers/brave_search.py's queries_this_run), not a
+    # fixed per-location cap anymore -- this is only a rough average for
+    # the ETA display, spreading that budget evenly across locations.
+    _avg_search_seconds_per_location = (MAX_QUERIES_PER_RUN / locations_count) * _AVG_SEARCH_SECONDS_PER_QUERY
 
     def _on_progress(step_text: str, completed: int, total: int) -> None:
         # Best-effort -- a progress-write failure must never abort the
@@ -417,7 +444,7 @@ def run_lead_finder_for_product(
         eta_seconds = None
         if completed < locations_count:
             eta_seconds = round(
-                remaining_search_locations * _AVG_SEARCH_SECONDS_PER_LOCATION
+                remaining_search_locations * _avg_search_seconds_per_location
                 + max(total - locations_count, 0) * _AVG_VERIFY_SECONDS
             )
         elif total > locations_count:
@@ -476,6 +503,8 @@ def run_lead_finder_for_product(
 
         verified_count = sum(1 for r in rows if r.get("email_status") == "verified")
         sources_used = sorted({r["source"] for r in rows if r.get("source")})
+        funnel = stats.get("funnel", {})
+        log.info("MKT-LEAD-FINDER funnel for product %s (run %s): %s", product_id, run_id, funnel)
 
         db.table("mse_lead_finder_runs").update({
             "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -483,6 +512,7 @@ def run_lead_finder_for_product(
             "leads_verified": verified_count,
             "leads_deduplicated": stats.get("duplicates", 0),
             "sources_used": sources_used,
+            "funnel_stats": funnel,
             "status": "complete",
             "current_step": None,
             "estimated_seconds_remaining": 0,
@@ -506,7 +536,7 @@ def run_lead_finder_for_product(
     return {
         "run_id": run_id, "status": "complete", "leads_found": len(leads),
         "leads_verified": verified_count, "leads_deduplicated": stats.get("duplicates", 0),
-        "sources_used": sources_used,
+        "sources_used": sources_used, "funnel_stats": funnel,
     }
 
 

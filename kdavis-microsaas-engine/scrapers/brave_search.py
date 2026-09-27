@@ -51,12 +51,22 @@ BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 # Brave retired the free tier in Feb 2026 -- see module docstring. Kept
 # well under the ~1,000-query/~$5 monthly credit on purpose.
 FREE_TIER_MONTHLY_CAP = 900
+# Lead yield tuning (2026-09-27): was MAX_QUERIES_PER_CALL = 15, reset
+# per LOCATION (scrape()'s own local `queries_run` counter) -- with 2
+# locations that silently truncated every find_leads() run to ~30 Brave
+# queries max regardless of how many title/template variants an ICP
+# config carried, long before Brave's real 900/month free-credit cap
+# was anywhere close. Renamed and now enforced across the WHOLE run
+# (this BraveSearchScraper instance persists across every location in a
+# single find_leads() call -- see self.queries_this_run below), per
+# Kelvin's explicit budget: up to 250-300 Brave queries per run, well
+# under the ~2,000/month headroom he confirmed.
+MAX_QUERIES_PER_RUN = 300
 # Brave's published free/base-tier rate limit is ~1 query/second (their
 # production capacity is 50 QPS, but that's a paid-tier number, not what
 # this key should assume) -- MIN/MAX_DELAY_SECONDS keep this comfortably
 # under 1 QPS per call, same spirit as the Google CSE scraper's own
 # self-imposed throttling.
-MAX_QUERIES_PER_CALL = 15
 MIN_DELAY_SECONDS = 1.2
 MAX_DELAY_SECONDS = 2.5
 
@@ -118,6 +128,31 @@ class BraveSearchScraper(BaseScraper):
         # across calls within the same billing month so the free-credit
         # cap is enforced across an entire month's calls, not just one.
         self.query_count = query_count
+        # Distinct from self.query_count (cross-call, monthly-cumulative,
+        # passed in/read back out by the caller) -- this instance-local
+        # counter tracks queries fired by THIS scrape() sequence only
+        # (one BraveSearchScraper instance = one find_leads() run, reused
+        # across every location), so MAX_QUERIES_PER_RUN caps the actual
+        # per-run budget rather than resetting per location.
+        self.queries_this_run = 0
+
+        # Lead yield tuning (2026-09-27): find_leads' own "raw_found"
+        # bookkeeping only ever counted len(raw_leads) -- i.e. survivors
+        # of _lead_from_result's three silent drop points below. There
+        # was no way to tell, after a run collapsed, whether the loss was
+        # "Brave just didn't return many results" or "results came back
+        # but got dropped by domain-exclude/robots.txt/a dead link" --
+        # accumulated across every scrape() call on this instance (one
+        # instance is reused across every location in a single
+        # find_leads() run) so the caller can read it once at the end.
+        self.stats = {
+            "raw_results_returned": 0,
+            "dropped_no_link": 0,
+            "dropped_excluded_domain": 0,
+            "dropped_robots_disallowed": 0,
+            "dropped_fetch_failed": 0,
+            "passed_scrape_filters": 0,
+        }
 
     def _search(self, query: str) -> list[dict]:
         """Returns items normalized to the same {"link", "title", "snippet"}
@@ -134,8 +169,10 @@ class BraveSearchScraper(BaseScraper):
             timeout=15,
         )
         self.query_count += 1
+        self.queries_this_run += 1
         response.raise_for_status()
         results = (response.json().get("web", {}) or {}).get("results", []) or []
+        self.stats["raw_results_returned"] += len(results)
         return [
             {"link": r.get("url", ""), "title": r.get("title", ""), "snippet": r.get("description", "")}
             for r in results
@@ -150,15 +187,13 @@ class BraveSearchScraper(BaseScraper):
         exclude_domains = set(filters.get("exclude_domains") or [])
 
         leads: list[RawLead] = []
-        queries_run = 0
         for template in templates:
             for title in titles:
-                if self.query_count >= FREE_TIER_MONTHLY_CAP or queries_run >= MAX_QUERIES_PER_CALL:
+                if self.query_count >= FREE_TIER_MONTHLY_CAP or self.queries_this_run >= MAX_QUERIES_PER_RUN:
                     return leads
 
                 query = template.format(title=title, location=location)
                 items = self._search(query)
-                queries_run += 1
                 time.sleep(random.uniform(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS))
 
                 for item in items:
@@ -171,14 +206,17 @@ class BraveSearchScraper(BaseScraper):
     def _lead_from_result(self, item: dict, location: str, exclude_domains: set) -> Optional[RawLead]:
         link = item.get("link", "")
         if not link:
+            self.stats["dropped_no_link"] += 1
             return None
         domain = urlparse(link).netloc.replace("www.", "")
         if domain in exclude_domains:
+            self.stats["dropped_excluded_domain"] += 1
             return None
 
         if "linkedin.com/in/" in link:
             # Never fetch li.com directly -- only the metadata Brave's own
             # API already returned for this result.
+            self.stats["passed_scrape_filters"] += 1
             return RawLead(
                 name=_name_from_result_title(item.get("title", "")),
                 linkedin_url=link,
@@ -190,16 +228,20 @@ class BraveSearchScraper(BaseScraper):
 
         user_agent = random.choice(_USER_AGENTS)
         if not _robots_allowed(link, user_agent, self._get):
+            self.stats["dropped_robots_disallowed"] += 1
             return None
         try:
             page = self._get(link, timeout=10, headers={"User-Agent": user_agent})
             time.sleep(random.uniform(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS))
             if page.status_code >= 400:
+                self.stats["dropped_fetch_failed"] += 1
                 return None
             email = _extract_email_from_page(page.text)
         except Exception:
+            self.stats["dropped_fetch_failed"] += 1
             return None
 
+        self.stats["passed_scrape_filters"] += 1
         return RawLead(
             name=_name_from_result_title(item.get("title", "")),
             company=domain,

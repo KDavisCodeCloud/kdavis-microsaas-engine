@@ -186,6 +186,80 @@ def test_brave_search_scraper_hard_stops_at_monthly_cap():
     http_get.assert_not_called()
 
 
+# ── lead yield tuning (2026-09-27): funnel stats + run-level query budget ──
+
+def test_max_queries_per_run_applies_across_locations_not_per_location():
+    """Was MAX_QUERIES_PER_CALL=15, reset every scrape() call (i.e. every
+    location) -- a config with 2 locations could silently fire ~30
+    queries even with a much larger title/template combo space. The
+    budget must now be enforced once, across the whole scraper instance
+    (one instance = one find_leads() run), regardless of how many
+    locations scrape() is called for."""
+    from scrapers.brave_search import MAX_QUERIES_PER_RUN
+
+    brave_response = _fake_brave_response(results=[])
+    http_get = MagicMock(return_value=brave_response)
+    filters = {
+        "search_templates": ["{title} {location} 1", "{title} {location} 2"],
+        "job_titles": ["agent A", "agent B", "agent C"],  # 6 combos per location
+    }
+
+    with patch("scrapers.brave_search.time.sleep"):
+        scraper = BraveSearchScraper(api_key="key", http_get=http_get)
+        # 60 locations x 6 combos = 360 possible queries, well past
+        # MAX_QUERIES_PER_RUN -- the run-level budget must cut it off
+        # partway through, not restart the count at each location.
+        for i in range(60):
+            scraper.scrape(f"City {i}", filters)
+
+    assert http_get.call_count == MAX_QUERIES_PER_RUN
+    assert scraper.queries_this_run == MAX_QUERIES_PER_RUN
+
+
+def test_stats_tracks_raw_results_and_every_drop_reason():
+    brave_response = _fake_brave_response(results=[
+        {"title": "No link", "url": "", "description": ""},
+        {"title": "Excluded", "url": "https://zillow.com/x", "description": ""},
+        {"title": "Dead link", "url": "https://deadsite.example.com/x", "description": ""},
+        {"title": "Jane - Realtor", "url": "https://acmerealty.com/jane", "description": ""},
+    ])
+    robots_ok = _fake_response(status_code=404)
+    page_ok = _fake_response(text="jane@acmerealty.com")
+    robots_for_dead = _fake_response(status_code=404)
+    dead_page = _fake_response(status_code=500)
+
+    http_get = MagicMock(side_effect=[brave_response, robots_for_dead, dead_page, robots_ok, page_ok])
+
+    with patch("scrapers.brave_search.time.sleep"):
+        scraper = BraveSearchScraper(api_key="key", http_get=http_get)
+        leads = scraper.scrape("Phoenix AZ", {
+            "search_templates": ["{title} {location}"], "job_titles": ["agent"],
+            "exclude_domains": ["zillow.com"],
+        })
+
+    assert len(leads) == 1
+    assert scraper.stats["raw_results_returned"] == 4
+    assert scraper.stats["dropped_no_link"] == 1
+    assert scraper.stats["dropped_excluded_domain"] == 1
+    assert scraper.stats["dropped_fetch_failed"] == 1
+    assert scraper.stats["passed_scrape_filters"] == 1
+
+
+def test_stats_tracks_robots_disallowed_drop():
+    brave_response = _fake_brave_response(results=[
+        {"title": "Jane", "url": "https://acmerealty.com/jane", "description": ""},
+    ])
+    robots_disallowed = _fake_response(status_code=200, text="User-agent: *\nDisallow: /")
+    http_get = MagicMock(side_effect=[brave_response, robots_disallowed])
+
+    with patch("scrapers.brave_search.time.sleep"):
+        scraper = BraveSearchScraper(api_key="key", http_get=http_get)
+        leads = scraper.scrape("Phoenix AZ", {"search_templates": ["{title} {location}"], "job_titles": ["agent"]})
+
+    assert leads == []
+    assert scraper.stats["dropped_robots_disallowed"] == 1
+
+
 # ── real_estate ───────────────────────────────────────────────────────
 
 _RESULTS_TABLE_HTML = """
