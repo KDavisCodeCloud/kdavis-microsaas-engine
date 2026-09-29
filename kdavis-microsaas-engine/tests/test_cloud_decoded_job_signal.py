@@ -241,7 +241,7 @@ def test_duplicate_urls_within_run_are_deduped(monkeypatch):
 
 def test_jd_text_is_captured_and_stack_keywords_extracted(monkeypatch):
     query = '"platform engineer" hiring United States'
-    item = _search_item("https://example.com/jobs/1", title="Platform Engineer", snippet="Posted 1 day ago")
+    item = _search_item("https://example.com/jobs/1", title="Acme Corp - Platform Engineer", snippet="Posted 1 day ago")
     scraper = _FakeBraveSearchScraper(items_by_query={query: [item]})
     monkeypatch.setattr(lead_finder_module, "BraveSearchScraper", lambda **kw: scraper)
     monkeypatch.setattr(
@@ -257,7 +257,7 @@ def test_jd_text_is_captured_and_stack_keywords_extracted(monkeypatch):
 
 def test_fetch_jd_text_false_skips_real_fetch_and_falls_back_to_snippet(monkeypatch):
     query = '"cloud engineer" hiring United States'
-    item = _search_item("https://example.com/jobs/1", title="Cloud Engineer", snippet="Posted 1 day ago, AWS shop")
+    item = _search_item("https://example.com/jobs/1", title="Acme Corp - Cloud Engineer", snippet="Posted 1 day ago, AWS shop")
     scraper = _FakeBraveSearchScraper(items_by_query={query: [item]})
     monkeypatch.setattr(lead_finder_module, "BraveSearchScraper", lambda **kw: scraper)
 
@@ -284,7 +284,7 @@ def test_consulting_search_result_with_ops_title_routes_to_cloud_decoded(monkeyp
     title -- routing is by the posting's own title, not by which
     branch's search found it."""
     consulting_query = '"CTO" hiring "cloud architect" United States'
-    item = _search_item("https://example.com/jobs/1", title="Platform Engineer", snippet="Posted 1 day ago")
+    item = _search_item("https://example.com/jobs/1", title="Acme Corp - Platform Engineer", snippet="Posted 1 day ago")
     scraper = _FakeBraveSearchScraper(items_by_query={consulting_query: [item]})
     monkeypatch.setattr(lead_finder_module, "BraveSearchScraper", lambda **kw: scraper)
     monkeypatch.setattr(lead_finder_module, "_fetch_job_posting_text", lambda url, http_get=None: None)
@@ -308,7 +308,7 @@ def test_cloud_decoded_search_result_with_architect_title_routes_to_consulting(m
     """The inverse: a DevOps-flavored query surfacing an
     architect/contract-titled posting must route to consulting."""
     cd_query = '"DevOps engineer" hiring United States'
-    item = _search_item("https://example.com/jobs/2", title="Contract Cloud Architect", snippet="Posted 1 day ago")
+    item = _search_item("https://example.com/jobs/2", title="Acme Corp - Contract Cloud Architect", snippet="Posted 1 day ago")
     scraper = _FakeBraveSearchScraper(items_by_query={cd_query: [item]})
     monkeypatch.setattr(lead_finder_module, "BraveSearchScraper", lambda **kw: scraper)
     monkeypatch.setattr(lead_finder_module, "_fetch_job_posting_text", lambda url, http_get=None: None)
@@ -339,7 +339,7 @@ def test_company_already_in_consulting_pipeline_blocks_cloud_decoded_entry(monke
     """'One company, one pipeline, ever' -- a domain already present in
     EITHER pipeline must never get a second entry in the other."""
     cd_query = '"cloud engineer" hiring United States'
-    item = _search_item("https://already-a-lead.com/jobs/1", title="Cloud Engineer", snippet="Posted 1 day ago")
+    item = _search_item("https://already-a-lead.com/jobs/1", title="Already A Lead - Cloud Engineer", snippet="Posted 1 day ago")
     scraper = _FakeBraveSearchScraper(items_by_query={cd_query: [item]})
     monkeypatch.setattr(lead_finder_module, "BraveSearchScraper", lambda **kw: scraper)
     monkeypatch.setattr(lead_finder_module, "_fetch_job_posting_text", lambda url, http_get=None: None)

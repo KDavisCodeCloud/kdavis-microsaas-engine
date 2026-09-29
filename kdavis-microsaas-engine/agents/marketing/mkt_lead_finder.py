@@ -591,6 +591,28 @@ _EMPLOYEE_RANGE_RE = re.compile(r"\b(\d{1,4})\s*[-–to]{1,3}\s*(\d{1,4})\s+empl
 
 JOB_POSTING_QUERY_TITLES = ["cloud architect", "platform engineer", "AI infrastructure", "MLOps engineer", "cloud migration"]
 
+# ATS-hosted postings are single-company by construction (the company is
+# the first path segment -- see _ATS_HOSTS/_company_from_ats_url), so
+# biasing queries at these hosts yields prospects instead of the job-board
+# category pages that produced the 2026-09-29 bad-lead batch. Used as the
+# leading templates for BOTH job-signal branches; the broader open-web
+# templates stay behind them so a company careers page still surfaces.
+ATS_SITE_QUERY_TEMPLATES = [
+    'site:boards.greenhouse.io "{kw}"',
+    'site:job-boards.greenhouse.io "{kw}"',
+    'site:jobs.lever.co "{kw}"',
+    'site:jobs.ashbyhq.com "{kw}"',
+    'site:apply.workable.com "{kw}"',
+]
+
+
+def _ats_templates_for(keywords: list[str]) -> list[str]:
+    """One ATS-scoped template per (host, keyword). Emitted as
+    already-formatted query strings with no {title}/{location} slots --
+    an ATS posting page carries no hiring-manager title and the host is
+    global, so binding either would only shrink real coverage."""
+    return [t.format(kw=kw) for kw in keywords for t in ATS_SITE_QUERY_TEMPLATES]
+
 
 def _extract_posting_date(item: dict, today: date) -> Optional[date]:
     """Best-effort only -- see module-level note above. Checks (in order):
@@ -641,6 +663,120 @@ def _company_name_from_result(item: dict, domain: str) -> str:
     return domain
 
 
+# ── Lead-source quality gate (2026-09-29) ────────────────────────────────
+#
+# Both job-signal branches were writing leads whose "company" was a job
+# BOARD, not a hiring company -- linkedin.com, ziprecruiter.com,
+# index.dev. Those rows produced real HITL drafts addressed to
+# ZipRecruiter, which is not a prospect. Root cause: _company_name_from_
+# result above falls back to the domain whenever it can't parse a company
+# out of the result title, and an aggregator category page ("$141k-$253k
+# Data Platform Engineering Director Jobs") never parses -- so the
+# aggregator's own domain silently became the company name.
+#
+# Three gates now, applied in both branches:
+#   1. _is_aggregator      -- drop the result outright
+#   2. _company_from_posting -- derive a REAL company, preferring ATS URL
+#                               slugs, which are single-company by
+#                               construction
+#   3. no company -> no lead (never fall back to the domain)
+_AGGREGATOR_DOMAINS = frozenset({
+    "linkedin.com", "ziprecruiter.com", "indeed.com", "glassdoor.com",
+    "monster.com", "simplyhired.com", "index.dev", "dice.com",
+    "wellfound.com", "builtin.com",
+})
+
+# builtin runs city subdomains (builtinnyc.com, builtinaustin.com, ...)
+# and several boards use regional TLDs (indeed.co.uk, glassdoor.ca) --
+# match on the registrable-ish stem so those are caught too.
+_AGGREGATOR_STEMS = ("builtin", "ziprecruiter", "simplyhired", "glassdoor", "indeed", "monster", "wellfound")
+
+# A category/search LISTING page rather than one company's posting.
+# Deliberately narrow: "/jobs/123" or "/jobs/<uuid>" on a company's own
+# site is a real single posting and must NOT match. What does match is a
+# bare listing root ("/jobs"), an explicit search/browse path, or a
+# keyword-slug index whose final segment reads like a query rather than
+# an id ("/jobs/platform-development-jobs", "/Jobs/Data-Platform-Eng-Dir").
+_CATEGORY_PATH_RE = re.compile(
+    r"""
+      /(?:jobs|job-search|search|browse|careers-advice|job-description)/?$   # listing root
+    | /(?:search|browse)/                                                    # explicit search path
+    | /[^/]*-jobs/?$                                                         # "...-jobs" keyword index
+    | /(?:jobs|Jobs)/[A-Za-z][A-Za-z0-9-]*[A-Za-z]/?$                        # /jobs/<all-alpha slug>, no numeric id
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# Single-company-by-construction ATS hosts. The company is in the URL
+# itself, so it can be extracted with no page fetch and no guessing.
+#   boards.greenhouse.io/<company>/jobs/123
+#   job-boards.greenhouse.io/<company>/jobs/123
+#   jobs.lever.co/<company>/<uuid>
+#   jobs.ashbyhq.com/<company>/<uuid>
+#   apply.workable.com/<company>/j/<id>
+_ATS_HOSTS = {
+    "boards.greenhouse.io": 0,
+    "job-boards.greenhouse.io": 0,
+    "jobs.lever.co": 0,
+    "jobs.ashbyhq.com": 0,
+    "apply.workable.com": 0,
+}
+
+
+def _is_aggregator(link: str, domain: str) -> bool:
+    """True when this result is a job board / aggregator rather than one
+    company's own posting. ATS hosts are explicitly never aggregators."""
+    host = (domain or "").lower()
+    if host in _ATS_HOSTS:
+        return False
+    if host in _AGGREGATOR_DOMAINS:
+        return True
+    stem = host.split(".")[0]
+    if any(s in stem for s in _AGGREGATOR_STEMS):
+        return True
+    # A /jobs/ style category page on any host is a listing index, not a
+    # single posting -- e.g. linkedin.com/jobs/platform-development-jobs.
+    return bool(_CATEGORY_PATH_RE.search(urlparse(link).path or ""))
+
+
+def _company_from_ats_url(link: str, domain: str) -> Optional[str]:
+    """Company slug straight out of an ATS URL path. Returns a
+    human-cased name ('acme-corp' -> 'Acme Corp') or None."""
+    if domain not in _ATS_HOSTS:
+        return None
+    parts = [p for p in (urlparse(link).path or "").split("/") if p]
+    idx = _ATS_HOSTS[domain]
+    if len(parts) <= idx:
+        return None
+    slug = parts[idx]
+    if slug.lower() in {"jobs", "j", "search", "companies"}:
+        return None
+    cleaned = re.sub(r"[-_]+", " ", slug).strip()
+    return cleaned.title() if cleaned else None
+
+
+def _company_from_posting(item: dict, link: str, domain: str) -> Optional[str]:
+    """The real company behind a posting, or None if it can't be
+    established. Never falls back to the domain -- a lead with no
+    identifiable company is dropped rather than written as the board's
+    own name (the 2026-09-29 bug)."""
+    ats = _company_from_ats_url(link, domain)
+    if ats:
+        return ats
+
+    # Same leading-segment convention _company_name_from_result already
+    # used ("Acme Corp - Careers" -> "Acme Corp"); the ONLY behavioural
+    # change is that failing to parse now yields None instead of silently
+    # returning the domain.
+    title = item.get("title", "") or ""
+    for sep in (" is hiring ", " hiring ", " - ", " | ", " — "):
+        if sep in title:
+            candidate = title.split(sep)[0].strip()
+            if candidate:
+                return candidate
+    return None
+
+
 def find_job_posting_signals(
     product_id: str,
     icp_config: dict,
@@ -678,50 +814,79 @@ def find_job_posting_signals(
     cutoff = today - timedelta(days=max_age_days)
 
     raw_found = 0
+    dropped_aggregator = 0
+    dropped_no_company = 0
     seen_urls: set[str] = set()
     signals: list[dict] = []
 
-    for template in templates:
-        for title in titles:
-            for location in locations:
-                items = scraper._search(template.format(title=title, location=location))
-                raw_found += len(items)
-                for item in items:
-                    link = item.get("link", "")
-                    if not link or link in seen_urls:
+    # ATS-scoped queries run FIRST and are already fully formatted (no
+    # {title}/{location} slots) -- see _ats_templates_for. Paired with a
+    # None title so the per-lead title falls back to the ICP's first
+    # configured title rather than being mislabeled.
+    ats_queries = _ats_templates_for(JOB_POSTING_QUERY_TITLES)
+    default_title = titles[0] if titles else ""
+    query_plan: list[tuple[str, str, str]] = [(q, default_title, "") for q in ats_queries]
+    query_plan += [
+        (template.format(title=title, location=location), title, location)
+        for template in templates
+        for title in titles
+        for location in locations
+    ]
+
+    for query, title, location in query_plan:
+        items = scraper._search(query)
+        raw_found += len(items)
+        for item in items:
+            link = item.get("link", "")
+            if not link or link in seen_urls:
+                continue
+            seen_urls.add(link)
+
+            domain = urlparse(link).netloc.replace("www.", "")
+
+            # Gate 1 (2026-09-29): job boards are not prospects.
+            if _is_aggregator(link, domain):
+                dropped_aggregator += 1
+                continue
+
+            posting_date = _extract_posting_date(item, today)
+            if posting_date is None or posting_date < cutoff:
+                continue
+
+            employee_estimate = _extract_employee_estimate(item)
+            if employee_estimate and max_company_size:
+                try:
+                    upper = int(employee_estimate.split("-")[1])
+                    if upper > max_company_size:
                         continue
-                    seen_urls.add(link)
+                except (ValueError, IndexError):
+                    pass
 
-                    posting_date = _extract_posting_date(item, today)
-                    if posting_date is None or posting_date < cutoff:
-                        continue
+            # Gate 2/3: a real company name or no lead at all -- never the
+            # board's own domain as the "company".
+            company = _company_from_posting(item, link, domain)
+            if not company:
+                dropped_no_company += 1
+                continue
 
-                    employee_estimate = _extract_employee_estimate(item)
-                    if employee_estimate and max_company_size:
-                        try:
-                            upper = int(employee_estimate.split("-")[1])
-                            if upper > max_company_size:
-                                continue
-                        except (ValueError, IndexError):
-                            pass
-
-                    domain = urlparse(link).netloc.replace("www.", "")
-                    signals.append({
-                        "product_id": product_id,
-                        "company": _company_name_from_result(item, domain),
-                        "domain": domain,
-                        "title": title,
-                        "source": "job_posting_signal",
-                        "location": location,
-                        "job_posting_url": link,
-                        "job_posting_title": title,
-                        "job_posting_date": posting_date.isoformat(),
-                        "confidence_score": 0.5,
-                    })
+            signals.append({
+                "product_id": product_id,
+                "company": company,
+                "domain": domain,
+                "title": title,
+                "source": "job_posting_signal",
+                "location": location,
+                "job_posting_url": link,
+                "job_posting_title": title,
+                "job_posting_date": posting_date.isoformat(),
+                "confidence_score": 0.5,
+            })
 
     if _stats is not None:
         _stats["raw_found"] = raw_found
         _stats["duplicates"] = raw_found - len(signals)
+        _stats["dropped_aggregator"] = dropped_aggregator
+        _stats["dropped_no_company"] = dropped_no_company
         _stats["brave_query_count"] = scraper.query_count
 
     return signals
@@ -922,54 +1087,88 @@ def find_cloud_decoded_job_signals(
     cutoff = today - timedelta(days=max_age_days)
 
     raw_found = 0
+    dropped_aggregator = 0
+    dropped_no_company = 0
     seen_urls: set[str] = set()
     signals: list[dict] = []
 
-    for title in CLOUD_DECODED_JOB_SIGNAL_QUERY_TITLES:
-        for location in locations:
-            items = scraper._search(f'"{title}" hiring {location}')
-            raw_found += len(items)
-            for item in items:
-                link = item.get("link", "")
-                if not link or link in seen_urls:
-                    continue
-                seen_urls.add(link)
+    # ATS-scoped queries first (single-company by construction), then the
+    # original open-web "hiring" queries -- same ordering and reasoning as
+    # the consulting branch's query_plan.
+    # (query, title, location) -- ATS-scoped queries first (single-company
+    # by construction), then the original open-web "hiring" queries. ATS
+    # entries carry the bare title and the primary location, since an ATS
+    # host is global and the URL itself identifies the company.
+    primary_location = locations[0] if locations else ""
+    query_plan: list[tuple[str, str, str]] = [
+        (q, title, primary_location)
+        for title in CLOUD_DECODED_JOB_SIGNAL_QUERY_TITLES
+        for q in (t.format(kw=title) for t in ATS_SITE_QUERY_TEMPLATES)
+    ]
+    query_plan += [
+        (f'"{title}" hiring {location}', title, location)
+        for title in CLOUD_DECODED_JOB_SIGNAL_QUERY_TITLES
+        for location in locations
+    ]
 
-                posting_date = _extract_posting_date(item, today)
-                if posting_date is None or posting_date < cutoff:
-                    continue
+    for query, title, location in query_plan:
+        items = scraper._search(query)
+        raw_found += len(items)
+        for item in items:
+            link = item.get("link", "")
+            if not link or link in seen_urls:
+                continue
+            seen_urls.add(link)
 
-                employee_estimate = _extract_employee_estimate(item)
-                if employee_estimate:
-                    try:
-                        lower, upper = (int(x) for x in employee_estimate.split("-"))
-                        if upper < min_company_size or lower > max_company_size:
-                            continue
-                    except (ValueError, IndexError):
-                        pass  # undetectable is not disqualifying -- same rule as consulting's own max-only check
+            domain = urlparse(link).netloc.replace("www.", "")
 
-                domain = urlparse(link).netloc.replace("www.", "")
-                jd_text = _fetch_job_posting_text(link) if fetch_jd_text else None
-                stack_keywords = _extract_stack_keywords(
-                    jd_text or f"{item.get('title', '')} {item.get('snippet', '')}"
-                )
+            # Gate 1 (2026-09-29): job boards are not prospects.
+            if _is_aggregator(link, domain):
+                dropped_aggregator += 1
+                continue
 
-                signals.append({
-                    "company": _company_name_from_result(item, domain),
-                    "domain": domain,
-                    "title": item.get("title", title),
-                    "job_posting_title": item.get("title", title),
-                    "job_posting_url": link,
-                    "job_posting_date": posting_date.isoformat(),
-                    "job_posting_description": jd_text,
-                    "job_posting_stack_keywords": stack_keywords,
-                    "location": location,
-                    "confidence_score": 0.5,
-                })
+            posting_date = _extract_posting_date(item, today)
+            if posting_date is None or posting_date < cutoff:
+                continue
+
+            employee_estimate = _extract_employee_estimate(item)
+            if employee_estimate:
+                try:
+                    lower, upper = (int(x) for x in employee_estimate.split("-"))
+                    if upper < min_company_size or lower > max_company_size:
+                        continue
+                except (ValueError, IndexError):
+                    pass  # undetectable is not disqualifying -- same rule as consulting's own max-only check
+
+            # Gate 2/3: real company or no lead -- never the board's domain.
+            company = _company_from_posting(item, link, domain)
+            if not company:
+                dropped_no_company += 1
+                continue
+
+            jd_text = _fetch_job_posting_text(link) if fetch_jd_text else None
+            stack_keywords = _extract_stack_keywords(
+                jd_text or f"{item.get('title', '')} {item.get('snippet', '')}"
+            )
+
+            signals.append({
+                "company": company,
+                "domain": domain,
+                "title": item.get("title", title),
+                "job_posting_title": item.get("title", title),
+                "job_posting_url": link,
+                "job_posting_date": posting_date.isoformat(),
+                "job_posting_description": jd_text,
+                "job_posting_stack_keywords": stack_keywords,
+                "location": location,
+                "confidence_score": 0.5,
+            })
 
     if _stats is not None:
         _stats["raw_found"] = raw_found
         _stats["duplicates"] = raw_found - len(signals)
+        _stats["dropped_aggregator"] = dropped_aggregator
+        _stats["dropped_no_company"] = dropped_no_company
         _stats["brave_query_count"] = scraper.query_count
 
     return signals
@@ -1025,48 +1224,77 @@ def _find_consulting_postings_for_routing(
     cutoff = today - timedelta(days=max_age_days)
 
     raw_found = 0
+    dropped_aggregator = 0
+    dropped_no_company = 0
     seen_urls: set[str] = set()
     signals: list[dict] = []
 
-    for template in templates:
-        for title in titles:
-            for location in locations:
-                items = scraper._search(template.format(title=title, location=location))
-                raw_found += len(items)
-                for item in items:
-                    link = item.get("link", "")
-                    if not link or link in seen_urls:
+    # Same ATS-first query plan as find_job_posting_signals -- kept in
+    # lockstep deliberately: this function exists only to preserve the
+    # REAL posting title for routing, so any sourcing change must apply
+    # to both or the two consulting paths would surface different leads.
+    default_title = titles[0] if titles else ""
+    query_plan: list[tuple[str, str, str]] = [
+        (q, default_title, "") for q in _ats_templates_for(JOB_POSTING_QUERY_TITLES)
+    ]
+    query_plan += [
+        (template.format(title=title, location=location), title, location)
+        for template in templates
+        for title in titles
+        for location in locations
+    ]
+
+    for query, title, location in query_plan:
+        items = scraper._search(query)
+        raw_found += len(items)
+        for item in items:
+            link = item.get("link", "")
+            if not link or link in seen_urls:
+                continue
+            seen_urls.add(link)
+
+            domain = urlparse(link).netloc.replace("www.", "")
+
+            # Gate 1 (2026-09-29): job boards are not prospects.
+            if _is_aggregator(link, domain):
+                dropped_aggregator += 1
+                continue
+
+            posting_date = _extract_posting_date(item, today)
+            if posting_date is None or posting_date < cutoff:
+                continue
+
+            employee_estimate = _extract_employee_estimate(item)
+            if employee_estimate and max_company_size:
+                try:
+                    upper = int(employee_estimate.split("-")[1])
+                    if upper > max_company_size:
                         continue
-                    seen_urls.add(link)
+                except (ValueError, IndexError):
+                    pass
 
-                    posting_date = _extract_posting_date(item, today)
-                    if posting_date is None or posting_date < cutoff:
-                        continue
+            # Gate 2/3: real company or no lead -- never the board's domain.
+            company = _company_from_posting(item, link, domain)
+            if not company:
+                dropped_no_company += 1
+                continue
 
-                    employee_estimate = _extract_employee_estimate(item)
-                    if employee_estimate and max_company_size:
-                        try:
-                            upper = int(employee_estimate.split("-")[1])
-                            if upper > max_company_size:
-                                continue
-                        except (ValueError, IndexError):
-                            pass
-
-                    domain = urlparse(link).netloc.replace("www.", "")
-                    signals.append({
-                        "company": _company_name_from_result(item, domain),
-                        "domain": domain,
-                        "posting_title_raw": item.get("title", ""),
-                        "contact_title": title,
-                        "location": location,
-                        "job_posting_url": link,
-                        "job_posting_date": posting_date.isoformat(),
-                        "confidence_score": 0.5,
-                    })
+            signals.append({
+                "company": company,
+                "domain": domain,
+                "posting_title_raw": item.get("title", ""),
+                "contact_title": title,
+                "location": location,
+                "job_posting_url": link,
+                "job_posting_date": posting_date.isoformat(),
+                "confidence_score": 0.5,
+            })
 
     if _stats is not None:
         _stats["raw_found"] = raw_found
         _stats["duplicates"] = raw_found - len(signals)
+        _stats["dropped_aggregator"] = dropped_aggregator
+        _stats["dropped_no_company"] = dropped_no_company
         _stats["brave_query_count"] = scraper.query_count
 
     return signals

@@ -122,20 +122,56 @@ async def trigger_linkedin_dm_sequences(
 
 
 def _run_linkedin_dm_sequences() -> None:
+    """
+    Fixed 2026-09-29 -- this function is the daily enrollment engine
+    (n8n "LinkedIn Outreach — Daily 8am MST") and had been ACTIVE but
+    completely inert since at least 2026-09-22: every scheduled run
+    discovered zero products and therefore never called MKT-O2 once,
+    while 62 pending_dm leads sat untouched. Two independent bugs, either
+    one alone sufficient to produce that:
+
+    1. Discovery filtered mse_leads on email_status='verified'. Zero of
+       the 62 pending_dm rows are 'verified' (58 unverified, 4
+       catch_all), and mse_linkedin_leads had no pending_dm rows at all,
+       so `product_ids` was always the empty set and the loop below never
+       iterated. That filter is per-SOURCE policy, not discovery policy,
+       and run_o2_for_linkedin_leads already applies it correctly to the
+       one source that wants it (lead_finder) while deliberately NOT
+       applying it to job_posting_signal / cloud_decoded_job_signal --
+       those are LinkedIn-DM/manual-send leads that typically have no
+       email at all. That exact reasoning is already written out in
+       run_o2_for_linkedin_leads' own job_posting_signal block; the fix
+       had simply never been carried up here into discovery, so the
+       function that knows better was never reached.
+
+    2. `if not reports: continue` skipped any product with no MKT-R1
+       research report. None of the three products that actually have
+       pending leads has one, so even with (1) fixed nothing would have
+       enrolled. research_report only grounds the generic
+       apollo/linkedin_*/lead_finder copy path -- job_posting_signal and
+       cloud_decoded_job_signal ignore it entirely (see
+       run_o2_cold_dm_writer's per-source branch). Missing report is now
+       a warning + empty dict rather than a silent skip; every draft
+       still lands at status='pending_hitl' for human review before
+       anything can send.
+    """
+    import logging
+
     from agents.marketing.mkt_o2_cold_dm_writer import run_o2_for_linkedin_leads
 
+    log = logging.getLogger(__name__)
     db = get_supabase()
     pending_linkedin = db.table("mse_linkedin_leads").select("product_id").eq("status", "pending_dm").execute().data or []
     pending_lead_finder = (
         db.table("mse_leads")
         .select("product_id")
         .eq("status", "pending_dm")
-        .eq("email_status", "verified")
         .execute()
         .data
         or []
     )
     product_ids = {row["product_id"] for row in pending_linkedin + pending_lead_finder if row.get("product_id")}
+    log.info("[LinkedInDMSequences] discovered %d product(s) with pending_dm leads", len(product_ids))
 
     for product_id in product_ids:
         reports = (
@@ -149,8 +185,13 @@ def _run_linkedin_dm_sequences() -> None:
             or []
         )
         if not reports:
-            continue
-        run_o2_for_linkedin_leads(product_id=product_id, research_report=reports[0]["report_json"], supabase_client=db)
+            log.warning(
+                "[LinkedInDMSequences] product %s has no MKT-R1 research report -- enrolling anyway; "
+                "job-signal sources don't use it, and any grounded source still gates on its own filters",
+                product_id,
+            )
+        research_report = reports[0]["report_json"] if reports else {}
+        run_o2_for_linkedin_leads(product_id=product_id, research_report=research_report, supabase_client=db)
 
 
 @router.post("/leads/{lead_id}/mark-sent")
