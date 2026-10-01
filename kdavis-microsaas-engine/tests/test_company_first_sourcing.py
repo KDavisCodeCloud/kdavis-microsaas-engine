@@ -1400,3 +1400,50 @@ class TestEmailResolverGrading:
                 resolve("Jane Doe", "northwind.example")
         assert sink["email_probes"] == 2
         assert sink["email_probes_skipped_over_cap"] == 3
+
+
+class TestThreeWayBudgetSplit:
+    """The Brave budget now has THREE consumers: discovery, the per-company
+    domain fallback (decision 5, separately capped at 10) and the contact
+    lookup. The ≤40 cap must hold across all of them together."""
+
+    @pytest.mark.parametrize("max_queries", [40, 20, 12, 4])
+    def test_total_never_exceeds_max_queries(self, max_queries):
+        scraper = FakeScraper(responses={
+            "site:boards.greenhouse.io": [
+                ats_result(f"https://boards.greenhouse.io/co{i}/jobs/1") for i in range(8)
+            ],
+            "site:linkedin.com/in": [],
+            "official website": [],
+        })
+        payloads = {f"co{i}": GREENHOUSE_PAYLOAD for i in range(8)}
+        _rows, stats = find_company_first_signals(
+            "p1", ["platform engineer", "devops engineer", "sre", "cloud engineer"],
+            scraper=scraper, ats_client=board_client(payloads),
+            max_queries=max_queries, taxonomy=TAXONOMY,
+            http_get=fake_homepage(), dns_resolves=fake_dns, sleep=NO_SLEEP,
+        )
+        total = (stats.queries_discovery + stats.queries_decision_maker
+                 + stats.brave_domain_queries)
+        assert total <= max_queries, f"spent {total} against a {max_queries} cap"
+        assert len(scraper.queries) == total, "every Brave query must be counted"
+
+    def test_domain_allowance_is_carved_out_before_discovery(self):
+        """A company with no domain fails Stage 1 outright, so spending the
+        whole budget discovering boards we then cannot qualify is the worst
+        possible split."""
+        scraper = FakeScraper(default=[])
+        _rows, stats = find_company_first_signals(
+            "p1", ["platform engineer"], scraper=scraper, ats_client=board_client({}),
+            max_queries=40, taxonomy=TAXONOMY, sleep=NO_SLEEP,
+        )
+        assert stats.queries_discovery <= 20
+
+    def test_funnel_reports_a_single_query_total(self):
+        _rows, stats = find_company_first_signals(
+            "p1", ["platform engineer"], scraper=FakeScraper(default=[]),
+            ats_client=board_client({}), max_queries=40, taxonomy=TAXONOMY, sleep=NO_SLEEP,
+        )
+        d = stats.as_dict()
+        assert d["queries_total"] == (d["queries_discovery"] + d["queries_decision_maker"]
+                                     + d["brave_domain_queries"])
