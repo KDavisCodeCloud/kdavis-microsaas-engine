@@ -347,6 +347,12 @@ class AtsBoardClient:
         self._http_get = http_get or httpx.get
         self._sleep = sleep if sleep is not None else time.sleep
         self.stats = AtsStats()
+        # Per-board outcome, keyed by BoardRef.cache_key: "ok" | "empty" |
+        # "failed". The caller needs these THREE values distinguished to
+        # maintain the token cache correctly -- a 404 board should stop
+        # being polled, while a company with no openings this week is a
+        # legitimate result that must keep its place.
+        self.board_status: dict[str, str] = {}
 
     def _polite_pause(self) -> None:
         self._sleep(random.uniform(MIN_ATS_DELAY_SECONDS, MAX_ATS_DELAY_SECONDS))
@@ -357,6 +363,7 @@ class AtsBoardClient:
         if not endpoint_builder:
             log.warning("ATS: unknown provider %r -- skipping", ref.provider)
             self.stats.boards_failed += 1
+            self.board_status[ref.cache_key] = "failed"
             return []
 
         url = endpoint_builder(ref.token)
@@ -370,6 +377,7 @@ class AtsBoardClient:
             log.warning("ATS: %s board %r request failed: %s", ref.provider, ref.token, exc)
             self.stats.boards_failed += 1
             self.stats.http_errors["request_error"] = self.stats.http_errors.get("request_error", 0) + 1
+            self.board_status[ref.cache_key] = "failed"
             return []
 
         status = getattr(response, "status_code", 0)
@@ -378,6 +386,7 @@ class AtsBoardClient:
             self.stats.boards_failed += 1
             key = f"http_{status}"
             self.stats.http_errors[key] = self.stats.http_errors.get(key, 0) + 1
+            self.board_status[ref.cache_key] = "failed"
             return []
 
         try:
@@ -386,6 +395,7 @@ class AtsBoardClient:
             log.warning("ATS: %s board %r returned non-JSON: %s", ref.provider, ref.token, exc)
             self.stats.boards_failed += 1
             self.stats.http_errors["bad_json"] = self.stats.http_errors.get("bad_json", 0) + 1
+            self.board_status[ref.cache_key] = "failed"
             return []
 
         company, postings = _PROVIDER_NORMALISERS[ref.provider](payload, ref)
@@ -398,6 +408,7 @@ class AtsBoardClient:
         self.stats.postings_returned += len(postings)
         if not postings:
             self.stats.boards_empty += 1
+        self.board_status[ref.cache_key] = "ok" if postings else "empty"
         return postings
 
     def fetch_boards(self, refs: Iterable[BoardRef]) -> dict[str, list[AtsPosting]]:

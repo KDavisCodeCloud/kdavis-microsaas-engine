@@ -25,9 +25,11 @@ from agents.marketing.company_first_sourcing import (
     discover_board_refs,
     find_company_first_signals,
     find_decision_maker,
+    MSE_LEADS_WRITABLE_COLUMNS,
     load_cached_board_refs,
     parse_decision_maker_title,
     qualify_candidate,
+    split_contact_name,
     to_mse_lead_row,
 )
 from scrapers.ats_boards import AtsBoardClient, AtsPosting, BoardRef
@@ -462,34 +464,76 @@ class TestToMseLeadRow:
             ref=BoardRef("greenhouse", "northwind"), company="Northwind Systems", domain=None,
             matching=[AtsPosting("greenhouse", "northwind", title="Platform Engineer", posted_at=date.today())],
             all_postings=[],
-        ), contact={"title": "CTO", "name": "Jane Doe"})
+        ), contact={"title": "CTO", "name": "Jane Doe", "profile_url": "https://linkedin.com/in/janedoe"})
         qualified["product_id"] = "p1"
         row = to_mse_lead_row(qualified, source="job_posting_signal")
 
-        for internal in ("route_reason", "negative_reason", "contact_name", "ats_provider", "ats_board_token"):
+        for internal in ("route_reason", "negative_reason", "contact_name",
+                         "contact_profile_url", "ats_provider", "ats_board_token"):
             assert internal not in row
         assert "domain" not in row, "a None must be omitted, not written as a literal"
-        assert row["name"] == "Jane Doe"
+        assert row["first_name"] == "Jane"
+        assert row["last_name"] == "Doe"
         assert row["source"] == "job_posting_signal"
         assert row["lead_route"] == "manual_linkedin"
 
-    def test_only_declared_columns_are_emitted(self):
-        """Guards against a key drifting in that migration 057 never
-        added -- PostgREST would 400 the whole insert."""
-        allowed = {
-            "product_id", "source", "company", "domain", "title", "name", "location",
-            "job_posting_url", "job_posting_title", "job_posting_date", "open_role_count",
-            "stack_tags", "headcount_band", "funding_months", "email_grade", "fit_score",
-            "intent_score", "score_reasons", "lead_route", "seniority", "confidence_score",
-        }
+    def test_contact_name_is_split_into_the_two_real_columns(self):
+        """mse_leads has first_name/last_name -- there is no `name` column.
+        The first live v2 run died on exactly this with PGRST204."""
+        assert split_contact_name("Jane Doe") == ("Jane", "Doe")
+        assert split_contact_name("Maria del Carmen Ruiz") == ("Maria", "del Carmen Ruiz")
+        assert split_contact_name(None) == (None, None)
+        assert split_contact_name("   ") == (None, None)
+
+    def test_single_token_name_does_not_invent_a_surname(self):
+        assert split_contact_name("Cher") == ("Cher", None)
+
+    def test_decision_maker_profile_url_is_persisted(self):
+        """It was being discarded, which left the manual-LinkedIn track
+        with no way to reach the person it had routed there."""
+        qualified = qualify_candidate(CompanyCandidate(
+            ref=BoardRef("greenhouse", "x"), company="X", domain=None,
+            matching=[AtsPosting("greenhouse", "x", title="Platform Engineer", posted_at=date.today())],
+            all_postings=[],
+        ), contact={"title": "CTO", "name": "A B", "profile_url": "https://linkedin.com/in/ab"})
+        qualified["product_id"] = "p1"
+        assert to_mse_lead_row(qualified, source="s")["linkedin_url"] == "https://linkedin.com/in/ab"
+
+    def test_every_emitted_key_is_a_real_mse_leads_column(self):
+        """Asserted against MSE_LEADS_WRITABLE_COLUMNS, which was taken
+        from microsaas-prod's information_schema on 2026-10-01.
+
+        The predecessor of this test compared against a hand-written
+        allowlist that contained "name" -- so it passed while production
+        rejected the insert with PGRST204. An allowlist invented in the
+        test file can only ever confirm the implementation's own
+        assumptions; this one has to match the database."""
         qualified = qualify_candidate(CompanyCandidate(
             ref=BoardRef("greenhouse", "x"), company="X", domain="x.example",
             matching=[AtsPosting("greenhouse", "x", title="Platform Engineer", posted_at=date.today(),
                                  description_text="Azure Terraform 60 employees")],
             all_postings=[],
-        ), contact={"title": "CTO", "name": "A B"})
+        ), contact={"title": "CTO", "name": "A B", "profile_url": "https://linkedin.com/in/ab"})
         qualified["product_id"] = "p1"
-        assert set(to_mse_lead_row(qualified, source="s")) <= allowed
+        row = to_mse_lead_row(qualified, source="s")
+        assert set(row) <= MSE_LEADS_WRITABLE_COLUMNS
+        assert "name" not in row, "mse_leads has first_name/last_name, not name"
+
+    def test_unknown_keys_are_refused_rather_than_sent_to_postgrest(self, caplog):
+        """A key that is not a real column must be dropped here, with a
+        warning -- not 400 the whole batch insert in production."""
+        import agents.marketing.company_first_sourcing as cfs
+
+        original = cfs.MSE_LEADS_WRITABLE_COLUMNS
+        try:
+            cfs.MSE_LEADS_WRITABLE_COLUMNS = original - {"company"}
+            qualified = {"product_id": "p1", "company": "X", "fit_score": 0.5}
+            with caplog.at_level("WARNING"):
+                row = cfs.to_mse_lead_row(qualified, source="s")
+            assert "company" not in row
+            assert "refusing to write unknown mse_leads column" in caplog.text
+        finally:
+            cfs.MSE_LEADS_WRITABLE_COLUMNS = original
 
 
 class TestBravePacing:
@@ -590,3 +634,87 @@ class TestBoardTokenCacheWrite:
         assert row["last_status"] == "empty"
         assert row["open_role_count"] == 0
         assert row["company"] == "Quiet", "company falls back to the cased token, never the raw slug"
+
+
+class TestDeadBoardEviction:
+    """The first live v2 run surfaced 7+ ATS boards returning 404 (angi,
+    dbtlabsinc, o1labs, worldlabs, skylotechnologies, zerofox,
+    talentwerx.io) -- Brave's index carries ATS URLs for companies that
+    have since moved or closed their boards. Verified the endpoints are
+    correct: stripe and discord return 200 on the same API.
+
+    Two bugs this covers, both of which made eviction impossible:
+      - a 404 and "no openings this week" both recorded as 'empty'
+      - consecutive_failures was SET to 1, never incremented, so the
+        `>= 3` eviction could never fire and a dead board was re-polled
+        (HTTP request + politeness pause) every run, forever."""
+
+    def _upsert(self, status, prior=None):
+        from agents.marketing.company_first_sourcing import upsert_board_tokens
+
+        db = FakeDb([])
+        ref = BoardRef("greenhouse", "gone")
+        upsert_board_tokens(
+            db, {ref.cache_key: (ref, [], None)}, "p1",
+            board_status={ref.cache_key: status},
+            prior_failures=prior or {},
+        )
+        return db.query.upserts[0]
+
+    def test_failed_board_is_recorded_as_failed_not_empty(self):
+        assert self._upsert("failed")["last_status"] == "failed"
+
+    def test_empty_board_is_still_recorded_as_empty(self):
+        """A company with no current openings is a legitimate result and
+        must keep its place in the cache."""
+        row = self._upsert("empty")
+        assert row["last_status"] == "empty"
+        assert row["consecutive_failures"] == 0
+
+    def test_consecutive_failures_increments_rather_than_resetting(self):
+        key = "greenhouse:gone"
+        assert self._upsert("failed", {key: 0})["consecutive_failures"] == 1
+        assert self._upsert("failed", {key: 1})["consecutive_failures"] == 2
+        assert self._upsert("failed", {key: 2})["consecutive_failures"] == 3
+
+    def test_a_successful_fetch_resets_the_failure_count(self):
+        from agents.marketing.company_first_sourcing import upsert_board_tokens
+
+        db = FakeDb([])
+        ref = BoardRef("greenhouse", "back")
+        posting = AtsPosting("greenhouse", "back", company="Back Online", title="Platform Engineer")
+        upsert_board_tokens(
+            db, {ref.cache_key: (ref, [posting], None)}, "p1",
+            board_status={ref.cache_key: "ok"}, prior_failures={ref.cache_key: 2},
+        )
+        assert db.query.upserts[0]["consecutive_failures"] == 0
+
+    def test_failed_fetch_does_not_overwrite_a_known_role_count_with_zero(self):
+        """A failed request learned nothing about the role count."""
+        assert "open_role_count" not in self._upsert("failed")
+
+    def test_board_over_the_failure_limit_is_not_polled_again(self):
+        db = FakeDb([
+            {"provider": "greenhouse", "board_token": "dead", "consecutive_failures": 3},
+            {"provider": "greenhouse", "board_token": "alive", "consecutive_failures": 1},
+        ])
+        prior = {}
+        refs = load_cached_board_refs(db, "p1", prior_failures=prior)
+        assert [r.token for r in refs] == ["alive"]
+        assert prior["greenhouse:dead"] == 3, (
+            "a skipped board's count must still be remembered, so re-discovering "
+            "it this run keeps accumulating instead of resetting to 1"
+        )
+
+    def test_client_records_a_distinct_status_per_outcome(self):
+        ok = board_client({"northwind": GREENHOUSE_PAYLOAD})
+        ok.fetch_board(BoardRef("greenhouse", "northwind"))
+        assert ok.board_status["greenhouse:northwind"] == "ok"
+
+        empty = board_client({"quiet": {"meta": {}, "jobs": []}})
+        empty.fetch_board(BoardRef("greenhouse", "quiet"))
+        assert empty.board_status["greenhouse:quiet"] == "empty"
+
+        failed = board_client({})
+        failed.fetch_board(BoardRef("greenhouse", "gone"))
+        assert failed.board_status["greenhouse:gone"] == "failed"

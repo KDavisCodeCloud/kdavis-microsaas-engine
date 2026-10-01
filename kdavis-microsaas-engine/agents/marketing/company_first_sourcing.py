@@ -164,10 +164,21 @@ class FunnelStats:
 
 # ── Step 1: board token discovery ────────────────────────────────────────
 
-def load_cached_board_refs(db, product_id: Optional[str] = None, limit: int = 200) -> list[BoardRef]:
+def load_cached_board_refs(
+    db,
+    product_id: Optional[str] = None,
+    limit: int = 200,
+    prior_failures: Optional[dict[str, int]] = None,
+) -> list[BoardRef]:
     """Board tokens already known for this product. Costs ZERO Brave
     quota -- this is the whole point of the cache table. Boards that have
-    failed repeatedly are excluded."""
+    failed MAX_CONSECUTIVE_BOARD_FAILURES times in a row are excluded.
+
+    `prior_failures`, if given, is filled with {cache_key: count} for
+    every cached row -- upsert_board_tokens needs those counts to
+    INCREMENT on a repeat failure rather than reset to 1."""
+    if prior_failures is None:
+        prior_failures = {}
     try:
         query = db.table(BOARD_TOKEN_TABLE).select("provider,board_token,consecutive_failures")
         if product_id:
@@ -181,11 +192,17 @@ def load_cached_board_refs(db, product_id: Optional[str] = None, limit: int = 20
         return []
     out = []
     for r in rows:
-        if (r.get("consecutive_failures") or 0) >= MAX_CONSECUTIVE_BOARD_FAILURES:
-            continue
         ref = BoardRef(provider=r.get("provider") or "", token=r.get("board_token") or "")
-        if ref.provider and ref.token:
-            out.append(ref)
+        if not (ref.provider and ref.token):
+            continue
+        failures = r.get("consecutive_failures") or 0
+        # Remember the count even for a board we are about to skip, so a
+        # re-discovery of that same dead board this run keeps accumulating
+        # rather than resetting to 1.
+        prior_failures[ref.cache_key] = failures
+        if failures >= MAX_CONSECUTIVE_BOARD_FAILURES:
+            continue
+        out.append(ref)
     return out
 
 
@@ -221,14 +238,34 @@ def discover_board_refs(
     return list(found.values())
 
 
-def upsert_board_tokens(db, refs_with_results: dict[str, tuple[BoardRef, list[AtsPosting], Optional[str]]],
-                        product_id: Optional[str] = None) -> int:
+def upsert_board_tokens(
+    db,
+    refs_with_results: dict[str, tuple[BoardRef, list[AtsPosting], Optional[str]]],
+    product_id: Optional[str] = None,
+    *,
+    board_status: Optional[dict[str, str]] = None,
+    prior_failures: Optional[dict[str, int]] = None,
+) -> int:
     """Write/refresh the cache. One row per board, so next week's run
     skips discovery for every company found this week.
 
-    Records BOTH success and failure (last_status + consecutive_failures)
-    so a board that has gone away stops being polled instead of burning a
-    request every run forever."""
+    Records all THREE outcomes distinctly, which the first live run proved
+    necessary. Of the boards discovered on 2026-10-01, several (angi,
+    dbtlabsinc, o1labs, worldlabs, skylotechnologies, zerofox,
+    talentwerx.io) returned 404 -- Brave's index still carries ATS URLs for
+    companies that have since moved or closed their boards. Verified
+    independently that the endpoints are right: stripe and discord return
+    200 on the same Greenhouse API.
+
+    Two bugs this function had until that run made them visible:
+      - a 404 and a company with no current openings both recorded as
+        'empty', which are completely different facts; and
+      - consecutive_failures was SET to 1 rather than incremented, so the
+        `>= MAX_CONSECUTIVE_BOARD_FAILURES` eviction in
+        load_cached_board_refs could never fire and a dead board would be
+        re-polled (one HTTP request + a politeness pause) every run,
+        forever.
+    """
     # A real ISO timestamp, NOT the string "now()". PostgREST sends values
     # as JSON, so "now()" arrives as the literal 6-character string and
     # Postgres rejects it ("invalid input syntax for type timestamp with
@@ -236,20 +273,34 @@ def upsert_board_tokens(db, refs_with_results: dict[str, tuple[BoardRef, list[At
     # warning and the cache would have silently never populated --
     # defeating the entire reason this table exists.
     now_iso = datetime.now(timezone.utc).isoformat()
+    board_status = board_status or {}
+    prior_failures = prior_failures or {}
     written = 0
-    for _key, (ref, postings, domain) in refs_with_results.items():
+    for key, (ref, postings, domain) in refs_with_results.items():
         company = next((p.company for p in postings if p.company), None) or company_name_from_token(ref.token)
+        # Fall back to inferring from postings only when the client gave no
+        # explicit status, so a caller that does pass board_status can
+        # distinguish 'failed' from 'empty'.
+        status = board_status.get(key) or ("ok" if postings else "empty")
+        if status == "failed":
+            failures = prior_failures.get(key, 0) + 1
+        else:
+            failures = 0
         row = {
             "provider": ref.provider,
             "board_token": ref.token,
             "company": company,
             "company_domain": domain,
             "last_fetched_at": now_iso,
-            "last_status": "ok" if postings else "empty",
-            "open_role_count": len(postings),
-            "consecutive_failures": 0 if postings else 1,
+            "last_status": status,
+            # A failed fetch learned nothing about the role count, so it
+            # must not overwrite a previously-known number with 0.
+            "open_role_count": len(postings) if status != "failed" else None,
+            "consecutive_failures": failures,
             "updated_at": now_iso,
         }
+        if row["open_role_count"] is None:
+            del row["open_role_count"]
         if product_id:
             row["product_id"] = product_id
         try:
@@ -457,6 +508,7 @@ def qualify_candidate(
         "company": candidate.company,
         "domain": candidate.domain,
         "contact_name": contact.get("name"),
+        "contact_profile_url": contact.get("profile_url"),
         "title": contact_title,
         "seniority": classify_seniority(contact_title),
         "location": candidate.location or parse_location(jd),
@@ -525,8 +577,9 @@ def find_company_first_signals(
 
     # Step 1: cache first (free), then discovery (paid).
     refs: dict[str, BoardRef] = {}
+    prior_failures: dict[str, int] = {}
     if db is not None:
-        for ref in load_cached_board_refs(db, product_id):
+        for ref in load_cached_board_refs(db, product_id, prior_failures=prior_failures):
             refs[ref.cache_key] = ref
         stats.board_tokens_from_cache = len(refs)
     cached_keys = set(refs)
@@ -557,6 +610,8 @@ def find_company_first_signals(
             db,
             {k: (refs[k], v, company_domain_from_postings(v)) for k, v in boards.items() if k in refs},
             product_id,
+            board_status=client.board_status,
+            prior_failures=prior_failures,
         )
 
     # Step 3: candidates -> qualification.
@@ -607,23 +662,61 @@ def find_company_first_signals(
     return rows, stats
 
 
+# Every mse_leads column this module is allowed to write, verified against
+# microsaas-prod's information_schema on 2026-10-01 -- NOT assumed.
+#
+# This exists because the first live v2 run died on the INSERT with
+# PGRST204 "Could not find the 'name' column of 'mse_leads'": the real
+# schema has first_name/last_name, and a unit test that asserted against
+# a hand-written allowlist happily agreed with the wrong guess. Filtering
+# through a verified set means an unknown key is dropped (and logged) here
+# instead of 400-ing the whole batch insert in production.
+MSE_LEADS_WRITABLE_COLUMNS = frozenset({
+    "product_id", "first_name", "last_name", "title", "company", "domain",
+    "email", "email_status", "linkedin_url", "source", "location", "status",
+    "confidence_score", "notes", "job_posting_url", "job_posting_title",
+    "job_posting_date", "job_posting_description", "job_posting_stack_keywords",
+    "seniority", "stack_tags", "headcount_band", "funding_months",
+    "email_grade", "fit_score", "intent_score", "score_reasons",
+    "lead_route", "open_role_count",
+})
+
+
+def split_contact_name(name: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """(first_name, last_name) for mse_leads' two real columns. A
+    single-token name becomes first_name with last_name left NULL rather
+    than duplicated -- an invented surname is still an invented fact."""
+    if not name or not name.strip():
+        return None, None
+    parts = name.strip().split()
+    if len(parts) == 1:
+        return parts[0], None
+    return parts[0], " ".join(parts[1:])
+
+
 def to_mse_lead_row(qualified: dict, *, source: str) -> dict:
     """
     Project a qualified candidate onto mse_leads' real columns
     (migration 20261001000057 for the v2 fields).
 
-    Internal-only keys (route_reason, negative_reason, contact_name,
-    ats_*) are dropped rather than written, and any None is omitted
-    entirely so a nullable column stays NULL instead of being set to a
-    literal "None" string.
+    Internal-only keys (route_reason, negative_reason, ats_*) are dropped
+    rather than written, any None is omitted so a nullable column stays
+    NULL instead of being set to a literal "None", and anything not in
+    MSE_LEADS_WRITABLE_COLUMNS is refused with a warning.
     """
+    first_name, last_name = split_contact_name(qualified.get("contact_name"))
     row = {
         "product_id": qualified["product_id"],
         "source": source,
         "company": qualified["company"],
         "domain": qualified.get("domain"),
         "title": qualified.get("title"),
-        "name": qualified.get("contact_name"),
+        "first_name": first_name,
+        "last_name": last_name,
+        # The decision-maker step's profile URL. Previously discarded,
+        # which left the manual-LinkedIn track with no way to reach the
+        # person it had deliberately routed there.
+        "linkedin_url": qualified.get("contact_profile_url"),
         "location": qualified.get("location"),
         "job_posting_url": qualified.get("job_posting_url"),
         "job_posting_title": qualified.get("job_posting_title"),
@@ -640,4 +733,7 @@ def to_mse_lead_row(qualified: dict, *, source: str) -> dict:
         "seniority": qualified.get("seniority"),
         "confidence_score": qualified.get("fit_score"),
     }
-    return {k: v for k, v in row.items() if v is not None}
+    unknown = set(row) - MSE_LEADS_WRITABLE_COLUMNS
+    if unknown:
+        log.warning("[CompanyFirst] refusing to write unknown mse_leads column(s): %s", sorted(unknown))
+    return {k: v for k, v in row.items() if v is not None and k in MSE_LEADS_WRITABLE_COLUMNS}
