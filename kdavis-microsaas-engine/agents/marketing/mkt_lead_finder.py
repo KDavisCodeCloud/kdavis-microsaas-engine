@@ -1501,3 +1501,150 @@ def run_combined_job_signal_scout(supabase_client: Optional[Any] = None) -> dict
         "cloud_decoded_leads_written": written["cloud_decoded_job_signal"],
         "company_dupes_dropped": company_dupes,
     }
+
+
+# ── Scraper v2 entry point, added 2026-10-01 ──────────────────────────────
+#
+# Kelvin's spec: "Company-first ATS sourcing is primary."
+#
+# Everything above is left untouched -- find_leads,
+# find_job_posting_signals, find_cloud_decoded_job_signals and
+# run_combined_job_signal_scout are all still independently callable with
+# unchanged behaviour, because they are what's currently tested against
+# production data and this is a new path, not a rewrite of a working one.
+# The qualification/sourcing logic itself lives in
+# agents/marketing/company_first_sourcing.py and
+# agents/marketing/lead_qualification.py rather than here: this file is
+# already ~1500 lines (well past the 300-line REFACTOR CANDIDATE line),
+# and that logic needs to be unit-testable with no Brave key, no network
+# and no database.
+
+SCRAPER_V2_KEYWORDS: dict[str, list[str]] = {
+    # Consulting buys on "they need architecture/migration help".
+    THDAGENTIC_CONSULTING_PRODUCT_ID: [
+        "cloud architect", "platform engineer", "cloud migration",
+        "infrastructure engineer", "devops engineer",
+    ],
+    # Cloud Decoded buys on "they're scaling an operational platform".
+    CLOUD_DECODED_PRODUCT_ID: [
+        "devops engineer", "site reliability engineer", "platform engineer",
+        "cloud engineer",
+    ],
+}
+
+
+def run_scraper_v2_scout(
+    product_id: str,
+    supabase_client: Optional[Any] = None,
+    *,
+    max_queries: int = 40,
+    keywords: Optional[list[str]] = None,
+    max_age_days: Optional[int] = 30,
+    lookup_decision_makers: bool = True,
+) -> dict:
+    """
+    Scraper v2 production entry point for ONE product.
+
+    Records a real mse_lead_finder_runs row with the extended
+    funnel_stats, so a run's collapse is attributable per stage after the
+    fact rather than requiring a re-run with print statements (the whole
+    reason funnel_stats exists -- migration 20260927000055).
+
+    `max_queries` is a HARD Brave cap for this run, enforced across
+    discovery AND decision-maker lookups together.
+
+    Routing, per Kelvin 2026-10-01:
+      outbound_email  -> written, eligible for MKT-O5 once an email is
+                         actually verified (email_grade starts "unknown",
+                         and only "valid" ever sends)
+      manual_linkedin -> written, NEVER emailed
+      reject          -> not written; counted under a named funnel reason
+    """
+    from agents.marketing.company_first_sourcing import (
+        find_company_first_signals,
+        to_mse_lead_row,
+    )
+    from scrapers.brave_search import BraveSearchScraper
+
+    db = supabase_client if supabase_client is not None else get_supabase()
+    keywords = keywords or SCRAPER_V2_KEYWORDS.get(product_id) or JOB_POSTING_QUERY_TITLES
+    source = ("cloud_decoded_job_signal" if product_id == CLOUD_DECODED_PRODUCT_ID
+              else "job_posting_signal")
+
+    run_row = db.table("mse_lead_finder_runs").insert({
+        "product_id": product_id, "status": "running", "sources_used": [source],
+    }).execute()
+    if not run_row.data:
+        raise RuntimeError(f"Scraper v2 failed to create a run row for product {product_id}")
+    run_id = run_row.data[0]["id"]
+    _emit_event(db, "scraper_v2_run_started", {"product_id": product_id, "run_id": run_id})
+
+    try:
+        already_used_this_month = _this_months_brave_query_count(db)
+        scraper = BraveSearchScraper(query_count=already_used_this_month)
+
+        qualified, stats = find_company_first_signals(
+            product_id, keywords,
+            db=db, scraper=scraper, max_queries=max_queries, max_age_days=max_age_days,
+            existing_domains=_existing_job_signal_domains(db),
+            lookup_decision_makers=lookup_decision_makers,
+        )
+
+        rows = [to_mse_lead_row(q, source=source) for q in qualified]
+        inserted: list[dict] = []
+        if rows:
+            insert_result = db.table("mse_leads").insert(rows).execute()
+            if not insert_result.data:
+                raise RuntimeError(f"Insert into mse_leads ({source}) returned no data")
+            inserted = insert_result.data
+            _log_found_activities(db, product_id, inserted)
+
+        funnel = stats.as_dict()
+        queries_this_run = stats.queries_discovery + stats.queries_decision_maker
+        if queries_this_run:
+            _emit_event(db, "brave_search_queries_used",
+                        {"month": date.today().isoformat()[:7], "count": queries_this_run})
+
+        log.info("SCRAPER-V2 funnel for product %s (run %s): %s", product_id, run_id, funnel)
+
+        db.table("mse_lead_finder_runs").update({
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "leads_found": len(rows),
+            # Nothing is SMTP-verified in this path -- v2 never invents an
+            # address, so a v2 run's verified count is honestly zero until
+            # core/email_finder runs separately.
+            "leads_verified": 0,
+            "leads_deduplicated": stats.dropped_duplicate_company,
+            "sources_used": [source],
+            "funnel_stats": funnel,
+            "status": "complete",
+            "current_step": None,
+            "estimated_seconds_remaining": 0,
+        }).eq("id", run_id).execute()
+
+    except Exception as exc:
+        db.table("mse_lead_finder_runs").update({
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "status": "failed", "error_message": str(exc),
+            "current_step": None, "estimated_seconds_remaining": None,
+        }).eq("id", run_id).execute()
+        _write_audit(db, "lose", product_id, {"run_id": run_id, "error": str(exc), "agent": "scraper_v2"})
+        _emit_event(db, "scraper_v2_run_failed", {"product_id": product_id, "run_id": run_id, "error": str(exc)})
+        raise RuntimeError(f"Scraper v2 run failed for product {product_id}: {exc}") from exc
+
+    _write_audit(db, "win", product_id, {
+        "run_id": run_id, "agent": "scraper_v2", "leads_written": len(inserted),
+        "brave_queries": queries_this_run, "funnel_stats": funnel,
+    })
+    _emit_event(db, "scraper_v2_run_completed", {
+        "product_id": product_id, "run_id": run_id, "leads_written": len(inserted),
+    })
+
+    return {
+        "run_id": run_id, "status": "complete", "product_id": product_id,
+        "leads_written": len(inserted),
+        "routed_outbound_email": stats.routed_outbound_email,
+        "routed_manual_linkedin": stats.routed_manual_linkedin,
+        "brave_queries_used": queries_this_run,
+        "funnel_stats": funnel,
+    }

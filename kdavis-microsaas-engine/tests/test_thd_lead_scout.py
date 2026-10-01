@@ -5,8 +5,11 @@ and company_signals are mocked; this covers scoring + orchestration logic,
 not real scraping/SMTP/HTTP behavior. Mirrors tests/test_mkt_lead_finder.py's
 style.
 """
+import asyncio
 from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 import agents.marketing.thd_lead_scout as scout
 from core.email_finder import EmailResult
@@ -133,6 +136,12 @@ def test_find_and_score_leads_deduplicates_by_domain_against_existing():
 
 
 def test_run_lead_scout_writes_qualified_leads_and_completes_run():
+    """DEPRECATED PATH (2026-10-01). Kept, with the explicit
+    allow_deprecated=True override, because the orchestration it covers is
+    still reachable for a deliberate one-off backfill -- and if that
+    override is ever used, it should still work rather than be the one
+    code path nobody tests. The default-raises behaviour is covered by
+    TestThdLeadScoutDeprecated below."""
     fake_db = FakeSupabase(responses={
         # Same canned-row shape doubles as both the dedup existing-lookup
         # (no "domain" key -> contributes nothing to the existing-domains
@@ -151,6 +160,7 @@ def test_run_lead_scout_writes_qualified_leads_and_completes_run():
         result = scout.run_lead_scout(
             {"industries": ["construction"], "locations": ["Dallas TX"], "min_signal_score": 1},
             supabase_client=fake_db,
+            allow_deprecated=True,
         )
 
     assert result["status"] == "complete"
@@ -158,3 +168,56 @@ def test_run_lead_scout_writes_qualified_leads_and_completes_run():
 
     insert_calls = [c for c in fake_db.tables_touched if c == "thd_consulting_leads"]
     assert insert_calls  # at least one call touched the leads table
+
+
+# ── Deprecation (2026-10-01) ─────────────────────────────────────────────
+
+class TestThdLeadScoutDeprecated:
+    """Kelvin, 2026-10-01: "Deprecate thd_consulting_leads formally.
+    Approved." The write path must be closed LOUDLY -- a silent second
+    lead-writing path is exactly the duplication this removes."""
+
+    def test_run_lead_scout_raises_by_default(self):
+        with pytest.raises(RuntimeError) as exc:
+            scout.run_lead_scout({"locations": ["Dallas TX"]}, supabase_client=FakeSupabase(responses={}))
+        assert "DEPRECATED" in str(exc.value)
+
+    def test_the_error_names_the_successor_path(self):
+        """A deprecation that doesn't say what to use instead just moves
+        the confusion."""
+        with pytest.raises(RuntimeError) as exc:
+            scout.run_lead_scout({}, supabase_client=FakeSupabase(responses={}))
+        message = str(exc.value)
+        assert "run_scraper_v2_scout" in message
+        assert "mse_leads" in message
+
+    def test_nothing_is_written_when_it_raises(self):
+        db = FakeSupabase(responses={})
+        with pytest.raises(RuntimeError):
+            scout.run_lead_scout({"locations": ["x"]}, supabase_client=db)
+        assert "thd_consulting_leads" not in db.tables_touched
+        assert "thd_consulting_scrape_runs" not in db.tables_touched
+
+    def test_module_declares_itself_deprecated(self):
+        assert scout.THD_LEAD_SCOUT_DEPRECATED is True
+
+
+class TestThdConsultingRouteDeprecated:
+    def test_scrape_find_returns_410_and_creates_no_run_row(self):
+        """The route must 410 rather than create a run row and dispatch a
+        task that now raises -- _run_scout_background used to swallow the
+        exception, which would leave the row at "pending" forever with
+        nothing explaining why."""
+        from fastapi import HTTPException
+
+        import api.routers.thd_consulting as router_mod
+
+        with patch.object(router_mod, "require_marketing_api_key", return_value=None), \
+             patch.object(router_mod, "get_supabase") as mock_db:
+            with pytest.raises(HTTPException) as exc:
+                asyncio.run(router_mod.trigger_scrape(
+                    router_mod.FindLeadsRequest(locations=["Dallas TX"]), authorization="Bearer k",
+                ))
+        assert exc.value.status_code == 410
+        assert "run_scraper_v2_scout" in exc.value.detail
+        mock_db.assert_not_called(), "no DB row may be created for a deprecated route"

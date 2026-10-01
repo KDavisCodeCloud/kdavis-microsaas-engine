@@ -1,5 +1,17 @@
 """
-THD Consulting lead scout API — POST /thd-consulting/scrape/find (kicks off
+THD Consulting lead scout API.
+
+PARTIALLY DEPRECATED 2026-10-01 (Kelvin: "Deprecate thd_consulting_leads
+formally. Approved."). POST /scrape/find now always returns 410 -- lead
+sourcing moved to agents.marketing.mkt_lead_finder.run_scraper_v2_scout,
+writing to mse_leads. The GET/PATCH routes below are unchanged and still
+serve the thd_consulting_leads table so the CEO Decoded consulting board
+keeps working on historical rows (0 in production at deprecation time).
+See supabase/migrations/20261001000058_deprecate_thd_consulting_leads.sql.
+
+Original docstring follows.
+
+POST /thd-consulting/scrape/find (kicks off
 a run), GET /thd-consulting/scrape/runs/{run_id} (poll status),
 GET /thd-consulting/leads (paginated list, sortable/filterable),
 PATCH /thd-consulting/leads/{id} (status/notes update from the CEO Decoded
@@ -17,7 +29,7 @@ import csv
 import io
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -46,39 +58,34 @@ class LeadUpdateRequest(BaseModel):
 @router.post("/scrape/find")
 async def trigger_scrape(
     body: FindLeadsRequest,
-    background_tasks: BackgroundTasks,
     authorization: Optional[str] = Header(default=None),
 ):
-    """Creates the thd_consulting_scrape_runs row synchronously so the
-    caller gets a real run_id to poll immediately, then runs the actual
-    find as a background task — a full run can take a while (SMTP
-    verification throttled per core/email_finder.py), same shape as
-    POST /marketing/leads/find."""
+    """DEPRECATED 2026-10-01 -- always 410. `body` is kept so an existing
+    caller still gets request validation rather than a confusing shape
+    error on top of the deprecation. BackgroundTasks is gone with the
+    background task it existed for."""
     require_marketing_api_key(authorization)
-    if not body.locations:
-        raise HTTPException(status_code=400, detail="locations is required — nothing to search without at least one")
 
-    db = get_supabase()
-    filters = body.model_dump()
-
-    run_row = db.table("thd_consulting_scrape_runs").insert({
-        "product_id": "thd_consulting", "filters": filters, "status": "pending", "sources_used": [],
-    }).execute()
-    if not run_row.data:
-        raise HTTPException(status_code=500, detail="Failed to create scrape run")
-    run_id = run_row.data[0]["id"]
-
-    background_tasks.add_task(_run_scout_background, filters, run_id)
-    return {"run_id": run_id, "status": "pending"}
-
-
-def _run_scout_background(filters: dict, run_id: str) -> None:
-    from agents.marketing.thd_lead_scout import run_lead_scout
-
-    try:
-        run_lead_scout(filters=filters, run_id=run_id)
-    except Exception:
-        pass  # run_lead_scout already writes the failure to the run row + audit log
+    # DEPRECATED 2026-10-01 -- closed at the route, not just in the agent.
+    #
+    # thd_lead_scout.run_lead_scout now raises (see that module's banner
+    # and migration 20261001000058). If this route still created a run row
+    # and dispatched the background task, the raise would be swallowed by
+    # _run_scout_background's `except Exception: pass` and the row would
+    # sit at "pending" forever with nothing anywhere explaining why --
+    # a silent failure, and a caller polling /scrape/status would wait on
+    # a run that is never coming. 410 with the successor path is the
+    # honest answer.
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "POST /thd-consulting/scrape/find is deprecated (2026-10-01). Consulting lead "
+            "sourcing is now agents.marketing.mkt_lead_finder.run_scraper_v2_scout, which "
+            "writes to mse_leads (product_id=thdagentic-consulting, source='job_posting_signal') "
+            "with fit/intent scores and per-stage funnel_stats in mse_lead_finder_runs. "
+            "The GET routes below still serve historical thd_consulting_leads rows."
+        ),
+    )
 
 
 @router.get("/scrape/status")

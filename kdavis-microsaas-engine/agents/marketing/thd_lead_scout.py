@@ -1,4 +1,30 @@
 """
+DEPRECATED 2026-10-01 (Kelvin: "Deprecate thd_consulting_leads formally.
+Approved."). Read supabase/migrations/20261001000058_deprecate_thd_
+consulting_leads.sql for the full rationale and the successor path.
+
+In short: this module is a SECOND lead model for the same business --
+its own table, its own 1-10 signal_score, its own scrape-run table --
+while consulting leads from the job-signal path land in mse_leads. Two
+lead tables for one pipeline means two HITL paths, two dedup rules and
+two definitions of "qualified", which is how the outbound loop ended up
+with leads nobody could account for. Scraper v2's fit_score/intent_score/
+score_reasons on mse_leads now carry the "does this company need our
+service" dimension that was this module's only reason to exist
+separately.
+
+Verified against microsaas-prod before deprecating: thd_consulting_leads
+and thd_consulting_scrape_runs were both 0 rows -- run_lead_scout has
+never once run in production, so nothing was migrated and nothing lost.
+
+run_lead_scout now RAISES rather than writing. The ICP constants and the
+pure scoring helpers below are still imported elsewhere (notably
+CLOUD_DECODED_JOB_SIGNAL_ICP, which mkt_lead_finder's Cloud Decoded
+branch mirrors), so the module stays -- only the write path is closed.
+Everything below this banner is the original, unmodified docstring.
+
+--------------------------------------------------------------------------
+
 THD Consulting Lead Scout — finds SMBs that show public signals of poor
 security hygiene (no dedicated IT, no MSP relationship, no security
 certifications) for Kelvin's own IT-security-implementation service line.
@@ -373,8 +399,36 @@ def find_and_score_leads(
     return qualified
 
 
-def run_lead_scout(filters: dict, supabase_client: Optional[Any] = None, run_id: Optional[str] = None) -> dict:
-    """Production entry point for POST /thd-consulting/scrape/find and
+THD_LEAD_SCOUT_DEPRECATED = True
+_DEPRECATION_MESSAGE = (
+    "thd_lead_scout.run_lead_scout is DEPRECATED (2026-10-01) and no longer writes. "
+    "Consulting leads come from agents.marketing.mkt_lead_finder.run_scraper_v2_scout, "
+    "which writes to mse_leads (product_id=thdagentic-consulting, source='job_posting_signal') "
+    "with fit_score/intent_score/score_reasons and per-stage funnel_stats. "
+    "See supabase/migrations/20261001000058_deprecate_thd_consulting_leads.sql. "
+    "Pass allow_deprecated=True only for a deliberate one-off backfill."
+)
+
+
+def run_lead_scout(
+    filters: dict,
+    supabase_client: Optional[Any] = None,
+    run_id: Optional[str] = None,
+    *,
+    allow_deprecated: bool = False,
+) -> dict:
+    """DEPRECATED -- raises RuntimeError unless allow_deprecated=True.
+
+    Closed at the write path rather than deleted: the module's ICP
+    constants and pure scoring helpers are still imported elsewhere, and
+    api/routers/thd_consulting.py still READS the tables for the CEO
+    dashboard. Raising loudly (rather than logging a warning and writing
+    anyway) is deliberate -- a silent second write path is precisely the
+    failure mode this deprecation removes.
+
+    Original docstring follows.
+
+    Production entry point for POST /thd-consulting/scrape/find and
     scripts/run_thd_lead_scout.py alike. Writes qualified leads to
     thd_consulting_leads and records a thd_consulting_scrape_runs row
     start-to-finish. `run_id`, if given, updates that existing row instead
@@ -382,6 +436,10 @@ def run_lead_scout(filters: dict, supabase_client: Optional[Any] = None, run_id:
     run_lead_finder_for_product (the caller already created the row
     synchronously so it has an id to return before this potentially
     long-running background task even starts)."""
+    if not allow_deprecated:
+        raise RuntimeError(_DEPRECATION_MESSAGE)
+    log.warning("[THD-LEAD-SCOUT] running a DEPRECATED write path by explicit override: %s", _DEPRECATION_MESSAGE)
+
     db = supabase_client if supabase_client is not None else get_supabase()
 
     if run_id:
