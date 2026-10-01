@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api.middleware.tenant_context import tenant_context_middleware
-from api.routers import events, milestones, digest, pipeline, mcp, reengagement, research, stripe, ceo, marketing, marketing_internal, outreach, factory, linkedin_intake, leads, brevo, product_marketing, dist_attribution, dist, thd_consulting
+from api.routers import buyer_research, events, milestones, digest, pipeline, mcp, reengagement, research, stripe, ceo, marketing, marketing_internal, outreach, factory, linkedin_intake, leads, brevo, product_marketing, dist_attribution, dist, thd_consulting
 
 log = logging.getLogger(__name__)
 
@@ -75,6 +75,7 @@ app.include_router(product_marketing.router)
 app.include_router(dist_attribution.router)
 app.include_router(dist.router)
 app.include_router(thd_consulting.router)
+app.include_router(buyer_research.router)
 
 
 @app.get("/health")
