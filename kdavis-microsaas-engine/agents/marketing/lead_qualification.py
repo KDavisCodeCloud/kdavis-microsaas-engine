@@ -567,6 +567,73 @@ def fit_score(
     return Score(round(min(1.0, total), 3), reasons)
 
 
+def company_fit_score(
+    *,
+    stack: Optional[list[str]] = None,
+    size_proxy_ok: bool = False,
+    domain_resolved: bool = False,
+    intent_boosts: Optional[list[str]] = None,
+    exclusion_multiplier: float = 1.0,
+    config: Optional[ScoringConfig] = None,
+) -> Score:
+    """
+    How well this COMPANY matches the ICP, with no contact involved.
+
+    Added 2026-10-01 for the two-stage model (Kelvin's decision 1:
+    "restructure, do not lower the threshold"). The original fit_score
+    weights contact seniority at 0.45, which made sense when a lead WAS a
+    person. Under company-first sourcing the company is found first and the
+    contact lookup is budgeted and optional, so that weighting silently
+    turned "we have not looked for a contact yet" into "this company is a
+    bad fit" -- it discarded 23 of 32 companies with matching open roles in
+    the first live runs, including ones with six open platform roles.
+
+    Here the company stands on its own evidence: stack overlap 0.35, size
+    proxy in band 0.30, resolved domain 0.20, hiring-intent title markers
+    0.15. `exclusion_multiplier` comes from the per-product exclusion
+    policy, so Cloud Decoded can rank an infra/devtools vendor lower
+    without excluding it (decision 3).
+
+    Contact seniority is scored separately by fit_score and used for
+    RANKING, never as a gate.
+    """
+    cfg = config or ScoringConfig()
+    reasons: list[str] = []
+    total = 0.0
+
+    stack = stack or []
+    overlap = [s for s in stack if s in cfg.target_stack]
+    if overlap:
+        ratio = min(1.0, len(overlap) / 3.0)
+        total += 0.35 * ratio
+        reasons.append(f"stack overlap={','.join(overlap)}")
+    else:
+        reasons.append("no target stack detected")
+
+    if size_proxy_ok:
+        total += 0.30
+        reasons.append("size proxy in band")
+    else:
+        reasons.append("size proxy out of band")
+
+    if domain_resolved:
+        total += 0.20
+        reasons.append("domain resolved")
+    else:
+        reasons.append("no domain resolved")
+
+    intent_boosts = intent_boosts or []
+    if intent_boosts:
+        total += 0.15 * min(1.0, len(intent_boosts) / 2.0)
+        reasons.append(f"hiring-intent markers={','.join(sorted(set(intent_boosts)))}")
+
+    if exclusion_multiplier != 1.0:
+        total *= exclusion_multiplier
+        reasons.append(f"exclusion multiplier={exclusion_multiplier}")
+
+    return Score(round(min(1.0, total), 3), reasons)
+
+
 def intent_score(
     *,
     posting_age_days: Optional[int] = None,

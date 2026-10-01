@@ -13,9 +13,19 @@ The two classes that encode Kelvin's explicit 2026-10-01 constraints:
 
 from datetime import date, datetime
 
+from unittest.mock import patch
+
 import pytest
 
+from agents.marketing.company_classification import (
+    CLOUD_DECODED_EXCLUSION_POLICY,
+    CONSULTING_EXCLUSION_POLICY,
+)
+from agents.marketing.lead_qualification import ROUTE_MANUAL_LINKEDIN, ROUTE_OUTBOUND_EMAIL
+from agents.marketing.role_taxonomy import RoleTaxonomy
 from agents.marketing.company_first_sourcing import (
+    Stage1Result,
+    stage1_qualify,
     ATS_DISCOVERY_TEMPLATES,
     DECISION_MAKER_BUDGET_SHARE,
     CompanyCandidate,
@@ -54,6 +64,40 @@ class FakeScraper:
 
 
 NO_SLEEP = lambda _s: None
+
+# Two-stage model (2026-10-01): Stage 1 requires a RESOLVED domain, so any
+# test exercising the full pipeline must make domain resolution succeed
+# deterministically. These stubs stand in for DNS and the homepage check so
+# no test touches the network.
+TAXONOMY = RoleTaxonomy.from_config(None)
+
+
+def fake_dns(_host):
+    return True
+
+
+def fake_homepage(company_name="Northwind Systems"):
+    """http_get stub whose homepage <title> names the company, which is what
+    turns a CONSTRUCTED domain guess into a verified resolution."""
+    def _get(url, **_kw):
+        return type("R", (), {
+            "status_code": 200,
+            "text": f"<html><head><title>{company_name} - Home</title></head></html>",
+        })()
+    return _get
+
+
+def run_pipeline(scraper, payloads, *, company="Northwind Systems", **kw):
+    """find_company_first_signals with network stubs and no sleeping."""
+    kw.setdefault("http_get", fake_homepage(company))
+    kw.setdefault("dns_resolves", fake_dns)
+    kw.setdefault("taxonomy", TAXONOMY)
+    kw.setdefault("max_queries", 40)
+    kw.setdefault("sleep", NO_SLEEP)
+    return find_company_first_signals(
+        "p1", ["platform engineer"], scraper=scraper,
+        ats_client=board_client(payloads), **kw,
+    )
 
 
 def ats_result(url, title="Platform Engineer", snippet=""):
@@ -260,7 +304,7 @@ class TestCandidateBuilding:
     def test_only_title_matching_roles_count(self):
         boards, refs = self._boards()
         stats = FunnelStats()
-        cands = build_candidates(boards, refs, ["platform engineer"], max_age_days=30, stats=stats)
+        cands = build_candidates(boards, refs, TAXONOMY, max_age_days=30, stats=stats)
         assert len(cands) == 1
         assert cands[0].company == "Northwind Systems"
         assert len(cands[0].matching) == 2, "two platform roles match; Office Manager does not"
@@ -270,22 +314,24 @@ class TestCandidateBuilding:
     def test_company_with_no_matching_role_is_attributed_not_lost(self):
         boards, refs = self._boards()
         stats = FunnelStats()
-        assert build_candidates(boards, refs, ["quantum chemist"], max_age_days=30, stats=stats) == []
+        narrow = RoleTaxonomy.from_config({"include": {"quantum": r"\bquantum\s+chemist\b"}})
+        assert build_candidates(boards, refs, narrow, max_age_days=30, stats=stats) == []
         assert stats.dropped_no_matching_role == 1
 
     def test_domain_comes_from_the_posting_not_the_ats_host(self):
         boards, refs = self._boards()
-        cands = build_candidates(boards, refs, ["platform engineer"], max_age_days=30, stats=FunnelStats())
+        cands = build_candidates(boards, refs, TAXONOMY, max_age_days=30, stats=FunnelStats())
         assert cands[0].domain == "northwind.example"
 
     def test_open_role_count_feeds_intent(self):
         boards, refs = self._boards()
-        cands = build_candidates(boards, refs, ["platform engineer"], max_age_days=30, stats=FunnelStats())
+        cands = build_candidates(boards, refs, TAXONOMY, max_age_days=30, stats=FunnelStats())
+        st = Stage1Result(passed=True, size_ok=True)
         low = qualify_candidate(CompanyCandidate(
             ref=cands[0].ref, company=cands[0].company, domain=cands[0].domain,
             matching=cands[0].matching[:1], all_postings=cands[0].all_postings,
-        ), contact={"title": "VP of Engineering"})
-        high = qualify_candidate(cands[0], contact={"title": "VP of Engineering"})
+        ), stage1=st, contact={"title": "VP of Engineering"})
+        high = qualify_candidate(cands[0], stage1=st, contact={"title": "VP of Engineering"})
         assert high["intent_score"] > low["intent_score"]
 
 
@@ -309,8 +355,11 @@ class TestQualifyCandidate:
         'unknown' until something is actually verified, and 'unknown'
         never sends."""
         out = qualify_candidate(self._candidate(), contact={"title": "CTO"})
-        assert "email" not in out
+        assert out["email"] is None, "no address may be synthesised from a name + domain"
         assert out["email_grade"] == "unknown"
+        # to_mse_lead_row drops the None, so no email column is written.
+        out["product_id"] = "p1"
+        assert "email" not in to_mse_lead_row(out, source="s")
 
     def test_unknown_email_routes_to_manual_linkedin_never_email(self):
         out = qualify_candidate(self._candidate(), contact={"title": "CTO"})
@@ -332,10 +381,18 @@ class TestQualifyCandidate:
         assert out["job_posting_title"] == "Senior Platform Engineer"
         assert out["title"] == "CTO"
 
-    def test_recruiter_contact_rejects_the_candidate_with_a_reason(self):
+    def test_recruiter_contact_is_dropped_but_the_company_survives(self):
+        """Two-stage model (2026-10-01): Stage 1 qualified the COMPANY, so a
+        wrong contact invalidates the contact, not the company. Previously
+        this rejected the whole lead and threw away a real hiring signal
+        because the first profile Brave returned happened to be a recruiter."""
         out = qualify_candidate(self._candidate(), contact={"title": "Technical Recruiter"})
-        assert out["lead_route"] == "reject"
-        assert out["route_reason"] == "negative_title:recruiting"
+        assert out["lead_route"] == ROUTE_MANUAL_LINKEDIN
+        assert out["negative_reason"] == "recruiting"
+        assert out["title"] is None, "the recruiter must not be stored as the contact"
+        assert out["status"] == "company_qualified"
+        assert out["contact_status"] == "pending", "retried next run, not discarded"
+        assert out["company"] == "Northwind Systems"
 
     def test_no_contact_still_scores_and_routes(self):
         """An ATS posting names no hiring manager. That must not reject
@@ -989,53 +1046,357 @@ class TestOneCompanyOnePipeline:
             # contact found -- this test is about dedup, not scoring. (That
             # it has to be this rich is the structural point noted in
             # TestFitScoreWithoutAContact below.)
+            # Three open roles: the size proxy (decision 4) requires 3-40
+            # total, so a one-posting fixture now legitimately fails Stage 1.
             "helios": {"meta": {"company_name": "Helios Energy"}, "jobs": [
                 {"title": "Platform Engineer", "absolute_url": "https://helios.example/c/1",
                  "updated_at": date.today().isoformat(),
                  "content": "Azure, Terraform and Kubernetes. A team of 60 employees."},
+                {"title": "Senior SRE", "absolute_url": "https://helios.example/c/2",
+                 "updated_at": date.today().isoformat(), "content": "Azure and Terraform."},
+                {"title": "Office Manager", "absolute_url": "https://helios.example/c/3",
+                 "updated_at": date.today().isoformat(), "content": "Front desk."},
             ]},
         }
+        # Both companies must clear Stage 1, which now REQUIRES a resolved
+        # domain -- so the homepage stub has to name whichever company is
+        # being checked rather than a single fixed one.
+        def multi_homepage(url, **_kw):
+            host = url.split("//", 1)[-1].split("/", 1)[0]
+            name = "Northwind Systems" if "northwind" in host else "Helios Energy"
+            return type("R", (), {"status_code": 200,
+                                  "text": f"<title>{name}</title>"})()
+
         rows, stats = find_company_first_signals(
             "p1", ["platform engineer"], scraper=scraper,
             ats_client=board_client(payloads), max_queries=40, sleep=NO_SLEEP,
+            taxonomy=TAXONOMY, http_get=multi_homepage, dns_resolves=fake_dns,
         )
         assert {r["company"] for r in rows} == {"Northwind Systems", "Helios Energy"}
         assert stats.dropped_duplicate_company == 0
 
 
-class TestFitScoreWithoutAContact:
-    """A structural property worth pinning explicitly, surfaced by the
-    2026-10-01 live runs: fit_score weights contact seniority at 0.45, and
-    company-first sourcing finds the COMPANY first with the contact lookup
-    budgeted and optional. A company with no decision-maker found therefore
-    cannot exceed 0.55 even with perfect firmographics, and scores 0.45 or
-    less whenever headcount is unknown -- which it almost always is, since
-    ATS job descriptions rarely state it.
+class TestTwoStageQualification:
+    """Replaces TestFitScoreWithoutAContact (2026-10-01, Kelvin's decision 1:
+    "restructure, do not lower the threshold").
 
-    That is why 23 of the 32 companies with a matching role across both
-    live runs were dropped as low fit. Documented here rather than silently
-    retuned: the threshold and weighting are Kelvin's call."""
+    The OLD model made contact seniority 45% of fit_score, so a company with
+    no contact found could not reach the 0.50 threshold even with perfect
+    firmographics -- it discarded 23 of the 32 companies that had matching
+    open roles in the first live runs. The NEW model separates the two
+    questions: Stage 1 asks "is this company worth pursuing" with no contact
+    involved, and Stage 2 asks "who do we talk to". A Stage 1 passer with no
+    contact is kept as company_qualified/contact_pending and retried."""
 
-    def test_no_contact_caps_fit_below_the_default_threshold_when_headcount_is_unknown(self):
-        from agents.marketing.lead_qualification import ScoringConfig, fit_score
+    def _candidate(self, *, open_roles=6, jd="Azure, Terraform and Kubernetes.", company="Northwind Systems"):
+        postings = [
+            AtsPosting("greenhouse", "northwind", company=company, title=f"Platform Engineer {i}",
+                       url="https://northwind.example/c/1", posted_at=date.today(), description_text=jd)
+            for i in range(open_roles)
+        ]
+        return CompanyCandidate(ref=BoardRef("greenhouse", "northwind"), company=company,
+                                domain="northwind.example", matching=postings[:2], all_postings=postings)
 
-        cfg = ScoringConfig()
-        best_possible = fit_score(
-            seniority="unknown",              # no decision-maker found
-            headcount_band_value=None,        # ATS JDs rarely state headcount
-            stack=list(cfg.target_stack),     # perfect stack match
-            has_domain=True,                  # best case
-            config=cfg,
+    def _stage1(self, candidate, policy=CONSULTING_EXCLUSION_POLICY):
+        return stage1_qualify(candidate, policy, http_get=fake_homepage(candidate.company),
+                              dns_resolves=fake_dns, sleep=NO_SLEEP)
+
+    def test_company_qualifies_with_no_contact_at_all(self):
+        """THE regression this restructure exists to prevent."""
+        candidate = self._candidate()
+        stage1 = self._stage1(candidate)
+        assert stage1.passed, stage1.reasons
+
+        out = qualify_candidate(candidate, stage1=stage1, contact=None)
+        assert out["status"] == "company_qualified"
+        assert out["contact_status"] == "pending"
+        assert out["lead_route"] == ROUTE_MANUAL_LINKEDIN
+        assert out["route_reason"] == "awaiting contact"
+        assert out["fit_score"] > 0, "the company scores on its own evidence"
+
+    def test_contact_is_not_part_of_the_stage1_gate(self):
+        """Stage 1 inputs are role + domain + exclusions + size. Nothing
+        about a person."""
+        candidate = self._candidate()
+        assert self._stage1(candidate).passed is True
+
+    def test_contact_presence_upgrades_status_not_eligibility(self):
+        candidate = self._candidate()
+        stage1 = self._stage1(candidate)
+        without = qualify_candidate(candidate, stage1=stage1, contact=None)
+        with_contact = qualify_candidate(candidate, stage1=stage1,
+                                        contact={"name": "Jane Doe", "title": "CTO"})
+        assert without["status"] == "company_qualified"
+        assert with_contact["status"] == "pending_dm"
+        assert with_contact["contact_status"] == "found"
+        # Same company evidence, so the same company fit either way.
+        assert without["fit_score"] == with_contact["fit_score"]
+
+    def test_only_a_valid_email_plus_contact_routes_to_outbound(self):
+        candidate = self._candidate()
+        stage1 = self._stage1(candidate)
+        contact = {"name": "Jane Doe", "title": "CTO"}
+        assert qualify_candidate(candidate, stage1=stage1, contact=contact,
+                                 email_grade="valid", email="jane@northwind.example"
+                                 )["lead_route"] == ROUTE_OUTBOUND_EMAIL
+        for grade in ("risky", "invalid", "unknown"):
+            assert qualify_candidate(candidate, stage1=stage1, contact=contact,
+                                     email_grade=grade)["lead_route"] == ROUTE_MANUAL_LINKEDIN
+
+    def test_score_is_no_longer_a_gate(self):
+        """A low-scoring company that clears Stage 1 is still written. The
+        score ranks it; it does not exclude it."""
+        candidate = self._candidate(jd="no recognised technologies here")
+        stage1 = self._stage1(candidate)
+        out = qualify_candidate(candidate, stage1=stage1, contact=None)
+        assert stage1.passed
+        assert out["lead_route"] != "reject"
+
+
+class TestStage1Gate:
+    """Each Stage 1 criterion, failing independently with a named reason."""
+
+    def _candidate(self, *, open_roles=6, jd="Azure and Terraform.", company="Northwind Systems", domain=None):
+        postings = [
+            AtsPosting("greenhouse", "northwind", company=company, title=f"Platform Engineer {i}",
+                       posted_at=date.today(), description_text=jd)
+            for i in range(open_roles)
+        ]
+        return CompanyCandidate(ref=BoardRef("greenhouse", "northwind"), company=company,
+                                domain=domain, matching=postings[:2], all_postings=postings)
+
+    def test_excluded_company_fails_before_spending_domain_budget(self):
+        """A consultancy must be rejected on free evidence -- it must never
+        consume a Brave domain query."""
+        calls = []
+
+        def counting_get(url, **kw):
+            calls.append(url)
+            return fake_homepage()(url, **kw)
+
+        candidate = self._candidate(jd="We are a global leader in management consulting and we help clients.")
+        result = stage1_qualify(candidate, CONSULTING_EXCLUSION_POLICY,
+                                http_get=counting_get, dns_resolves=fake_dns, sleep=NO_SLEEP)
+        assert result.passed is False
+        assert result.failure_stage == "excluded"
+        assert calls == [], "exclusions are free and must be checked first"
+
+    def test_size_proxy_out_of_band_fails(self):
+        for roles in (1, 2, 120):
+            candidate = self._candidate(open_roles=roles)
+            result = stage1_qualify(candidate, CONSULTING_EXCLUSION_POLICY,
+                                    http_get=fake_homepage(), dns_resolves=fake_dns, sleep=NO_SLEEP)
+            assert result.passed is False, f"{roles} open roles should be out of band"
+            assert result.failure_stage == "size_proxy"
+
+    def test_unresolvable_domain_fails_stage1(self):
+        """Domain resolution is mandatory (decision 5)."""
+        candidate = self._candidate()
+        result = stage1_qualify(
+            candidate, CONSULTING_EXCLUSION_POLICY,
+            http_get=lambda *a, **k: type("R", (), {"status_code": 404, "text": ""})(),
+            dns_resolves=lambda _h: False, sleep=NO_SLEEP,
         )
-        assert best_possible.value < cfg.fit_threshold, (
-            "a contact-less company can still be a real lead; if this ever passes, "
-            "the weighting changed and the live-run drop rate should be re-measured"
+        assert result.passed is False
+        assert result.failure_stage == "no_domain"
+
+    def test_already_known_domain_short_circuits(self):
+        candidate = self._candidate(domain="northwind.example")
+        result = stage1_qualify(candidate, CONSULTING_EXCLUSION_POLICY,
+                                dns_resolves=fake_dns, sleep=NO_SLEEP)
+        assert result.passed
+        assert result.domain.method == "already_known"
+
+    def test_cloud_decoded_downweights_an_infra_vendor_instead_of_excluding(self):
+        """Kelvin's decision 3, verbatim: consulting excludes infra/devtools
+        vendors; Cloud Decoded downweights them."""
+        jd = "Teams of every size use Northwind each day. Azure and Terraform."
+        candidate = self._candidate(jd=jd)
+
+        consulting = stage1_qualify(candidate, CONSULTING_EXCLUSION_POLICY,
+                                    http_get=fake_homepage(), dns_resolves=fake_dns, sleep=NO_SLEEP)
+        assert consulting.passed is False
+        assert consulting.failure_stage == "excluded"
+
+        cd = stage1_qualify(candidate, CLOUD_DECODED_EXCLUSION_POLICY,
+                            http_get=fake_homepage(), dns_resolves=fake_dns, sleep=NO_SLEEP)
+        assert cd.passed is True
+        assert cd.fit_multiplier < 1.0
+        assert any("downweighted:infra_vendor" in r for r in cd.reasons)
+
+    def test_downweighting_lowers_the_score_without_removing_the_lead(self):
+        jd = "Teams of every size use Northwind each day. Azure, Terraform and Kubernetes."
+        candidate = self._candidate(jd=jd)
+        cd = stage1_qualify(candidate, CLOUD_DECODED_EXCLUSION_POLICY,
+                            http_get=fake_homepage(), dns_resolves=fake_dns, sleep=NO_SLEEP)
+        downweighted = qualify_candidate(candidate, stage1=cd, contact=None)
+
+        clean = self._candidate(jd="Azure, Terraform and Kubernetes.")
+        clean_stage1 = stage1_qualify(clean, CLOUD_DECODED_EXCLUSION_POLICY,
+                                      http_get=fake_homepage(), dns_resolves=fake_dns, sleep=NO_SLEEP)
+        normal = qualify_candidate(clean, stage1=clean_stage1, contact=None)
+
+        assert downweighted["fit_score"] < normal["fit_score"]
+        assert downweighted["lead_route"] != "reject"
+
+
+class TestContactRetryQueue:
+    """Decision 1: "Qualified companies with no contact yet get status
+    company_qualified/contact_pending and retry next run from cache. They
+    are not dropped."
+
+    Without an actual retry mechanism, "not dropped" would be a
+    technicality -- the row would sit in the table forever."""
+
+    def _db(self, rows, profiles=None):
+        class Q:
+            def __init__(self):
+                self.updates = []
+                self._table = None
+
+            def select(self, *_a, **_k):
+                return self
+
+            def eq(self, k, v):
+                self._last = (k, v)
+                return self
+
+            def limit(self, *_a):
+                return self
+
+            def update(self, payload):
+                self._pending = payload
+                return self
+
+            def execute(self):
+                if hasattr(self, "_pending"):
+                    self.updates.append((self._last, self._pending))
+                    del self._pending
+                    return type("R", (), {"data": [{}]})()
+                data = rows if self._table == "pending" else (profiles or [])
+                return type("R", (), {"data": data})()
+
+        q = Q()
+
+        class DB:
+            def table(self, name):
+                # The function reads pending leads then all linkedin_urls;
+                # both are mse_leads, distinguished by call order.
+                q._table = "pending" if not getattr(q, "_seen", False) else "profiles"
+                q._seen = True
+                return q
+
+        return DB(), q
+
+    def test_a_found_contact_promotes_the_lead_to_pending_dm(self):
+        from agents.marketing.mkt_lead_finder import retry_pending_contacts
+
+        db, q = self._db([{"id": "l1", "company": "Northwind Systems", "contact_attempts": 0}])
+        scraper = FakeScraper(default=[{
+            "link": "https://linkedin.com/in/janedoe",
+            "title": "Jane Doe - Northwind Systems | LinkedIn",
+            "snippet": "Jane Doe. VP of Engineering at Northwind Systems.",
+        }])
+        result = retry_pending_contacts("p1", db, scraper, budget=5, sleep=NO_SLEEP)
+
+        assert result == {"attempted": 1, "found": 1, "exhausted": 0}
+        payload = q.updates[-1][1]
+        assert payload["contact_status"] == "found"
+        assert payload["status"] == "pending_dm", "a contact makes it draftable by MKT-O2"
+        assert payload["first_name"] == "Jane"
+        assert payload["title"] == "VP of Engineering"
+
+    def test_a_miss_increments_attempts_and_stays_pending(self):
+        from agents.marketing.mkt_lead_finder import retry_pending_contacts
+
+        db, q = self._db([{"id": "l1", "company": "Northwind Systems", "contact_attempts": 1}])
+        result = retry_pending_contacts("p1", db, FakeScraper(default=[]), budget=5, sleep=NO_SLEEP)
+
+        assert result["found"] == 0
+        payload = q.updates[-1][1]
+        assert payload["contact_attempts"] == 2
+        assert payload.get("contact_status") != "none_found"
+
+    def test_exhausted_lead_stops_consuming_budget(self):
+        """After MAX_CONTACT_RETRY_ATTEMPTS it becomes a manual-research
+        candidate -- visible, not retried forever."""
+        from agents.marketing.mkt_lead_finder import (
+            MAX_CONTACT_RETRY_ATTEMPTS,
+            retry_pending_contacts,
         )
 
-    def test_a_contact_is_what_makes_the_difference(self):
-        from agents.marketing.lead_qualification import ScoringConfig, fit_score
+        db, q = self._db([{"id": "l1", "company": "X", "contact_attempts": MAX_CONTACT_RETRY_ATTEMPTS}])
+        result = retry_pending_contacts("p1", db, FakeScraper(default=[]), budget=5, sleep=NO_SLEEP)
+        assert result["exhausted"] == 1
+        assert q.updates[-1][1]["contact_status"] == "none_found"
 
-        cfg = ScoringConfig()
-        with_contact = fit_score(seniority="c_level", headcount_band_value=None,
-                                 stack=["Azure", "Terraform"], has_domain=False, config=cfg)
-        assert with_contact.passes(cfg.fit_threshold)
+    def test_zero_budget_does_nothing_and_spends_nothing(self):
+        from agents.marketing.mkt_lead_finder import retry_pending_contacts
+
+        db, _q = self._db([{"id": "l1", "company": "X", "contact_attempts": 0}])
+        scraper = FakeScraper(default=[])
+        assert retry_pending_contacts("p1", db, scraper, budget=0) == {
+            "attempted": 0, "found": 0, "exhausted": 0}
+        assert scraper.queries == []
+
+
+class TestEmailResolverGrading:
+    """Decision 5: "Then run email pattern + SMTP + catch-all grading. Only
+    'valid' routes to outbound email.\""""
+
+    def _resolver(self, status, *, catch_all_status="invalid", email="jane.doe@northwind.example"):
+        import agents.marketing.mkt_lead_finder as mlf
+        from core.email_finder import EmailResult, VerificationResult
+
+        sink = {}
+        with patch("core.email_finder.find_email", return_value=EmailResult(
+                    email=email, pattern_used="first.last",
+                    verification_status=status, confidence_score=0.9)), \
+             patch("core.email_finder.verify_email", return_value=VerificationResult(
+                    status=catch_all_status, smtp_code=550, message="no")):
+            resolve = mlf._make_email_resolver(None, sink, sleep=NO_SLEEP)
+            return resolve("Jane Doe", "northwind.example"), sink
+
+    def test_verified_on_a_clean_domain_is_valid(self):
+        (email, grade), _ = self._resolver("verified")
+        assert grade == "valid"
+        assert email == "jane.doe@northwind.example"
+
+    def test_verified_on_a_catch_all_domain_is_downgraded_to_risky(self):
+        """A catch-all accepts every RCPT TO, so a 250 proves the domain
+        answers -- not that the mailbox exists."""
+        (_email, grade), _ = self._resolver("verified", catch_all_status="verified")
+        assert grade == "risky"
+
+    @pytest.mark.parametrize("status,grade", [
+        ("catch_all", "risky"), ("invalid", "invalid"), ("unverified", "unknown"),
+    ])
+    def test_other_statuses_map_through(self, status, grade):
+        (_e, got), _ = self._resolver(status)
+        assert got == grade
+
+    def test_a_role_address_is_capped_at_risky(self):
+        (_e, grade), _ = self._resolver("verified", email="info@northwind.example")
+        assert grade == "risky"
+
+    def test_a_single_token_name_is_refused_rather_than_guessed(self):
+        """Building "cher@domain" from a mononym, or inventing a surname to
+        fill a first.last pattern, is fabrication."""
+        import agents.marketing.mkt_lead_finder as mlf
+
+        resolve = mlf._make_email_resolver(None, {}, sleep=NO_SLEEP)
+        assert resolve("Cher", "northwind.example") == (None, "unknown")
+
+    def test_probe_cap_is_enforced(self):
+        import agents.marketing.mkt_lead_finder as mlf
+        from core.email_finder import EmailResult
+
+        sink = {}
+        with patch("core.email_finder.find_email", return_value=EmailResult(
+                    email="a@b.com", pattern_used="p", verification_status="unverified",
+                    confidence_score=0.2)):
+            resolve = mlf._make_email_resolver(None, sink, max_probes=2, sleep=NO_SLEEP)
+            for _ in range(5):
+                resolve("Jane Doe", "northwind.example")
+        assert sink["email_probes"] == 2
+        assert sink["email_probes_skipped_over_cap"] == 3

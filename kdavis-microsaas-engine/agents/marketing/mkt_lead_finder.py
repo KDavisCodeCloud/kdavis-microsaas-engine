@@ -53,6 +53,7 @@ awareness.
 """
 
 import logging
+import time
 import re
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
@@ -1578,6 +1579,159 @@ def _record_brave_spend(db, stats) -> int:
     return spent
 
 
+# ── Scraper v2 email resolution (decision 5, 2026-10-01) ─────────────────
+
+# Leads per run that get an SMTP probe. core/email_finder.find_email sleeps
+# MIN/MAX_VERIFY_DELAY_SECONDS (3-6 min) BETWEEN CANDIDATES, so the default
+# max_candidates=4 is up to ~18 minutes for a single lead -- unusable inline
+# in a scout run. We probe ONE candidate per lead (the sleep only fires
+# between candidates, so a single candidate costs no sleep at all) and pace
+# between LEADS ourselves, which keeps a run bounded while still being a
+# real SMTP verification rather than a guess.
+MAX_EMAIL_PROBES_PER_RUN = 12
+EMAIL_PROBE_SPACING_SECONDS = 20
+
+
+# ── Scraper v2 contact retry queue (decision 1, 2026-10-01) ──────────────
+
+# A company that cleared Stage 1 but had no contact found is kept as
+# status='company_qualified' / contact_status='pending'. Without something
+# that actually retries those rows, "they are not dropped" would be a
+# technicality -- the row would simply sit there forever. This is that
+# retry, and it costs one Brave query per company (no board re-fetch, no
+# re-discovery), which is why it runs from the cache rather than re-scouting.
+MAX_CONTACT_RETRY_ATTEMPTS = 4
+
+
+def retry_pending_contacts(
+    product_id: str,
+    db,
+    scraper,
+    *,
+    budget: int,
+    stats=None,
+    sleep=None,
+) -> dict:
+    """Re-attempt Stage 2 for company_qualified leads awaiting a contact.
+
+    Returns {attempted, found, exhausted}. A lead that has been tried
+    MAX_CONTACT_RETRY_ATTEMPTS times moves to contact_status='none_found'
+    so it stops consuming budget every run and becomes a manual-research
+    candidate instead -- visible, not silently retried forever.
+    """
+    from agents.marketing.company_first_sourcing import (
+        FunnelStats,
+        find_decision_maker,
+        split_contact_name,
+    )
+
+    if budget <= 0:
+        return {"attempted": 0, "found": 0, "exhausted": 0}
+
+    rows = (db.table("mse_leads")
+            .select("id,company,domain,contact_attempts")
+            .eq("product_id", product_id)
+            .eq("contact_status", "pending")
+            .limit(budget)
+            .execute().data or [])
+    if not rows:
+        return {"attempted": 0, "found": 0, "exhausted": 0}
+
+    local_stats = stats if stats is not None else FunnelStats()
+    existing_profiles = {
+        r["linkedin_url"]
+        for r in (db.table("mse_leads").select("linkedin_url").execute().data or [])
+        if r.get("linkedin_url")
+    }
+
+    attempted = found = exhausted = 0
+    for row in rows:
+        attempts = (row.get("contact_attempts") or 0) + 1
+        if attempts > MAX_CONTACT_RETRY_ATTEMPTS:
+            db.table("mse_leads").update({"contact_status": "none_found"}).eq("id", row["id"]).execute()
+            exhausted += 1
+            continue
+
+        attempted += 1
+        contact = find_decision_maker(scraper, row["company"], stats=local_stats, sleep=sleep)
+        update: dict = {"contact_attempts": attempts}
+
+        profile = contact.get("profile_url")
+        if contact.get("title") and profile and profile not in existing_profiles:
+            first, last = split_contact_name(contact.get("name"))
+            update.update({
+                "first_name": first, "last_name": last, "title": contact["title"],
+                "linkedin_url": profile,
+                "contact_status": "found",
+                # A contact makes it draftable, so it joins the MKT-O2 queue.
+                "status": "pending_dm",
+            })
+            existing_profiles.add(profile)
+            found += 1
+        elif attempts >= MAX_CONTACT_RETRY_ATTEMPTS:
+            update["contact_status"] = "none_found"
+            exhausted += 1
+
+        db.table("mse_leads").update(update).eq("id", row["id"]).execute()
+
+    log.info("[SCRAPER-V2] contact retry for %s: attempted=%d found=%d exhausted=%d",
+             product_id, attempted, found, exhausted)
+    return {"attempted": attempted, "found": found, "exhausted": exhausted}
+
+
+def _make_email_resolver(db, stats_sink: dict, *, max_probes: int = MAX_EMAIL_PROBES_PER_RUN,
+                         sleep=None) -> Any:
+    """Returns resolver(contact_name, domain) -> (email, grade).
+
+    Grades via agents.marketing.lead_qualification.grade_email, so a
+    verified address on a catch-all domain is downgraded to "risky" rather
+    than shipped as valid -- a catch-all accepts every RCPT TO, so a 250
+    there proves the domain answers, not that the mailbox exists.
+
+    Never raises and never invents: a probe that fails returns (None,
+    "unknown"), and "unknown" cannot route to outbound email.
+    """
+    from agents.marketing.company_first_sourcing import split_contact_name
+    from agents.marketing.lead_qualification import grade_email, is_role_address
+    from core.email_finder import find_email, verify_email
+
+    _sleep = sleep if sleep is not None else time.sleep
+
+    def _resolve(contact_name: str, domain: str) -> tuple[Optional[str], str]:
+        if stats_sink.get("email_probes", 0) >= max_probes:
+            stats_sink["email_probes_skipped_over_cap"] = stats_sink.get("email_probes_skipped_over_cap", 0) + 1
+            return None, "unknown"
+        first, last = split_contact_name(contact_name)
+        if not first or not last or not domain:
+            # A pattern needs both name parts. Guessing a surname to build
+            # an address is exactly the fabrication this build removes.
+            return None, "unknown"
+
+        if stats_sink.get("email_probes"):
+            _sleep(EMAIL_PROBE_SPACING_SECONDS)
+        stats_sink["email_probes"] = stats_sink.get("email_probes", 0) + 1
+
+        result = find_email(first, last, domain, supabase_client=db, max_candidates=1)
+        if not result.email:
+            return None, "unknown"
+
+        # Catch-all detection: probe an address that cannot exist. If the
+        # server accepts it, every 250 from this domain is meaningless.
+        domain_is_catch_all = None
+        if result.verification_status == "verified":
+            probe = verify_email(f"no-such-mailbox-{abs(hash(domain)) % 10**8}@{domain}", domain=domain)
+            domain_is_catch_all = probe.status in ("verified", "catch_all")
+
+        grade = grade_email(
+            result.verification_status,
+            domain_is_catch_all=domain_is_catch_all,
+            role_address=is_role_address(result.email),
+        )
+        return result.email, grade
+
+    return _resolve
+
+
 def _insert_leads_tolerating_conflicts(db, rows: list[dict], source: str) -> list[dict]:
     """Batch-insert leads, falling back to one-by-one on a unique-constraint
     conflict.
@@ -1627,6 +1781,7 @@ def run_scraper_v2_scout(
     keywords: Optional[list[str]] = None,
     max_age_days: Optional[int] = 30,
     lookup_decision_makers: bool = True,
+    contact_retry_budget: int = 5,
 ) -> dict:
     """
     Scraper v2 production entry point for ONE product.
@@ -1646,11 +1801,13 @@ def run_scraper_v2_scout(
       manual_linkedin -> written, NEVER emailed
       reject          -> not written; counted under a named funnel reason
     """
+    from agents.marketing.company_classification import policy_for_product
     from agents.marketing.company_first_sourcing import (
         FunnelStats,
         find_company_first_signals,
         to_mse_lead_row,
     )
+    from agents.marketing.role_taxonomy import RoleTaxonomy
     from scrapers.brave_search import BraveSearchScraper
 
     db = supabase_client if supabase_client is not None else get_supabase()
@@ -1684,13 +1841,36 @@ def run_scraper_v2_scout(
             if r.get("linkedin_url")
         }
 
+        # Per-product exclusion policy (decision 3) and role taxonomy
+        # (decision 2). The taxonomy comes from this product's
+        # mse_icp_configs.role_taxonomy when set, else the code defaults.
+        policy = policy_for_product(product_id, CLOUD_DECODED_PRODUCT_ID)
+        icp = _get_icp_config(db, product_id) or {}
+        taxonomy = RoleTaxonomy.from_config(icp.get("role_taxonomy"))
+
+        email_sink: dict = {}
+        email_resolver = _make_email_resolver(db, email_sink)
+
         qualified, stats = find_company_first_signals(
             product_id, keywords, stats=stats,
+            policy=policy, taxonomy=taxonomy, email_resolver=email_resolver,
             db=db, scraper=scraper, max_queries=max_queries, max_age_days=max_age_days,
             existing_domains=_existing_job_signal_domains(db),
             existing_companies=_existing_job_signal_companies(db),
             existing_linkedin_urls=existing_linkedin_urls,
             lookup_decision_makers=lookup_decision_makers,
+        )
+
+        # Retry contacts for companies qualified by a PREVIOUS run before
+        # spending anything on new ones: a company already through Stage 1
+        # is worth more than an undiscovered one, and the retry costs one
+        # Brave query with no board fetch.
+        retry_budget = max(0, min(contact_retry_budget,
+                                  max_queries - (stats.queries_discovery
+                                                 + stats.queries_decision_maker
+                                                 + stats.brave_domain_queries)))
+        retry_result = retry_pending_contacts(
+            product_id, db, scraper, budget=retry_budget, stats=stats,
         )
 
         rows = [to_mse_lead_row(q, source=source) for q in qualified]
@@ -1699,6 +1879,9 @@ def run_scraper_v2_scout(
             _log_found_activities(db, product_id, inserted)
 
         funnel = stats.as_dict()
+        funnel["email_probes"] = email_sink.get("email_probes", 0)
+        funnel["contact_retry"] = retry_result
+        funnel["email_probes_skipped_over_cap"] = email_sink.get("email_probes_skipped_over_cap", 0)
         queries_this_run = _record_brave_spend(db, stats)
 
         log.info("SCRAPER-V2 funnel for product %s (run %s): %s", product_id, run_id, funnel)
@@ -1745,6 +1928,10 @@ def run_scraper_v2_scout(
     return {
         "run_id": run_id, "status": "complete", "product_id": product_id,
         "leads_written": len(inserted),
+        "stage1_passed": stats.stage1_passed,
+        "contact_found": stats.contact_found,
+        "contact_pending": stats.contact_pending,
+        "contact_retry": retry_result,
         "routed_outbound_email": stats.routed_outbound_email,
         "routed_manual_linkedin": stats.routed_manual_linkedin,
         "brave_queries_used": queries_this_run,

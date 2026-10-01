@@ -33,6 +33,7 @@ standing rule, there is no LinkedIn scraping anywhere in this module.
 
 from __future__ import annotations
 
+import html
 import logging
 import random
 import re
@@ -158,14 +159,29 @@ _WS_RE = re.compile(r"\s+")
 
 
 def _strip_html(value: Optional[str]) -> Optional[str]:
-    """Plain text out of an ATS description field. The providers return
-    either HTML or plain text depending on the endpoint; stack keyword
-    extraction wants text either way. No BeautifulSoup needed for a
-    tag-strip, and the stdlib keeps the dependency surface flat."""
+    """Plain text out of an ATS description field.
+
+    MUST unescape BEFORE stripping tags. Greenhouse returns `content` as
+    HTML-ESCAPED HTML -- the body arrives literally as
+    `&lt;div class=&quot;content-intro&quot;&gt;&lt;p&gt;Caylent is an...`
+    so there is not a single `<` for a tag-strip to match. Stripping first
+    (as this did until 2026-10-01) therefore removed nothing and handed
+    every downstream reader a wall of escaped markup: extract_stack matched
+    technologies against tag soup, headcount_band never found a headcount
+    because the digits it wanted were buried in `font-size: 12pt`, and the
+    exclusion classifier would have scored CSS instead of prose.
+
+    Unescaped twice, because some providers escape an already-escaped body
+    (`&amp;nbsp;` -> `&nbsp;` -> a real space). The second pass is a no-op
+    on a singly-escaped body, so it is safe either way.
+    """
     if not value:
         return None
-    text = _WS_RE.sub(" ", _TAG_RE.sub(" ", value)).strip()
-    return text or None
+    text = html.unescape(html.unescape(value))
+    text = _WS_RE.sub(" ", _TAG_RE.sub(" ", text))
+    # Entity-decoded non-breaking spaces survive the whitespace collapse.
+    text = text.replace("\xa0", " ")
+    return _WS_RE.sub(" ", text).strip() or None
 
 
 def _parse_epoch_or_iso(value: Any) -> Optional[date]:

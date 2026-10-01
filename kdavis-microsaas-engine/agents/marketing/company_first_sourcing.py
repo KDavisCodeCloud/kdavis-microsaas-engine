@@ -53,6 +53,8 @@ from typing import Any, Callable, Iterable, Optional
 
 from agents.marketing.lead_qualification import (
     ROUTE_MANUAL_LINKEDIN,
+    company_fit_score,
+    email_may_send,
     ROUTE_OUTBOUND_EMAIL,
     ROUTE_REJECT,
     ScoringConfig,
@@ -68,6 +70,24 @@ from agents.marketing.lead_qualification import (
     parse_location,
     route_lead,
 )
+from agents.marketing.company_classification import (
+    CONSULTING_EXCLUSION_POLICY,
+    CompanyClassification,
+    ExclusionPolicy,
+    classify_company,
+    normalise_company_name,
+    text_mentions_company,
+)
+from agents.marketing.domain_resolution import (
+    MAX_BRAVE_DOMAIN_QUERIES,
+    DomainResolution,
+    resolve_domain,
+)
+from agents.marketing.role_taxonomy import (
+    RoleTaxonomy,
+    size_proxy_in_band,
+)
+from agents.marketing.role_taxonomy import matching_postings as taxonomy_matching_postings
 from scrapers.ats_boards import (
     AtsBoardClient,
     AtsPosting,
@@ -146,7 +166,20 @@ class FunnelStats:
     postings_returned: int = 0
     postings_title_matched: int = 0
     companies_considered: int = 0
+    role_drop_reasons: dict[str, int] = field(default_factory=dict)
     dropped_no_matching_role: int = 0
+    # Stage 1 (company qualification -- no contact required)
+    stage1_passed: int = 0
+    dropped_excluded: dict[str, int] = field(default_factory=dict)
+    dropped_size_proxy: int = 0
+    dropped_no_domain: int = 0
+    domain_sources: dict[str, int] = field(default_factory=dict)
+    brave_domain_queries: int = 0
+    downweighted: int = 0
+    # Stage 2 (contact lookup -- only for Stage 1 passers)
+    contact_found: int = 0
+    contact_pending: int = 0
+    email_grades: dict[str, int] = field(default_factory=dict)
     dropped_negative_title: dict[str, int] = field(default_factory=dict)
     dropped_low_fit: int = 0
     dropped_low_intent: int = 0
@@ -161,6 +194,9 @@ class FunnelStats:
         d = {k: v for k, v in self.__dict__.items()}
         d["leads_qualified"] = self.routed_outbound_email + self.routed_manual_linkedin
         d["dropped_negative_title_total"] = sum(self.dropped_negative_title.values())
+        d["dropped_excluded_total"] = sum(self.dropped_excluded.values())
+        d["queries_total"] = (self.queries_discovery + self.queries_decision_maker
+                              + self.brave_domain_queries)
         return d
 
 
@@ -415,40 +451,14 @@ def parse_decision_maker_title(snippet: str) -> Optional[str]:
     return None
 
 
-_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
-# Words that carry no identity -- "Labs Inc" must not match every company
-# with "Labs" in the name.
-_COMPANY_STOPWORDS = frozenset({
-    "inc", "llc", "ltd", "corp", "corporation", "co", "gmbh", "bv", "plc",
-    "limited", "holdings", "group", "the", "and",
-})
-
-
-def _normalise_company(value: str) -> str:
-    return _NON_ALNUM_RE.sub("", (value or "").lower())
-
-
-def _mentions_company(text: str, company: str) -> bool:
-    """True when `text` plausibly names `company`.
-
-    Compared with punctuation and casing removed, because an ATS token
-    yields "Vector Labs" while the profile says "VectorLabs". A company
-    name that reduces to nothing but stopwords is treated as unverifiable
-    (False) rather than matching everything.
-    """
-    normalised = _normalise_company(company)
-    if not normalised:
-        return False
-    haystack = _normalise_company(text)
-    if normalised in haystack:
-        return True
-    # Fall back to the distinctive words only, so "Acme Technologies Inc"
-    # still matches a profile that says just "Acme Technologies".
-    words = [w for w in _NON_ALNUM_RE.sub(" ", (company or "").lower()).split()
-             if w and w not in _COMPANY_STOPWORDS]
-    if not words:
-        return False
-    return _normalise_company("".join(words)) in haystack
+# Company-name comparison lives in company_classification -- the lowest
+# module in this import graph that needs it. Previously a private copy
+# here; two normalisers that disagree about whether "Acme Corp" and
+# "acme-corp" are the same company is exactly the near-duplicate logic the
+# DRY rule exists to prevent. Aliased rather than renamed at every call
+# site so the existing tests keep addressing the same names.
+_normalise_company = normalise_company_name
+_mentions_company = text_mentions_company
 
 
 def find_decision_maker(
@@ -512,6 +522,22 @@ class CompanyCandidate:
     domain: Optional[str]
     matching: list[AtsPosting]
     all_postings: list[AtsPosting]
+    # Title markers from the matching roles ("founding", "head of", ...).
+    intent_boosts: list[str] = field(default_factory=list)
+
+    @property
+    def total_open_roles(self) -> int:
+        """ALL open roles on the board, not just the matching ones. This is
+        the company-SIZE proxy (decision 4); the matching count is a
+        separate intent signal."""
+        return len(self.all_postings)
+
+    @property
+    def jd_text_all(self) -> str:
+        """Description text across the whole board, for company
+        classification -- a single posting rarely contains the "we are a
+        consultancy" paragraph, but the board as a whole reliably does."""
+        return " ".join(p.description_text or "" for p in self.all_postings[:8]).strip()
 
     @property
     def jd_text(self) -> str:
@@ -537,13 +563,19 @@ class CompanyCandidate:
 def build_candidates(
     boards: dict[str, list[AtsPosting]],
     refs: dict[str, BoardRef],
-    keywords: Iterable[str],
+    taxonomy: RoleTaxonomy,
     *,
     max_age_days: Optional[int],
     stats: FunnelStats,
 ) -> list[CompanyCandidate]:
-    """Boards -> companies that actually have a relevant open role."""
-    keywords = list(keywords)
+    """Boards -> companies that actually have a relevant open role.
+
+    Takes a RoleTaxonomy rather than a keyword list (decision 2). The
+    per-reason drop counts it returns are what distinguish "this posting is
+    not an infrastructure role" from "this posting is the wrong FUNCTION"
+    (a sales or solutions engineer), which is what tells you whether the
+    include list or the negative list needs tuning.
+    """
     out: list[CompanyCandidate] = []
     for key, postings in boards.items():
         ref = refs.get(key)
@@ -551,52 +583,150 @@ def build_candidates(
             continue
         stats.companies_considered += 1
         stats.postings_returned += len(postings)
-        matching = matching_postings(postings, keywords, max_age_days=max_age_days)
+        matching, drops = taxonomy_matching_postings(postings, taxonomy, max_age_days=max_age_days)
+        for reason, count in drops.items():
+            stats.role_drop_reasons[reason] = stats.role_drop_reasons.get(reason, 0) + count
         stats.postings_title_matched += len(matching)
         if not matching:
             stats.dropped_no_matching_role += 1
             continue
+        boosts: list[str] = []
+        for posting in matching:
+            boosts.extend(taxonomy.match(posting.title).boosts)
         company = next((p.company for p in postings if p.company), None) or company_name_from_token(ref.token)
         out.append(CompanyCandidate(
             ref=ref, company=company,
             domain=company_domain_from_postings(postings),
             matching=matching, all_postings=postings,
+            intent_boosts=sorted(set(boosts)),
         ))
     return out
+
+
+# ── Stage 1: company qualification (NO contact required) ─────────────────
+
+@dataclass
+class Stage1Result:
+    """Why a company passed or failed Stage 1. Kelvin's decision 1: the
+    gate is matching role + resolved domain + exclusions pass + size proxy
+    in band -- and a contact is explicitly NOT part of it."""
+
+    passed: bool = False
+    reasons: list[str] = field(default_factory=list)
+    classification: Optional[CompanyClassification] = None
+    domain: Optional[DomainResolution] = None
+    size_ok: bool = False
+    fit_multiplier: float = 1.0
+    failure_stage: Optional[str] = None
+
+
+def stage1_qualify(
+    candidate: CompanyCandidate,
+    policy: ExclusionPolicy,
+    *,
+    scraper=None,
+    brave_domain_budget: int = 0,
+    http_get: Optional[Callable[..., Any]] = None,
+    dns_resolves: Optional[Callable[[str], bool]] = None,
+    sleep: Optional[Callable[[float], None]] = None,
+    stats_sink: Optional[dict] = None,
+) -> Stage1Result:
+    """
+    Company qualification, in the order that spends the least to fail
+    fastest: exclusions (free, prose already in hand), then the size proxy
+    (free, already counted), then domain resolution (may cost a Brave
+    query). A company that fails on exclusions never consumes domain
+    budget.
+    """
+    result = Stage1Result()
+    jd = candidate.jd_text_all
+
+    # (1) Exclusions -- free.
+    classification = classify_company(candidate.company, jd)
+    result.classification = classification
+    excluded, multiplier, policy_reasons = policy.decide(classification)
+    result.reasons.extend(policy_reasons)
+    result.fit_multiplier = multiplier
+    if excluded:
+        result.failure_stage = "excluded"
+        return result
+
+    # (2) Size proxy -- free, from the board we already fetched.
+    size_ok, size_reason = size_proxy_in_band(candidate.total_open_roles)
+    result.size_ok = size_ok
+    result.reasons.append(size_reason)
+    if not size_ok:
+        result.failure_stage = "size_proxy"
+        return result
+
+    # (3) Domain -- mandatory (decision 5). May cost one Brave query.
+    resolution = resolve_domain(
+        candidate.company,
+        token=candidate.ref.token,
+        jd_text=jd,
+        postings=candidate.all_postings,
+        known_domain=candidate.domain,
+        scraper=scraper,
+        brave_budget_remaining=brave_domain_budget,
+        http_get=http_get,
+        dns_resolves=dns_resolves,
+        sleep=sleep,
+        stats=stats_sink,
+    )
+    result.domain = resolution
+    if not resolution.resolved:
+        result.reasons.append(f"no domain (tried {','.join(resolution.attempts)})")
+        result.failure_stage = "no_domain"
+        return result
+    result.reasons.append(f"domain={resolution.domain} via {resolution.method}")
+
+    result.passed = True
+    return result
 
 
 def qualify_candidate(
     candidate: CompanyCandidate,
     *,
+    stage1: Optional[Stage1Result] = None,
     contact: Optional[dict] = None,
+    email_grade: Optional[str] = None,
+    email: Optional[str] = None,
     config: Optional[ScoringConfig] = None,
     today: Optional[date] = None,
 ) -> dict[str, Any]:
     """
-    Scores + routes ONE company candidate. Pure.
+    Scores and routes ONE company candidate that has already PASSED Stage 1.
 
-    Note what is NOT done here: no email is invented. `email_grade` is
-    "unknown" until core/email_finder actually verifies something, and
-    "unknown" never sends (lead_qualification.email_may_send). The 19
-    rows with fabricated addresses in the 2026-10-01 cleanup came from
-    guessing; v2 structurally cannot.
+    Two-stage model (decision 1): Stage 1 is the gate, so nothing here
+    rejects on score. company_fit_score ranks the company on its own
+    evidence; contact seniority is a separate ranking signal, never a gate.
+    A candidate with no contact gets status 'company_qualified' /
+    contact_status 'pending' and is retried next run from the cache -- it is
+    NOT dropped, which was the whole defect this restructure fixes.
+
+    Still never invents an email: `email_grade` defaults to "unknown" and
+    only "valid" routes to outbound email.
     """
     cfg = config or ScoringConfig()
     contact = contact or {}
     contact_title = contact.get("title")
 
     jd = candidate.jd_text
-    stack = extract_stack(jd) or extract_stack(candidate.primary_role)
+    stack = extract_stack(jd) or extract_stack(candidate.jd_text_all) or extract_stack(candidate.primary_role)
     band = headcount_band(jd)
     funding = funding_recency_months(jd, today=today)
 
-    rejected, negative_reason = is_negative_title(contact_title)
+    domain = stage1.domain.domain if (stage1 and stage1.domain) else candidate.domain
+    domain_source = stage1.domain.method if (stage1 and stage1.domain) else None
+    multiplier = stage1.fit_multiplier if stage1 else 1.0
+    size_ok = stage1.size_ok if stage1 else False
 
-    fit = fit_score(
-        seniority=classify_seniority(contact_title),
-        headcount_band_value=band,
+    fit = company_fit_score(
         stack=stack,
-        has_domain=bool(candidate.domain),
+        size_proxy_ok=size_ok,
+        domain_resolved=bool(domain),
+        intent_boosts=candidate.intent_boosts,
+        exclusion_multiplier=multiplier,
         config=cfg,
     )
     intent = intent_score(
@@ -607,18 +737,37 @@ def qualify_candidate(
         config=cfg,
     )
 
-    grade = grade_email(None)  # nothing verified yet -> "unknown"
+    grade = email_grade or grade_email(None)
 
+    rejected, negative_reason = is_negative_title(contact_title)
     if rejected:
-        route, route_reason = ROUTE_REJECT, f"negative_title:{negative_reason}"
+        # The COMPANY still qualified; only this contact is wrong. Keep the
+        # company and drop the contact rather than discarding a real signal.
+        contact = {}
+        contact_title = None
+
+    has_contact = bool(contact.get("name") or contact_title)
+    if has_contact and domain and email_may_send(grade):
+        route = ROUTE_OUTBOUND_EMAIL
+        route_reason = "contact + valid email"
+    elif has_contact:
+        route = ROUTE_MANUAL_LINKEDIN
+        route_reason = f"contact, email_grade={grade}"
     else:
-        route, route_reason = route_lead(
-            email_grade=grade, has_domain=bool(candidate.domain), fit=fit, intent=intent, config=cfg,
-        )
+        route = ROUTE_MANUAL_LINKEDIN
+        route_reason = "awaiting contact"
+
+    status = "pending_dm" if has_contact else "company_qualified"
+    contact_status = "found" if has_contact else "pending"
+
+    reasons = list(fit.reasons) + list(intent.reasons)
+    if stage1:
+        reasons = list(stage1.reasons) + reasons
 
     return {
         "company": candidate.company,
-        "domain": candidate.domain,
+        "domain": domain,
+        "domain_source": domain_source,
         "contact_name": contact.get("name"),
         "contact_profile_url": contact.get("profile_url"),
         "title": contact_title,
@@ -629,15 +778,21 @@ def qualify_candidate(
         "job_posting_date": (candidate.matching[0].posted_at.isoformat()
                              if candidate.matching and candidate.matching[0].posted_at else None),
         "open_role_count": len(candidate.matching),
+        "size_proxy_open_roles": candidate.total_open_roles,
         "stack_tags": stack,
         "headcount_band": band,
         "funding_months": funding,
+        "email": email,
         "email_grade": grade,
         "fit_score": fit.value,
         "intent_score": intent.value,
-        "score_reasons": fit.reasons + intent.reasons,
+        "score_reasons": reasons,
+        "company_tags": sorted(stage1.classification.tags) if (stage1 and stage1.classification) else [],
+        "stage1_reasons": list(stage1.reasons) if stage1 else [],
         "lead_route": route,
         "route_reason": route_reason,
+        "status": status,
+        "contact_status": contact_status,
         "negative_reason": negative_reason,
         "ats_provider": candidate.ref.provider,
         "ats_board_token": candidate.ref.token,
@@ -650,6 +805,13 @@ def find_company_first_signals(
     product_id: str,
     keywords: Iterable[str],
     *,
+    policy: Optional[ExclusionPolicy] = None,
+    taxonomy: Optional[RoleTaxonomy] = None,
+    role_taxonomy_config: Optional[dict] = None,
+    email_resolver: Optional[Callable[[str, str], tuple[Optional[str], str]]] = None,
+    max_brave_domain_queries: int = MAX_BRAVE_DOMAIN_QUERIES,
+    http_get: Optional[Callable[..., Any]] = None,
+    dns_resolves: Optional[Callable[[str], bool]] = None,
     db=None,
     scraper=None,
     ats_client: Optional[AtsBoardClient] = None,
@@ -677,6 +839,12 @@ def find_company_first_signals(
     DECISION_MAKER_BUDGET_SHARE so neither step starves the other.
     """
     keywords = [k for k in keywords if k and k.strip()]
+    # Role matching is taxonomy-driven now (decision 2). `keywords` is still
+    # accepted and still drives Brave DISCOVERY queries -- those must stay
+    # short literal phrases to be useful as search terms -- but which
+    # POSTINGS count as relevant is the taxonomy's job.
+    taxonomy = taxonomy or RoleTaxonomy.from_config(role_taxonomy_config)
+    policy = policy or CONSULTING_EXCLUSION_POLICY
     # The caller may own the stats object so that a mid-run exception
     # still leaves it with whatever was established -- notably the Brave
     # queries already spent, which are billed when issued.
@@ -699,8 +867,16 @@ def find_company_first_signals(
         log.warning("[CompanyFirst] no Brave scraper/API key -- returning no leads")
         return [], stats
 
-    dm_budget = int(max_queries * DECISION_MAKER_BUDGET_SHARE) if lookup_decision_makers else 0
-    discovery_budget = max_queries - dm_budget
+    # Three consumers of the Brave budget now: discovery, the per-company
+    # domain fallback (decision 5, capped separately at 10) and the contact
+    # lookup. The domain allowance is carved out FIRST because a company
+    # with no domain fails Stage 1 outright -- spending the whole budget on
+    # discovering boards we then cannot qualify is the worst split.
+    domain_allowance = min(max_brave_domain_queries, max(0, max_queries // 4))
+    max_brave_domain_queries = domain_allowance
+    remaining = max(0, max_queries - domain_allowance)
+    dm_budget = int(remaining * DECISION_MAKER_BUDGET_SHARE) if lookup_decision_makers else 0
+    discovery_budget = remaining - dm_budget
 
     # Step 1: cache first (free), then discovery (paid).
     refs: dict[str, BoardRef] = {}
@@ -751,66 +927,106 @@ def find_company_first_signals(
         if unpolled:
             queue_board_tokens(db, unpolled, product_id)
 
-    # Step 3: candidates -> qualification.
-    candidates = build_candidates(boards, refs, keywords, max_age_days=max_age_days, stats=stats)
+    # Step 3: candidates (taxonomy-matched roles).
+    candidates = build_candidates(boards, refs, taxonomy, max_age_days=max_age_days, stats=stats)
 
-    # Highest intent first, so a tight decision-maker budget is spent on
-    # the companies most worth a contact lookup rather than alphabetically.
+    # Most matching roles first, freshest as the tie-break, so a tight
+    # contact/domain budget is spent on the strongest companies rather than
+    # in board-fetch order.
     candidates.sort(key=lambda c: (len(c.matching), -(c.freshest_age_days or 10_000)), reverse=True)
 
     rows: list[dict] = []
     seen_domains: set = set()
+    domain_stats_sink: dict = {}
+    domain_budget = max_brave_domain_queries
+
     for candidate in candidates:
-        domain = candidate.domain
-        if domain and (domain in existing_domains or domain in seen_domains):
-            stats.dropped_duplicate_company += 1
-            continue
+        # Company-level dedup BEFORE spending any budget on it.
         company_key = _normalise_company(candidate.company)
         if company_key and company_key in existing_companies:
             stats.dropped_duplicate_company += 1
             continue
+        if candidate.domain and (candidate.domain in existing_domains or candidate.domain in seen_domains):
+            stats.dropped_duplicate_company += 1
+            continue
 
-        # Step 4: decision-maker lookup, budgeted. The ONLY
-        # site:linkedin.com/in query in v2.
+        # ── STAGE 1: is this company worth pursuing? No contact needed. ──
+        stage1 = stage1_qualify(
+            candidate, policy,
+            scraper=scraper,
+            brave_domain_budget=max(0, domain_budget - domain_stats_sink.get("brave_domain_queries", 0)),
+            http_get=http_get,
+            dns_resolves=dns_resolves,
+            sleep=sleep,
+            stats_sink=domain_stats_sink,
+        )
+        stats.brave_domain_queries = domain_stats_sink.get("brave_domain_queries", 0)
+
+        if not stage1.passed:
+            if stage1.failure_stage == "excluded":
+                for reason in stage1.reasons:
+                    if reason.startswith("excluded:"):
+                        tag = reason.split(":", 1)[1].split("=", 1)[0]
+                        stats.dropped_excluded[tag] = stats.dropped_excluded.get(tag, 0) + 1
+            elif stage1.failure_stage == "size_proxy":
+                stats.dropped_size_proxy += 1
+            elif stage1.failure_stage == "no_domain":
+                stats.dropped_no_domain += 1
+            continue
+
+        stats.stage1_passed += 1
+        if stage1.fit_multiplier != 1.0:
+            stats.downweighted += 1
+        resolved_domain = stage1.domain.domain if stage1.domain else None
+        if stage1.domain and stage1.domain.method:
+            stats.domain_sources[stage1.domain.method] = stats.domain_sources.get(stage1.domain.method, 0) + 1
+
+        if resolved_domain and (resolved_domain in existing_domains or resolved_domain in seen_domains):
+            # Only discoverable after resolution -- two tokens can be the
+            # same company.
+            stats.dropped_duplicate_company += 1
+            continue
+
+        # ── STAGE 2: who do we talk to? Only for Stage 1 passers. ──
         contact = None
         if lookup_decision_makers and stats.queries_decision_maker < dm_budget:
             contact = find_decision_maker(scraper, candidate.company, stats=stats, sleep=sleep)
 
-        qualified = qualify_candidate(candidate, contact=contact, config=cfg, today=today)
+        # A profile already used elsewhere: drop the ATTRIBUTION, keep the
+        # company -- mse_leads.linkedin_url is globally UNIQUE.
+        if contact and contact.get("profile_url") in existing_linkedin_urls:
+            stats.dropped_duplicate_contact += 1
+            contact = None
+        elif contact and contact.get("profile_url"):
+            existing_linkedin_urls.add(contact["profile_url"])
 
-        route = qualified["lead_route"]
-        if route == ROUTE_REJECT:
-            reason = qualified["route_reason"]
-            if qualified["negative_reason"]:
-                key = qualified["negative_reason"]
-                stats.dropped_negative_title[key] = stats.dropped_negative_title.get(key, 0) + 1
-            elif "fit" in reason:
-                stats.dropped_low_fit += 1
-            else:
-                stats.dropped_low_intent += 1
-            continue
+        # Email discovery + grading, only once a domain exists.
+        email_value, grade = None, grade_email(None)
+        if resolved_domain and contact and contact.get("name") and email_resolver is not None:
+            try:
+                email_value, grade = email_resolver(contact["name"], resolved_domain)
+            except Exception as exc:
+                log.warning("[CompanyFirst] email resolution failed for %s@%s: %s",
+                            contact.get("name"), resolved_domain, exc)
+        stats.email_grades[grade] = stats.email_grades.get(grade, 0) + 1
 
-        if route == ROUTE_OUTBOUND_EMAIL:
+        qualified = qualify_candidate(
+            candidate, stage1=stage1, contact=contact,
+            email_grade=grade, email=email_value, config=cfg, today=today,
+        )
+
+        if qualified["contact_status"] == "found":
+            stats.contact_found += 1
+        else:
+            stats.contact_pending += 1
+
+        if qualified["lead_route"] == ROUTE_OUTBOUND_EMAIL:
             stats.routed_outbound_email += 1
         else:
             stats.routed_manual_linkedin += 1
 
-        # linkedin_url is globally UNIQUE in mse_leads. The same profile
-        # legitimately surfaces for more than one company (and 41 rows
-        # already carried one before v2 ran at all), so drop the duplicate
-        # ATTRIBUTION rather than the whole lead -- the company signal is
-        # still real, it just has no usable contact.
-        profile = qualified.get("contact_profile_url")
-        if profile and profile in existing_linkedin_urls:
-            stats.dropped_duplicate_contact += 1
-            qualified["contact_profile_url"] = None
-            qualified["contact_name"] = None
-            qualified["title"] = None
-        elif profile:
-            existing_linkedin_urls.add(profile)
-
-        if domain:
-            seen_domains.add(domain)
+        if resolved_domain:
+            seen_domains.add(resolved_domain)
         if company_key:
             existing_companies.add(company_key)
         qualified["product_id"] = product_id
@@ -820,12 +1036,13 @@ def find_company_first_signals(
 
 
 # Every mse_leads column this module is allowed to write, verified against
-# microsaas-prod's information_schema on 2026-10-01 -- NOT assumed.
+# microsaas-prod's information_schema (2026-10-01) -- NOT assumed, plus the
+# two-stage columns from migration 20261001000059.
 #
-# This exists because the first live v2 run died on the INSERT with
-# PGRST204 "Could not find the 'name' column of 'mse_leads'": the real
-# schema has first_name/last_name, and a unit test that asserted against
-# a hand-written allowlist happily agreed with the wrong guess. Filtering
+# This exists because the first live v2 run died on the INSERT with PGRST204
+# "Could not find the 'name' column of 'mse_leads'": the real schema has
+# first_name/last_name, and a unit test that asserted against a
+# hand-written allowlist happily agreed with the wrong guess. Filtering
 # through a verified set means an unknown key is dropped (and logged) here
 # instead of 400-ing the whole batch insert in production.
 MSE_LEADS_WRITABLE_COLUMNS = frozenset({
@@ -836,6 +1053,9 @@ MSE_LEADS_WRITABLE_COLUMNS = frozenset({
     "seniority", "stack_tags", "headcount_band", "funding_months",
     "email_grade", "fit_score", "intent_score", "score_reasons",
     "lead_route", "open_role_count",
+    # migration 059
+    "contact_status", "contact_attempts", "company_tags", "stage1_reasons",
+    "domain_source", "size_proxy_open_roles",
 })
 
 
@@ -853,8 +1073,7 @@ def split_contact_name(name: Optional[str]) -> tuple[Optional[str], Optional[str
 
 def to_mse_lead_row(qualified: dict, *, source: str) -> dict:
     """
-    Project a qualified candidate onto mse_leads' real columns
-    (migration 20261001000057 for the v2 fields).
+    Project a qualified candidate onto mse_leads' real columns.
 
     Internal-only keys (route_reason, negative_reason, ats_*) are dropped
     rather than written, any None is omitted so a nullable column stays
@@ -867,6 +1086,7 @@ def to_mse_lead_row(qualified: dict, *, source: str) -> dict:
         "source": source,
         "company": qualified["company"],
         "domain": qualified.get("domain"),
+        "domain_source": qualified.get("domain_source"),
         "title": qualified.get("title"),
         "first_name": first_name,
         "last_name": last_name,
@@ -875,11 +1095,17 @@ def to_mse_lead_row(qualified: dict, *, source: str) -> dict:
         # person it had deliberately routed there.
         "linkedin_url": qualified.get("contact_profile_url"),
         "location": qualified.get("location"),
+        "status": qualified.get("status"),
+        "contact_status": qualified.get("contact_status"),
+        "email": qualified.get("email"),
         "job_posting_url": qualified.get("job_posting_url"),
         "job_posting_title": qualified.get("job_posting_title"),
         "job_posting_date": qualified.get("job_posting_date"),
         "open_role_count": qualified.get("open_role_count"),
+        "size_proxy_open_roles": qualified.get("size_proxy_open_roles"),
         "stack_tags": qualified.get("stack_tags") or None,
+        "company_tags": qualified.get("company_tags") or None,
+        "stage1_reasons": qualified.get("stage1_reasons") or None,
         "headcount_band": qualified.get("headcount_band"),
         "funding_months": qualified.get("funding_months"),
         "email_grade": qualified.get("email_grade"),
