@@ -901,3 +901,39 @@ class TestBoardCacheIsSharedAcrossProducts:
         assert '.eq("product_id"' not in code, (
             "load_cached_board_refs must not scope the shared board cache to one product"
         )
+
+
+class TestSnippetTitleParsingRealWorldShapes:
+    """Pinned against what Brave actually returned on 2026-10-01. The
+    stored Tailscale lead read `title='CTO &amp; co'` -- two defects at
+    once, in a field MKT-O2 hands to the LLM as "real signal context", so
+    the artefact would have appeared verbatim in outbound copy."""
+
+    def test_html_entities_are_unescaped(self):
+        assert parse_decision_maker_title(
+            "David Crawshaw - CTO &amp; co-founder - Tailscale | LinkedIn"
+        ) == "CTO & co-founder"
+
+    def test_hyphenated_title_is_not_truncated_at_its_own_hyphen(self):
+        """A bare "-" was treated as a segment separator, so "co-founder"
+        was cut to "co". Only a SPACED dash separates segments."""
+        assert parse_decision_maker_title("Ana Ruiz - Vice-President, Infrastructure - Globex") \
+            == "Vice-President, Infrastructure"
+
+    @pytest.mark.parametrize("snippet,expected", [
+        ("Jane Doe. VP of Engineering at Northwind Systems. Austin, TX", "VP of Engineering"),
+        ("Marcus Webb - Head of Platform - Acme", "Head of Platform"),
+        ("Experience: Acme Corp · VP, Infrastructure", "VP, Infrastructure"),
+        ("Chief Technology Officer at Helios", "Chief Technology Officer"),
+    ])
+    def test_previously_working_shapes_still_work(self, snippet, expected):
+        assert parse_decision_maker_title(snippet) == expected
+
+    def test_entities_do_not_defeat_the_company_association_check(self):
+        scraper = FakeScraper(default=[{
+            "link": "https://linkedin.com/in/x",
+            "title": "Sam Lee - Smith &amp; Nephew | LinkedIn",
+            "snippet": "Sam Lee. CTO at Smith &amp; Nephew.",
+        }])
+        out = find_decision_maker(scraper, "Smith & Nephew", stats=FunnelStats(), sleep=NO_SLEEP)
+        assert out["title"] == "CTO"

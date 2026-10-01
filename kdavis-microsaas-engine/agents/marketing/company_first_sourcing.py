@@ -42,6 +42,7 @@ Standing rules honoured here:
 
 from __future__ import annotations
 
+import html
 import logging
 import random
 import re
@@ -364,13 +365,25 @@ def queue_board_tokens(db, refs: dict[str, BoardRef], product_id: Optional[str] 
 #
 # The ONLY place site:linkedin.com/in appears in v2.
 
+_TITLE_LEAD = (
+    r"(?:Chief|VP|Vice[ -]President|SVP|EVP|Head|Director|Senior Director"
+    r"|Managing Director|CTO|CIO|CISO|CEO|COO)"
+)
+# A segment separator is a dash/bullet/pipe with WHITESPACE around it, not a
+# bare hyphen. Live 2026-10-01: Tailscale's CTO came through as
+# "CTO &amp; co" because the old pattern excluded bare "-", which truncated
+# "co-founder" at its own hyphen. Hyphenated titles are normal
+# ("co-founder", "Vice-President"), so only a spaced separator may end a
+# title.
+_NOT_SEPARATOR = r"(?:(?!\s[-–—·|]\s)[^.·|])"
+
 _SNIPPET_TITLE_PATTERNS = [
     # "Jane Doe. VP of Engineering at Acme Corp. Austin, TX"
-    re.compile(r"\b((?:Chief|VP|Vice President|SVP|EVP|Head|Director|Senior Director|Managing Director|CTO|CIO|CISO|CEO|COO)\b[^.·|]{0,60}?)\s+(?:at|@)\s+", re.IGNORECASE),
+    re.compile(rf"\b({_TITLE_LEAD}\b{_NOT_SEPARATOR}{{0,60}}?)\s+(?:at|@)\s+", re.IGNORECASE),
     # "... — Head of Platform — Acme"
-    re.compile(r"[-–—·|]\s*((?:Chief|VP|Vice President|SVP|EVP|Head of|Director of|CTO|CIO|CISO)\b[^-–—·|]{0,60})", re.IGNORECASE),
+    re.compile(rf"\s[-–—·|]\s*({_TITLE_LEAD}\b{_NOT_SEPARATOR}{{0,60}})", re.IGNORECASE),
     # "Experience: Acme Corp · VP, Infrastructure"
-    re.compile(r"·\s*((?:VP|Head|Director|Chief)\b[^·]{0,60})", re.IGNORECASE),
+    re.compile(rf"·\s*({_TITLE_LEAD}\b[^·]{{0,60}})", re.IGNORECASE),
 ]
 
 
@@ -386,6 +399,11 @@ def parse_decision_maker_title(snippet: str) -> Optional[str]:
     """
     if not snippet:
         return None
+    # Brave returns HTML-escaped text. Without this, Tailscale's CTO was
+    # stored as "CTO &amp; co" -- and that field is handed to MKT-O2 as
+    # "real signal context", so the escape artefact would appear verbatim
+    # in outbound copy.
+    snippet = html.unescape(snippet)
     for pattern in _SNIPPET_TITLE_PATTERNS:
         match = pattern.search(snippet)
         if match:
@@ -469,11 +487,11 @@ def find_decision_maker(
         # company. Writing that lead asserts "<person> is <title> at
         # <company>" as fact -- the same class of fabrication as the
         # job_posting_title bug. No association, no contact.
-        if not _mentions_company(f"{item.get('title', '')} {snippet}", company):
+        if not _mentions_company(html.unescape(f"{item.get('title', '')} {snippet}"), company):
             continue
         # Name comes from the result title's leading segment, which for a
         # profile page is the person. Nothing else is claimed.
-        raw = (item.get("title") or "").strip()
+        raw = html.unescape((item.get("title") or "").strip())
         name = re.split(r"\s+[-–—|]\s+", raw)[0].strip() or None
         stats.decision_makers_found += 1
         return {"name": name, "title": title, "profile_url": item.get("link") or None}
