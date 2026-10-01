@@ -1,91 +1,107 @@
-# mse-api build + start configuration
+# mse-api deploy configuration — BLOCKED, read before touching
 
-_Last verified against production: 2026-10-01, after causing an outage._
+_Investigated 2026-10-01. One outage caused. Service left exactly as found._
 
-## The short version
+## Status
 
-```jsonc
-// railway.json -- DO NOT change the builder
-{ "build":  { "builder": "NIXPACKS" },
-  "deploy": { "startCommand": "python3 -m uvicorn api.main:app --host 0.0.0.0 --port $PORT" } }
+**Do not change the build or start configuration without a plan for all
+three config sources below.** `mse-api` currently runs healthy on a
+deployment that was created by a CLI `railway up`, NOT from GitHub. Every
+GitHub-sourced deploy attempted on 2026-10-01 failed.
+
+As-found (and restored) service settings:
+
+```
+builder      = RAILPACK
+startCommand = python3 -m uvicorn api.main:app --host 0.0.0.0 --port $PORT
 ```
 
-Three rules, each learned by breaking it:
+## Why it is blocked: three competing config sources
 
-1. **The builder is NIXPACKS.** `railway.json` overrides the service-level
-   default, and the Nixpacks image is the one where `python3` exists.
-2. **The start command is `python3 -m uvicorn ...`**, not bare `uvicorn`.
-3. **The service-level `startCommand` must be SET** — clearing it does not
-   fall back to `railway.json`.
+| Source | Says |
+|---|---|
+| `railway.json` | `builder: NIXPACKS`, `startCommand: uvicorn api.main:app ...` |
+| `railpack.json` | `provider: python`, `startCommand: uvicorn api.main:app ...` |
+| `Procfile` | `web: uvicorn api.main:app ...` |
+| **Railway service (effective)** | **`builder: RAILPACK`, `startCommand: python3 -m uvicorn ...`** |
 
-## The trap that caused the outage
+The **service-level settings win** for GitHub-sourced builds;
+`railway.json`'s builder is ignored. Confirmed by experiment: setting the
+service builder to NIXPACKS did change the build to Nixpacks, while editing
+`railway.json` did not.
 
-`get-service-config` reports:
+## What was tried, and what each attempt proved
 
-```json
-"build": { "builder": "RAILPACK" }
+| # | Change | Result |
+|---|---|---|
+| 1 | Clear service `startCommand` so a file would win | Build FAILED at `BUILD_IMAGE`: `⚠ Script start.sh not found`. An empty service start command does not fall back to any file. No outage. |
+| 2 | Service `startCommand` = `uvicorn api.main:app ...` | Build SUCCESS, container crash-loop: `uvicorn: command not found`. **502 outage.** |
+| 3 | Service `startCommand` = `python3 -m uvicorn ...` (builder RAILPACK) | Crash-loop: `python3: command not found`. **Still 502.** Neither binary is on PATH in the Railpack image. |
+| 4 | `deploymentRollback` to the last good deployment | Health 200 restored. |
+| 5 | Service `builder` = NIXPACKS (to match the good image) | Build FAILED: *"Nixpacks was unable to generate a build plan for this app."* No outage — the old deployment kept serving. |
+
+## The core finding
+
+The **last known-good deployment was built by Nixpacks**, and its build log
+shows the classic Nixpacks shape:
+
+```
+[stage-0 6/8] RUN ... python -m venv ...
+Successfully installed PyJWT-2.9.0 anthropic-0.116.0 asyncpg-0.29.0 ...
 ```
 
-**That is the service-level DEFAULT, not the effective builder.**
-`railway.json` said `NIXPACKS` and `railway.json` wins. Seeing the mismatch,
-I "corrected" the file to `RAILPACK` to match what the API reported — which
-silently flipped the real builder from Nixpacks to Railpack.
+Its metadata has `reason: "deploy"` and **no `commitHash`** — i.e. it came
+from a CLI `railway up` snapshot, not from GitHub. GitHub-sourced builds use
+the service builder (RAILPACK), and under Railpack the start command cannot
+find `python3` or `uvicorn`.
 
-The two images are not interchangeable:
+So the running service and the GitHub deploy path are not building the same
+way, and they have probably diverged for some time — this is a pre-existing
+condition that was only exposed by trying to deploy from GitHub.
 
-| | Nixpacks (correct) | Railpack (what I switched to) |
-|---|---|---|
-| Build log signature | `[stage-0 6/8] RUN ... python -m venv` | `railpack-plan.json`, `railpack-builder:mise` |
-| `python3` on PATH | yes | **no** |
-| `uvicorn` on PATH | yes (venv) | **no** |
+`.railwayignore` already documents a related CLI-vs-GitHub divergence (an
+untracked local file that breaks Railpack's config parser), which is more
+evidence that CLI deploys have been the working path here.
 
-So under Railpack both spellings of the start command fail
-(`python3: command not found` / `uvicorn: command not found`), and the
-service 502s.
+## What needs deciding (not safe to guess)
 
-**Before changing `build.builder`, confirm which builder is actually
-producing the running image by reading a successful deployment's BUILD
-logs.** The config API will not tell you.
+One of:
 
-## The full sequence, for the record
+1. **Commit to Railpack** and find the start command that works in that
+   image — likely the venv interpreter by absolute path, e.g.
+   `/app/.venv/bin/python -m uvicorn ...`. Verify by `railway ssh` into a
+   running Railpack container and checking `which python python3 uvicorn`
+   before deploying.
+2. **Commit to Nixpacks** and fix why it cannot generate a plan for this
+   repo from a GitHub checkout even though `requirements.txt`,
+   `runtime.txt` and `.python-version` are all tracked. Possibly
+   `railpack.json`'s presence, possibly something else — the build log
+   truncates before listing what it saw.
+3. **Keep deploying via CLI `railway up`** from a native Linux path (not a
+   WSL mount — see the five-file corruption history) and accept that
+   GitHub-sourced deploys do not work.
 
-| Attempt | Change | Result |
-|---|---|---|
-| 1 | Cleared service `startCommand` so `railway.json` would win | Build FAILED at `BUILD_IMAGE`: `⚠ Script start.sh not found`. No outage. |
-| 2 | Service `startCommand` = `uvicorn api.main:app ...` (+ builder flipped to RAILPACK) | Build SUCCESS, container crash-loop: `uvicorn: command not found`. **502.** |
-| 3 | Service `startCommand` = `python3 -m uvicorn ...` (builder still RAILPACK) | Still crash-looping: `python3: command not found`. **502.** |
-| 4 | `deploymentRollback` to the last known-good deployment | Health 200 restored. |
-| 5 | Reverted `railway.json` builder to `NIXPACKS` | Healthy. |
-
-Two things worth internalising:
+## Two general lessons from the outage
 
 - **A deployment can report SUCCESS while the process never starts.** Build
-  status is not health. Always poll `/health` until 200 after any build or
-  start-command change, and read the DEPLOY logs, not just the build ones.
-- **`deploymentRedeploy` reuses the old config snapshot.** After changing a
-  service-level setting, trigger a FRESH deploy (`serviceInstanceDeployV2`);
-  a redeploy will keep running the previous command and look like the change
-  had no effect.
-
-## To change the start command
-
-1. Edit `railway.json`.
-2. Match the `Procfile`.
-3. Push the same string to the service-level `startCommand`.
-4. Deploy fresh, then poll `/health` until 200.
+  status is not health. Always poll `/health` until 200 and read the DEPLOY
+  logs, not only the build logs.
+- **`deploymentRedeploy` reuses the old config snapshot**, so after changing
+  a service-level setting it silently keeps running the previous command and
+  makes the fix look ineffective. Use `serviceInstanceDeployV2` for a fresh
+  build.
+- **Do not trust `get-service-config`'s `builder` field as the effective
+  builder** without checking a successful deployment's build logs.
 
 ## Autodeploy
 
-Autodeploy on push is **off** for `mse-api` (`repoTriggers: []`). Both
-`deploymentTriggerCreate` and `serviceInstanceAutoDeployUpdate` refuse it:
+Also blocked, separately. `repoTriggers` is empty and both
+`deploymentTriggerCreate` and `serviceInstanceAutoDeployUpdate` refuse:
 
 ```
 No workspace member has their GitHub account connected with access to
 this repository.
 ```
 
-That needs a human: connect the GitHub account (or install the Railway
-GitHub App on `KDavisCodeCloud/kdavis-microsaas-engine`) from the Railway
-dashboard. Until then deploy explicitly with `serviceInstanceDeployV2`,
-passing a commit that is already pushed — a local-only SHA returns
-`INTERNAL_SERVER_ERROR`.
+Needs a human to connect the GitHub account / install the Railway GitHub App
+on `KDavisCodeCloud/kdavis-microsaas-engine` from the Railway dashboard.
