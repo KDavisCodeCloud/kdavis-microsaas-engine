@@ -24,8 +24,13 @@ __pycache__/
 .git/
 .github/
 .gitignore
-.dockerignore
-Dockerfile
+
+# NOTE: Dockerfile and .dockerignore are deliberately NOT excluded here.
+# Docker itself reads the Dockerfile outside the build context, so excluding it
+# is normally harmless -- but Railway applies .dockerignore when it packs the
+# CODE ARCHIVE it ships to the builder, so listing the Dockerfile made the
+# build fail with "couldn't locate the dockerfile at path Dockerfile in code
+# archive".
 
 # Local-only env files. Railway injects real variables; baking a stale .env
 # into the image would silently shadow them.
