@@ -718,3 +718,110 @@ class TestDeadBoardEviction:
         failed = board_client({})
         failed.fetch_board(BoardRef("greenhouse", "gone"))
         assert failed.board_status["greenhouse:gone"] == "failed"
+
+
+class TestCompanyAssociationIsVerified:
+    """Found live 2026-10-01: the same profile (linkedin.com/in/jerrykrikheli)
+    came back as the decision-maker for TWO different companies, because
+    `site:linkedin.com/in "Company"` also matches a profile that merely
+    MENTIONS the company. Writing that lead asserts "<person> is <title>
+    at <company>" as fact -- the same class of fabrication as the
+    job_posting_title bug."""
+
+    def _result(self, title, snippet):
+        return [{"link": "https://linkedin.com/in/x", "title": title, "snippet": snippet}]
+
+    def test_profile_not_naming_the_company_is_rejected(self):
+        scraper = FakeScraper(default=self._result(
+            "Jerry Krikheli - Globex | LinkedIn",
+            "Jerry Krikheli. VP of Engineering at Globex. Austin, TX",
+        ))
+        out = find_decision_maker(scraper, "Northwind Systems", stats=FunnelStats(), sleep=NO_SLEEP)
+        assert out["title"] is None
+        assert out["name"] is None
+
+    def test_profile_naming_the_company_is_accepted(self):
+        scraper = FakeScraper(default=self._result(
+            "Jane Doe - Northwind Systems | LinkedIn",
+            "Jane Doe. VP of Engineering at Northwind Systems. Austin, TX",
+        ))
+        out = find_decision_maker(scraper, "Northwind Systems", stats=FunnelStats(), sleep=NO_SLEEP)
+        assert out["title"] == "VP of Engineering"
+        assert out["name"] == "Jane Doe"
+
+    def test_punctuation_and_casing_differences_still_match(self):
+        """An ATS token yields "Vector Labs" while the profile says
+        "VectorLabs" -- a strict comparison would throw away a real lead."""
+        scraper = FakeScraper(default=self._result(
+            "Sam Lee - VectorLabs | LinkedIn", "Sam Lee. CTO at VectorLabs.",
+        ))
+        out = find_decision_maker(scraper, "Vector Labs", stats=FunnelStats(), sleep=NO_SLEEP)
+        assert out["title"] == "CTO"
+
+    def test_legal_suffix_on_our_side_still_matches(self):
+        scraper = FakeScraper(default=self._result(
+            "Sam Lee - Acme Technologies | LinkedIn", "Sam Lee. CTO at Acme Technologies.",
+        ))
+        out = find_decision_maker(scraper, "Acme Technologies Inc", stats=FunnelStats(), sleep=NO_SLEEP)
+        assert out["title"] == "CTO"
+
+    def test_a_company_name_of_only_stopwords_matches_nothing(self):
+        """"Inc" must not match every profile on LinkedIn."""
+        from agents.marketing.company_first_sourcing import _mentions_company
+
+        assert _mentions_company("anything at all", "Inc") is False
+        assert _mentions_company("anything at all", "") is False
+
+
+class TestDuplicateContactHandling:
+    """mse_leads.linkedin_url is globally UNIQUE (partial index), and 41
+    rows already carried one before v2 ran. A batch insert is
+    all-or-nothing, so one collision discarded every good lead with it."""
+
+    def _run(self, existing):
+        scraper = FakeScraper(responses={
+            "site:boards.greenhouse.io": [ats_result("https://boards.greenhouse.io/northwind/jobs/1")],
+            "site:linkedin.com/in": [{
+                "link": "https://linkedin.com/in/janedoe",
+                "title": "Jane Doe - Northwind Systems | LinkedIn",
+                "snippet": "Jane Doe. VP of Engineering at Northwind Systems.",
+            }],
+        })
+        return find_company_first_signals(
+            "p1", ["platform engineer"], scraper=scraper,
+            ats_client=board_client({"northwind": GREENHOUSE_PAYLOAD}), max_queries=40,
+            existing_linkedin_urls=existing, sleep=NO_SLEEP,
+        )
+
+    def test_already_used_profile_drops_the_attribution_not_the_lead(self):
+        """The company signal is still real -- it just has no usable
+        contact. Dropping the whole lead would throw away a genuine
+        hiring signal over a contact-field collision."""
+        rows, stats = self._run({"https://linkedin.com/in/janedoe"})
+        assert len(rows) == 1, "the company lead survives"
+        assert stats.dropped_duplicate_contact == 1
+        row = to_mse_lead_row(rows[0], source="s")
+        assert "linkedin_url" not in row
+        assert "first_name" not in row
+        assert row["company"] == "Northwind Systems"
+
+    def test_unused_profile_is_kept(self):
+        rows, stats = self._run(set())
+        assert stats.dropped_duplicate_contact == 0
+        assert to_mse_lead_row(rows[0], source="s")["linkedin_url"] == "https://linkedin.com/in/janedoe"
+
+
+class TestQueuedBoardTokens:
+    def test_unpolled_discoveries_are_cached_for_next_run(self):
+        """The first live run discovered 186 boards from 26 Brave queries
+        against a 60-board cap. Without caching the other 126 they would be
+        re-discovered next week at full Brave cost."""
+        from agents.marketing.company_first_sourcing import queue_board_tokens
+
+        db = FakeDb([])
+        refs = {f"greenhouse:co{i}": BoardRef("greenhouse", f"co{i}") for i in range(3)}
+        assert queue_board_tokens(db, refs, "p1") == 3
+        row = db.query.upserts[0]
+        assert row["discovered_from"] == "brave_ats_discovery"
+        assert "last_status" not in row, "never fetched is a distinct state from ok/empty/failed"
+        assert "last_fetched_at" not in row

@@ -47,6 +47,7 @@ from core.email_compliance import (
     is_suppressed,
     sends_today,
 )
+from agents.marketing.lead_qualification import email_may_send
 from core.sanitization import DataSanitizationShield
 from core.supabase_client import get_supabase
 
@@ -123,10 +124,54 @@ def _get_lead(db, seq: dict) -> Optional[dict]:
     # rows never reach this function, since they never leave
     # 'approved_manual' status, which this agent never polls for.
     if seq.get("lead_finder_lead_id"):
-        result = db.table("mse_leads").select("email,first_name").eq("id", seq["lead_finder_lead_id"]).maybe_single().execute()
+        # lead_route and email_grade must be SELECTED, not just read:
+        # _email_send_block_reason below gates on them, and a column that
+        # isn't in the select list is simply absent from the dict -- which
+        # would make that gate silently always-pass. Only mse_leads has
+        # them (migration 20261001000057); mse_apollo_leads does not.
+        result = (db.table("mse_leads")
+                  .select("email,first_name,lead_route,email_grade")
+                  .eq("id", seq["lead_finder_lead_id"]).maybe_single().execute())
         return result.data if result is not None else None
     result = db.table("mse_apollo_leads").select("email,first_name").eq("id", seq["lead_id"]).maybe_single().execute()
     return result.data if result is not None else None
+
+
+# ── Scraper v2 send gate (item 3.8, 2026-10-01) ──────────────────────────
+
+def _email_send_block_reason(lead: dict) -> Optional[str]:
+    """Why this lead must not be emailed, or None if it may be.
+
+    Kelvin's rule (2026-10-01): "only 'valid' enters MKT-O5", and
+    "domain-less leads route to the manual LinkedIn track only". Both are
+    enforced here, at the send path, rather than only at scoring time --
+    a gate that lives solely in the module that writes the lead is a gate
+    that stops existing the moment anything else writes one.
+
+    These are SKIPS, not failures. A lead deliberately routed to the
+    manual LinkedIn track has no email by design; recording that as a
+    send failure on every run would bury the real failures in noise,
+    which is how the "active but inert" bugs stayed invisible for weeks.
+
+    A lead with no email_grade at all (every row predating migration
+    20261001000057) is NOT blocked here -- those are governed by the
+    pre-existing email_status gate in MKT-O2, and silently refusing to
+    send to all of them would be a regression, not a safety win.
+
+    Deliberately NOT handled here: a missing email on a lead that carries
+    no non-email route. That stays a loud ValueError in the callers, as it
+    has been since the apollo days -- an apollo or lead_finder lead is
+    supposed to have an SMTP-verified address, so a null one is a real
+    anomaly worth failing on, not an expected state. Only a lead whose
+    OWN route says it was never meant for email gets skipped quietly.
+    """
+    route = lead.get("lead_route")
+    if route and route != "outbound_email":
+        return f"lead_route={route}"
+    grade = lead.get("email_grade")
+    if grade is not None and not email_may_send(grade):
+        return f"email_grade={grade}"
+    return None
 
 
 def _void_expired_approvals(db) -> int:
@@ -246,7 +291,17 @@ def run_send_touch_1(supabase_client: Optional[Any] = None, resend_client: Optio
                 continue
 
             lead = _get_lead(db, seq)
-            if not lead or not lead.get("email"):
+            if not lead:
+                raise ValueError(f"No lead row for sequence {seq['id']}")
+
+            block = _email_send_block_reason(lead)
+            if block:
+                skipped.append(seq["id"])
+                _write_audit(db, "lose", seq.get("product_id", ""),
+                             {"sequence_id": seq["id"], "touch": 1, "skipped": block})
+                continue
+
+            if not lead.get("email"):
                 raise ValueError(f"No email on file for lead {seq.get('lead_finder_lead_id') or seq.get('lead_id')}")
 
             if is_suppressed(db, lead["email"]):
@@ -322,7 +377,17 @@ def run_send_touch_2(supabase_client: Optional[Any] = None, resend_client: Optio
                 continue
 
             lead = _get_lead(db, seq)
-            if not lead or not lead.get("email"):
+            if not lead:
+                raise ValueError(f"No lead row for sequence {seq['id']}")
+
+            block = _email_send_block_reason(lead)
+            if block:
+                skipped.append(seq["id"])
+                _write_audit(db, "lose", seq.get("product_id", ""),
+                             {"sequence_id": seq["id"], "touch": 2, "skipped": block})
+                continue
+
+            if not lead.get("email"):
                 raise ValueError(f"No email on file for lead {seq.get('lead_finder_lead_id') or seq.get('lead_id')}")
 
             # A lead can unsubscribe in the 3-day gap between touch_1 and

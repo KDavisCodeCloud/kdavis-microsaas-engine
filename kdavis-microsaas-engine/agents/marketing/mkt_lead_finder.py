@@ -1533,6 +1533,47 @@ SCRAPER_V2_KEYWORDS: dict[str, list[str]] = {
 }
 
 
+def _insert_leads_tolerating_conflicts(db, rows: list[dict], source: str) -> list[dict]:
+    """Batch-insert leads, falling back to one-by-one on a unique-constraint
+    conflict.
+
+    mse_leads carries UNIQUE partial indexes on both `email` and
+    `linkedin_url`, and a PostgREST batch insert is all-or-nothing: the
+    first live v2 consulting run lost an entire batch of good leads to one
+    duplicate linkedin_url. Scraper v2 dedupes in-batch and against
+    existing rows already, but a conflict can still arise from a
+    concurrent writer, so the cheap path is tried first and the row-by-row
+    path only on failure. A row that genuinely conflicts is skipped and
+    logged -- never silently, and never at the cost of its 40 neighbours.
+    """
+    if not rows:
+        return []
+    try:
+        result = db.table("mse_leads").insert(rows).execute()
+        if not result.data:
+            raise RuntimeError(f"Insert into mse_leads ({source}) returned no data")
+        return result.data
+    except Exception as exc:
+        log.warning("[SCRAPER-V2] batch insert of %d %s lead(s) failed (%s) -- retrying row by row",
+                    len(rows), source, exc)
+
+    inserted: list[dict] = []
+    conflicts = 0
+    for row in rows:
+        try:
+            result = db.table("mse_leads").insert(row).execute()
+            if result.data:
+                inserted.extend(result.data)
+        except Exception as row_exc:
+            conflicts += 1
+            log.warning("[SCRAPER-V2] skipped one %s lead (company=%r): %s",
+                        source, row.get("company"), row_exc)
+    if conflicts:
+        log.warning("[SCRAPER-V2] %d of %d %s lead(s) skipped on conflict, %d written",
+                    conflicts, len(rows), source, len(inserted))
+    return inserted
+
+
 def run_scraper_v2_scout(
     product_id: str,
     supabase_client: Optional[Any] = None,
@@ -1583,20 +1624,23 @@ def run_scraper_v2_scout(
         already_used_this_month = _this_months_brave_query_count(db)
         scraper = BraveSearchScraper(query_count=already_used_this_month)
 
+        existing_linkedin_urls = {
+            r["linkedin_url"]
+            for r in (db.table("mse_leads").select("linkedin_url").execute().data or [])
+            if r.get("linkedin_url")
+        }
+
         qualified, stats = find_company_first_signals(
             product_id, keywords,
             db=db, scraper=scraper, max_queries=max_queries, max_age_days=max_age_days,
             existing_domains=_existing_job_signal_domains(db),
+            existing_linkedin_urls=existing_linkedin_urls,
             lookup_decision_makers=lookup_decision_makers,
         )
 
         rows = [to_mse_lead_row(q, source=source) for q in qualified]
-        inserted: list[dict] = []
-        if rows:
-            insert_result = db.table("mse_leads").insert(rows).execute()
-            if not insert_result.data:
-                raise RuntimeError(f"Insert into mse_leads ({source}) returned no data")
-            inserted = insert_result.data
+        inserted = _insert_leads_tolerating_conflicts(db, rows, source)
+        if inserted:
             _log_found_activities(db, product_id, inserted)
 
         funnel = stats.as_dict()

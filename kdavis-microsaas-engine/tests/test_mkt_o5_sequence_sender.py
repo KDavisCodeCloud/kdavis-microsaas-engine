@@ -527,3 +527,105 @@ class TestSellingStageGateAtSendTime:
         result = run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
 
         assert result == {"sent": 1, "failed": [], "skipped": []}
+
+
+# ── Scraper v2 send gate (item 3.8, 2026-10-01) ──────────────────────────
+
+class TestScraperV2SendGate:
+    """Kelvin, 2026-10-01: "only 'valid' enters MKT-O5" and "domain-less
+    leads route to the manual LinkedIn track only". Enforced at the SEND
+    path, not only at scoring time -- a gate that lives solely in the
+    module that writes the lead stops existing the moment anything else
+    writes one."""
+
+    def _lf_sequence(self, fake_db):
+        fake_db.responses["mse_dm_sequences"] = [{
+            "id": "seq-v2", "lead_id": None, "lead_finder_lead_id": "v2-lead",
+            "product_id": "prod-1", "campaign_build_id": None,
+            "touch_1": "msg", "touch_2": "follow",
+            "status": "approved_hitl", "touch_1_sent_at": None,
+        }]
+        _seed_active_stage(fake_db)
+
+    def _run(self, fake_db, lead):
+        self._lf_sequence(fake_db)
+        fake_db.responses["mse_leads"] = [lead]
+        fake_resend = FakeResend()
+        result = run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
+        return result, fake_resend
+
+    def test_manual_linkedin_lead_is_skipped_not_failed(self, fake_db):
+        """It has no email BY DESIGN. Recording that as a send failure
+        every run would bury the real failures in noise -- which is how
+        the "active but inert" bugs stayed invisible for weeks."""
+        result, fake_resend = self._run(
+            fake_db, {"email": None, "first_name": "Jamie", "lead_route": "manual_linkedin"})
+
+        assert result == {"sent": 0, "failed": [], "skipped": ["seq-v2"]}, (
+            "a manual-LinkedIn lead is an expected skip, never a failure"
+        )
+        assert len(fake_resend.Emails.sent) == 0
+        audits = [c for c in fake_db.executed
+                  if c.table_name == "audit_log" and c.calls[0][0] == "insert"]
+        assert audits[0]._payload["metadata"]["skipped"] == "lead_route=manual_linkedin"
+
+    def test_risky_graded_email_is_skipped_even_though_an_address_exists(self, fake_db):
+        """A catch-all domain accepts every RCPT TO, so a deliverable-looking
+        address there is not a proven mailbox."""
+        result, fake_resend = self._run(
+            fake_db, {"email": "a@b.com", "first_name": "A",
+                      "lead_route": "outbound_email", "email_grade": "risky"})
+
+        assert result["sent"] == 0
+        assert result["skipped"] == ["seq-v2"]
+        assert len(fake_resend.Emails.sent) == 0
+
+    def test_valid_graded_outbound_email_lead_still_sends(self, fake_db):
+        """The gate must not break the path it is protecting."""
+        result, fake_resend = self._run(
+            fake_db, {"email": "a@b.com", "first_name": "A",
+                      "lead_route": "outbound_email", "email_grade": "valid"})
+
+        assert result["sent"] == 1
+        assert len(fake_resend.Emails.sent) == 1
+
+    def test_gate_blocks_each_non_sendable_route_and_grade(self):
+        import agents.marketing.mkt_o5_sequence_sender as o5
+
+        assert o5._email_send_block_reason(
+            {"email": None, "lead_route": "manual_linkedin"}) == "lead_route=manual_linkedin"
+        assert o5._email_send_block_reason(
+            {"email": "a@b.com", "lead_route": "reject"}) == "lead_route=reject"
+        for grade in ("risky", "invalid", "unknown"):
+            assert o5._email_send_block_reason(
+                {"email": "a@b.com", "lead_route": "outbound_email", "email_grade": grade}
+            ) == f"email_grade={grade}", f"{grade} must never send"
+
+    def test_gate_allows_a_valid_outbound_email_lead(self):
+        import agents.marketing.mkt_o5_sequence_sender as o5
+
+        assert o5._email_send_block_reason(
+            {"email": "a@b.com", "lead_route": "outbound_email", "email_grade": "valid"}) is None
+
+    def test_pre_v2_lead_with_no_route_or_grade_is_not_blocked(self):
+        """Every row predating migration 20261001000057 has NULL for both.
+        Silently refusing to send to all of them would be a regression,
+        not a safety win -- they are governed by MKT-O2's email_status
+        gate as before."""
+        import agents.marketing.mkt_o5_sequence_sender as o5
+
+        assert o5._email_send_block_reason({"email": "a@b.com"}) is None
+        assert o5._email_send_block_reason(
+            {"email": "a@b.com", "lead_route": None, "email_grade": None}) is None
+
+    def test_gate_columns_are_actually_selected(self):
+        """The gate reads lead_route/email_grade, so they must be in the
+        SELECT list. A column that isn't selected is simply absent from the
+        dict, which would make the whole gate silently always-pass."""
+        import inspect
+
+        import agents.marketing.mkt_o5_sequence_sender as o5
+
+        source = inspect.getsource(o5._get_lead)
+        assert "lead_route" in source
+        assert "email_grade" in source

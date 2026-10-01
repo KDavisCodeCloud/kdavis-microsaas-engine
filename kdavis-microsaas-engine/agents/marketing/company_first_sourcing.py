@@ -150,6 +150,7 @@ class FunnelStats:
     dropped_low_fit: int = 0
     dropped_low_intent: int = 0
     dropped_duplicate_company: int = 0
+    dropped_duplicate_contact: int = 0
     routed_outbound_email: int = 0
     routed_manual_linkedin: int = 0
     decision_makers_found: int = 0
@@ -311,6 +312,38 @@ def upsert_board_tokens(
     return written
 
 
+def queue_board_tokens(db, refs: dict[str, BoardRef], product_id: Optional[str] = None) -> int:
+    """Cache board tokens that were discovered but not polled this run.
+
+    Written with last_status NULL and last_fetched_at NULL -- "known, never
+    fetched" is a third state distinct from ok/empty/failed, and
+    load_cached_board_refs orders by last_fetched_at so these come first
+    next run. The company name is the token-derived fallback only; the real
+    display name arrives when the board is actually fetched.
+
+    Deliberately an upsert that does NOT clobber an existing row's status:
+    a board already fetched in a previous run keeps its own record, because
+    re-discovering it is not new information about it.
+    """
+    written = 0
+    for key, ref in refs.items():
+        row = {
+            "provider": ref.provider,
+            "board_token": ref.token,
+            "company": company_name_from_token(ref.token),
+            "discovered_from": "brave_ats_discovery",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if product_id:
+            row["product_id"] = product_id
+        try:
+            db.table(BOARD_TOKEN_TABLE).upsert(row, on_conflict="provider,board_token").execute()
+            written += 1
+        except Exception as exc:
+            log.warning("[CompanyFirst] board-token queue failed for %s: %s", key, exc)
+    return written
+
+
 # ── Step 4: per-company decision-maker lookup ────────────────────────────
 #
 # The ONLY place site:linkedin.com/in appears in v2.
@@ -348,6 +381,42 @@ def parse_decision_maker_title(snippet: str) -> Optional[str]:
     return None
 
 
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+# Words that carry no identity -- "Labs Inc" must not match every company
+# with "Labs" in the name.
+_COMPANY_STOPWORDS = frozenset({
+    "inc", "llc", "ltd", "corp", "corporation", "co", "gmbh", "bv", "plc",
+    "limited", "holdings", "group", "the", "and",
+})
+
+
+def _normalise_company(value: str) -> str:
+    return _NON_ALNUM_RE.sub("", (value or "").lower())
+
+
+def _mentions_company(text: str, company: str) -> bool:
+    """True when `text` plausibly names `company`.
+
+    Compared with punctuation and casing removed, because an ATS token
+    yields "Vector Labs" while the profile says "VectorLabs". A company
+    name that reduces to nothing but stopwords is treated as unverifiable
+    (False) rather than matching everything.
+    """
+    normalised = _normalise_company(company)
+    if not normalised:
+        return False
+    haystack = _normalise_company(text)
+    if normalised in haystack:
+        return True
+    # Fall back to the distinctive words only, so "Acme Technologies Inc"
+    # still matches a profile that says just "Acme Technologies".
+    words = [w for w in _NON_ALNUM_RE.sub(" ", (company or "").lower()).split()
+             if w and w not in _COMPANY_STOPWORDS]
+    if not words:
+        return False
+    return _normalise_company("".join(words)) in haystack
+
+
 def find_decision_maker(
     scraper,
     company: str,
@@ -376,6 +445,15 @@ def find_decision_maker(
             continue
         rejected, _reason = is_negative_title(title)
         if rejected:
+            continue
+        # The company must actually appear on the profile. Found live
+        # 2026-10-01: the same profile (linkedin.com/in/jerrykrikheli) came
+        # back for two different companies, because a `site:linkedin.com/in
+        # "Company"` query also matches a profile that merely MENTIONS the
+        # company. Writing that lead asserts "<person> is <title> at
+        # <company>" as fact -- the same class of fabrication as the
+        # job_posting_title bug. No association, no contact.
+        if not _mentions_company(f"{item.get('title', '')} {snippet}", company):
             continue
         # Name comes from the result title's leading segment, which for a
         # profile page is the person. Nothing else is claimed.
@@ -545,6 +623,7 @@ def find_company_first_signals(
     max_boards: int = MAX_BOARDS_PER_RUN,
     max_age_days: Optional[int] = 30,
     existing_domains: Optional[set] = None,
+    existing_linkedin_urls: Optional[set] = None,
     config: Optional[ScoringConfig] = None,
     lookup_decision_makers: bool = True,
     today: Optional[date] = None,
@@ -565,6 +644,10 @@ def find_company_first_signals(
     stats = FunnelStats()
     cfg = config or ScoringConfig()
     existing_domains = existing_domains or set()
+    # mse_leads.linkedin_url carries a UNIQUE partial index, so a profile
+    # already on another lead must not be written again -- a batch insert
+    # is all-or-nothing and one collision discards every good lead with it.
+    existing_linkedin_urls = set(existing_linkedin_urls or set())
 
     if scraper is None or not getattr(scraper, "api_key", None):
         # Same graceful-skip contract as every other quota/credential-
@@ -613,6 +696,16 @@ def find_company_first_signals(
             board_status=client.board_status,
             prior_failures=prior_failures,
         )
+        # Cache the tokens we discovered but did NOT poll this run, as
+        # unfetched rows. The first live run discovered 186 boards from 26
+        # Brave queries against a 60-board cap -- without this, the other
+        # 126 are thrown away and re-discovered next week at full Brave
+        # cost, which defeats the point of having a cache at all. These
+        # rows carry last_status NULL (never fetched), so
+        # load_cached_board_refs returns them first next run, for free.
+        unpolled = {k: ref for k, ref in refs.items() if k not in boards}
+        if unpolled:
+            queue_board_tokens(db, unpolled, product_id)
 
     # Step 3: candidates -> qualification.
     candidates = build_candidates(boards, refs, keywords, max_age_days=max_age_days, stats=stats)
@@ -653,6 +746,20 @@ def find_company_first_signals(
             stats.routed_outbound_email += 1
         else:
             stats.routed_manual_linkedin += 1
+
+        # linkedin_url is globally UNIQUE in mse_leads. The same profile
+        # legitimately surfaces for more than one company (and 41 rows
+        # already carried one before v2 ran at all), so drop the duplicate
+        # ATTRIBUTION rather than the whole lead -- the company signal is
+        # still real, it just has no usable contact.
+        profile = qualified.get("contact_profile_url")
+        if profile and profile in existing_linkedin_urls:
+            stats.dropped_duplicate_contact += 1
+            qualified["contact_profile_url"] = None
+            qualified["contact_name"] = None
+            qualified["title"] = None
+        elif profile:
+            existing_linkedin_urls.add(profile)
 
         if domain:
             seen_domains.add(domain)
