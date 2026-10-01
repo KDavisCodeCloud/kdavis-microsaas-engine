@@ -869,3 +869,35 @@ class TestCallerOwnedStats:
                 ats_client=Exploding(), max_queries=40, stats=mine, sleep=NO_SLEEP,
             )
         assert mine.queries_discovery > 0, "spend already incurred must survive the exception"
+
+
+class TestBoardCacheIsSharedAcrossProducts:
+    """mse_ats_board_tokens is UNIQUE on (provider, board_token) -- one row
+    per company board, globally. Filtering reads by product_id would make a
+    board discovered for consulting invisible to Cloud Decoded (re-paying
+    full Brave cost to rediscover it), and the following upsert would flip
+    the row's product_id so it became invisible to consulting instead. The
+    two branches would take turns paying for the same tokens forever."""
+
+    def test_cached_boards_are_returned_regardless_of_discovering_product(self):
+        db = FakeDb([{"provider": "greenhouse", "board_token": "shared", "consecutive_failures": 0}])
+        for product in ("consulting-product-id", "cloud-decoded-product-id", None):
+            refs = load_cached_board_refs(db, product)
+            assert [r.token for r in refs] == ["shared"], f"invisible to {product}"
+
+    def test_read_does_not_filter_on_product_id(self):
+        """Pinned structurally: the flaw was a single .eq("product_id", ...)
+        that looked obviously correct in review."""
+        import inspect
+
+        import agents.marketing.company_first_sourcing as cfs
+
+        body = inspect.getsource(cfs.load_cached_board_refs)
+        code_lines = [
+            ln for ln in body.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+        code = "\n".join(code_lines)
+        assert '.eq("product_id"' not in code, (
+            "load_cached_board_refs must not scope the shared board cache to one product"
+        )

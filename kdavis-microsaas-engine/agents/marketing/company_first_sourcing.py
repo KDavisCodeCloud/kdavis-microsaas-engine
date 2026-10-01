@@ -181,10 +181,26 @@ def load_cached_board_refs(
     if prior_failures is None:
         prior_failures = {}
     try:
-        query = db.table(BOARD_TOKEN_TABLE).select("provider,board_token,consecutive_failures")
-        if product_id:
-            query = query.eq("product_id", product_id)
-        rows = query.limit(limit).execute().data or []
+        # Deliberately NOT filtered by product_id, despite taking one.
+        #
+        # mse_ats_board_tokens is UNIQUE on (provider, board_token) -- one
+        # row per company board, globally. Filtering reads by product_id
+        # would therefore be wrong twice over: a board first discovered for
+        # consulting would be invisible to Cloud Decoded and get
+        # re-discovered at full Brave cost, and the upsert that followed
+        # would flip the row's product_id, making it invisible to
+        # consulting instead. The two branches would take turns paying for
+        # the same tokens forever.
+        #
+        # A company's ATS board is not product-specific anyway -- a company
+        # hiring platform engineers is a candidate for both branches, and
+        # which product a lead belongs to is decided per posting by the
+        # routing step, not by who happened to find the board first.
+        # product_id is kept on the row as provenance ("who discovered
+        # this"), and the caller still scopes leads per product.
+        rows = (db.table(BOARD_TOKEN_TABLE)
+                .select("provider,board_token,consecutive_failures")
+                .limit(limit).execute().data or [])
     except Exception as exc:
         # The cache is an optimisation. A missing table or a transient
         # read error must degrade to "discover from scratch", never abort
