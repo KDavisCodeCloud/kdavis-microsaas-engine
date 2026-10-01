@@ -1,79 +1,78 @@
-# mse-api start command — why it is set in three places
+# mse-api build + start configuration
 
-_Last verified against production: 2026-10-01, the hard way._
+_Last verified against production: 2026-10-01, after causing an outage._
 
 ## The short version
 
-The canonical command is:
-
-```
-python3 -m uvicorn api.main:app --host 0.0.0.0 --port $PORT
-```
-
-It must be set **on the Railway service**, and `railway.json` + `Procfile`
-must carry the same string. Two things that look reasonable and are not:
-
-- **Do not clear the service-level value** expecting `railway.json` to take
-  over. It does not; the build fails.
-- **Do not use bare `uvicorn`.** It is not on PATH in this image.
-
-## What we actually tested
-
-Before 2026-10-01 the three sources disagreed:
-
-| Where | Value |
-|---|---|
-| `railway.json` `deploy.startCommand` | `uvicorn api.main:app ...` |
-| `Procfile` | `uvicorn api.main:app ...` |
-| **Railway service override (live)** | **`python3 -m uvicorn api.main:app ...`** |
-| `railway.json` `build.builder` | `NIXPACKS` |
-| **Railway service builder (live)** | **`RAILPACK`** |
-
-The service-level values win, so the repo described something that did not
-run. Reconciling them took three attempts.
-
-**Attempt 1 — clear the service override so `railway.json` wins.** The
-mutation succeeded; the next deploy FAILED at `BUILD_IMAGE`:
-
-```
-Railpack 0.40.1
-  ⚠ Script start.sh not found
-error | railpack prepare exited with an error
+```jsonc
+// railway.json -- DO NOT change the builder
+{ "build":  { "builder": "NIXPACKS" },
+  "deploy": { "startCommand": "python3 -m uvicorn api.main:app --host 0.0.0.0 --port $PORT" } }
 ```
 
-An empty service-level start command does **not** fall back to
-`railway.json`. Railpack went looking for a `start.sh`, did not find one,
-and failed during prepare. No outage — the previous deployment kept serving.
+Three rules, each learned by breaking it:
 
-**Attempt 2 — set the service override to `uvicorn api.main:app ...`,
-matching what `railway.json` and the `Procfile` said.** The BUILD succeeded
-and Railway reported the deployment SUCCESS, but the container crash-looped:
+1. **The builder is NIXPACKS.** `railway.json` overrides the service-level
+   default, and the Nixpacks image is the one where `python3` exists.
+2. **The start command is `python3 -m uvicorn ...`**, not bare `uvicorn`.
+3. **The service-level `startCommand` must be SET** — clearing it does not
+   fall back to `railway.json`.
 
+## The trap that caused the outage
+
+`get-service-config` reports:
+
+```json
+"build": { "builder": "RAILPACK" }
 ```
-/bin/bash: line 1: uvicorn: command not found
-```
 
-**This caused a real outage.** `/health` served 502 for several minutes
-until the command was rolled back. Note the trap: a deployment can be
-SUCCESS (the image built) while the process never starts. Build status is
-not health — always check `/health` after a start-command change.
+**That is the service-level DEFAULT, not the effective builder.**
+`railway.json` said `NIXPACKS` and `railway.json` wins. Seeing the mismatch,
+I "corrected" the file to `RAILPACK` to match what the API reported — which
+silently flipped the real builder from Nixpacks to Railpack.
 
-So in this Railpack image `python3` IS on PATH and bare `uvicorn` is NOT.
-The earlier Procfile incident (`python3: command not found`) was under a
-different builder, and generalising from it was the mistake.
+The two images are not interchangeable:
 
-**Attempt 3 — `python3 -m uvicorn ...` everywhere.** Healthy.
+| | Nixpacks (correct) | Railpack (what I switched to) |
+|---|---|---|
+| Build log signature | `[stage-0 6/8] RUN ... python -m venv` | `railpack-plan.json`, `railpack-builder:mise` |
+| `python3` on PATH | yes | **no** |
+| `uvicorn` on PATH | yes (venv) | **no** |
 
-## The rule
+So under Railpack both spellings of the start command fail
+(`python3: command not found` / `uvicorn: command not found`), and the
+service 502s.
 
-`railway.json` records the decision and is reviewable in git; the
-service-level value is how Railway actually receives it. To change it:
+**Before changing `build.builder`, confirm which builder is actually
+producing the running image by reading a successful deployment's BUILD
+logs.** The config API will not tell you.
+
+## The full sequence, for the record
+
+| Attempt | Change | Result |
+|---|---|---|
+| 1 | Cleared service `startCommand` so `railway.json` would win | Build FAILED at `BUILD_IMAGE`: `⚠ Script start.sh not found`. No outage. |
+| 2 | Service `startCommand` = `uvicorn api.main:app ...` (+ builder flipped to RAILPACK) | Build SUCCESS, container crash-loop: `uvicorn: command not found`. **502.** |
+| 3 | Service `startCommand` = `python3 -m uvicorn ...` (builder still RAILPACK) | Still crash-looping: `python3: command not found`. **502.** |
+| 4 | `deploymentRollback` to the last known-good deployment | Health 200 restored. |
+| 5 | Reverted `railway.json` builder to `NIXPACKS` | Healthy. |
+
+Two things worth internalising:
+
+- **A deployment can report SUCCESS while the process never starts.** Build
+  status is not health. Always poll `/health` until 200 after any build or
+  start-command change, and read the DEPLOY logs, not just the build ones.
+- **`deploymentRedeploy` reuses the old config snapshot.** After changing a
+  service-level setting, trigger a FRESH deploy (`serviceInstanceDeployV2`);
+  a redeploy will keep running the previous command and look like the change
+  had no effect.
+
+## To change the start command
 
 1. Edit `railway.json`.
 2. Match the `Procfile`.
 3. Push the same string to the service-level `startCommand`.
-4. Deploy, then **poll `/health` until it returns 200** — not just the
-   deployment status.
+4. Deploy fresh, then poll `/health` until 200.
 
 ## Autodeploy
 
@@ -87,13 +86,6 @@ this repository.
 
 That needs a human: connect the GitHub account (or install the Railway
 GitHub App on `KDavisCodeCloud/kdavis-microsaas-engine`) from the Railway
-dashboard. Until then, deploy explicitly:
-
-```bash
-railway api 'mutation($svc:String!,$env:String!,$sha:String){
-  serviceInstanceDeployV2(serviceId:$svc, environmentId:$env, commitSha:$sha)
-}' --variables '{"svc":"<serviceId>","env":"<environmentId>","sha":"<commit>"}'
-```
-
-The commit must already be pushed to GitHub — deploying a local-only SHA
-returns `INTERNAL_SERVER_ERROR`.
+dashboard. Until then deploy explicitly with `serviceInstanceDeployV2`,
+passing a commit that is already pushed — a local-only SHA returns
+`INTERNAL_SERVER_ERROR`.
