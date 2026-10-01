@@ -755,6 +755,45 @@ def _company_from_ats_url(link: str, domain: str) -> Optional[str]:
     return cleaned.title() if cleaned else None
 
 
+def _posting_title_from_result(item: dict, company: Optional[str]) -> Optional[str]:
+    """
+    The REAL role a posting is for, taken from the search result's own
+    title with the company segment stripped.
+
+    Fixes a factual-accuracy bug (2026-10-01): find_job_posting_signals
+    previously stored the ICP's *contact-title placeholder* (the buyer
+    title being searched for, e.g. "CTO") in job_posting_title. MKT-O2
+    hands that field to the LLM labelled "real signal context (never
+    invent anything beyond this)", so every consulting draft asserted the
+    company was hiring a CTO regardless of the actual posting -- an
+    unverified claim about a prospect, in outbound copy.
+
+    Returns None rather than guessing when nothing usable remains; the
+    caller then omits the field instead of substituting a placeholder.
+    """
+    raw = (item.get("title") or "").strip()
+    if not raw:
+        return None
+    text = raw
+    if company:
+        for sep in (" - ", " | ", " — ", " is hiring ", " hiring "):
+            if text.lower().startswith(company.lower() + sep.lower()):
+                text = text[len(company) + len(sep):].strip()
+                break
+    # Trim trailing board/site boilerplate ("… - Careers", "… | Jobs")
+    for sep in (" - ", " | ", " — "):
+        for tail in ("careers", "jobs", "job", "apply", "hiring"):
+            suffix = sep + tail
+            if text.lower().endswith(suffix):
+                text = text[: -len(suffix)].strip()
+    # After stripping the company, what's left can BE the boilerplate
+    # ("Staffordgray - Careers" -> "Careers"). That names no role, so it
+    # must not become a factual claim about what they're hiring.
+    if text.lower().strip(" .-|—") in {"careers", "career", "jobs", "job", "apply", "hiring", "openings", "open roles"}:
+        return None
+    return text or None
+
+
 def _company_from_posting(item: dict, link: str, domain: str) -> Optional[str]:
     """The real company behind a posting, or None if it can't be
     established. Never falls back to the domain -- a lead with no
@@ -869,7 +908,12 @@ def find_job_posting_signals(
                 dropped_no_company += 1
                 continue
 
-            signals.append({
+            # job_posting_title is the REAL role from the result title --
+            # never the ICP contact-title placeholder (`title`), which is
+            # the buyer we want to reach, not what they're hiring for.
+            # See _posting_title_from_result.
+            posting_title = _posting_title_from_result(item, company)
+            row = {
                 "product_id": product_id,
                 "company": company,
                 "domain": domain,
@@ -877,10 +921,12 @@ def find_job_posting_signals(
                 "source": "job_posting_signal",
                 "location": location,
                 "job_posting_url": link,
-                "job_posting_title": title,
                 "job_posting_date": posting_date.isoformat(),
                 "confidence_score": 0.5,
-            })
+            }
+            if posting_title:
+                row["job_posting_title"] = posting_title
+            signals.append(row)
 
     if _stats is not None:
         _stats["raw_found"] = raw_found
@@ -1151,11 +1197,15 @@ def find_cloud_decoded_job_signals(
                 jd_text or f"{item.get('title', '')} {item.get('snippet', '')}"
             )
 
+            # Same accuracy rule as the consulting branch: the real role
+            # from the result title, company prefix stripped -- not the
+            # query keyword. See _posting_title_from_result.
+            posting_title = _posting_title_from_result(item, company) or title
             signals.append({
                 "company": company,
                 "domain": domain,
-                "title": item.get("title", title),
-                "job_posting_title": item.get("title", title),
+                "title": posting_title,
+                "job_posting_title": posting_title,
                 "job_posting_url": link,
                 "job_posting_date": posting_date.isoformat(),
                 "job_posting_description": jd_text,

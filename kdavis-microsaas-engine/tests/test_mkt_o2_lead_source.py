@@ -263,9 +263,17 @@ def test_run_o2_for_linkedin_leads_pulls_lead_finder_leads_filtered_to_verified_
         "job_posting_signal": 1, "cloud_decoded_job_signal": 1,
     }
 
-    lead_finder_select = [c for c in fake_db.executed if c.table_name == "mse_leads" and c.calls[0][0] == "select"][0]
-    assert ("email_status", "verified") in lead_finder_select._filters
+    # Pick the query by its filters, not by position: run_o2_for_linkedin_leads
+    # also issues a leading skip-accounting select over ALL pending_dm leads
+    # (2026-10-01, deliberately unfiltered by email_status), so indexing [0]
+    # would grab that one instead.
+    mse_selects = [c for c in fake_db.executed if c.table_name == "mse_leads" and c.calls[0][0] == "select"]
+    lead_finder_select = next(c for c in mse_selects if ("email_status", "verified") in c._filters)
     assert ("status", "pending_dm") in lead_finder_select._filters
+    # and the accounting query must NOT carry that filter, or the skip
+    # reconciliation would under-count the pending pool it reconciles against
+    accounting_select = mse_selects[0]
+    assert not any(k == "email_status" for k, _ in accounting_select._filters)
 
 
 def test_run_o2_for_linkedin_leads_processes_engagers_before_manual(monkeypatch):

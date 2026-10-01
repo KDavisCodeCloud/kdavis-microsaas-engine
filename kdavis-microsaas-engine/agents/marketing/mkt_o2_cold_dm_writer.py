@@ -33,6 +33,7 @@ those tables never distinguish "sequence drafted, not yet sent" from
 """
 
 import json
+import logging
 from typing import Any, Optional
 
 import core.llm_router as llm_router
@@ -40,6 +41,8 @@ from core.sanitization import DataSanitizationShield
 from core.supabase_client import get_supabase
 
 AGENT_ID = "mkt-o2"
+
+_log = logging.getLogger(__name__)
 
 TOUCH_1_MAX_CHARS = 300
 TOUCH_2_MAX_CHARS = 500
@@ -517,6 +520,23 @@ def run_o2_for_linkedin_leads(
     """
     db = supabase_client if supabase_client is not None else get_supabase()
 
+    # Outbound loop closure (2026-10-01): per-lead skip accounting.
+    # This function previously returned only written-counts, so a run that
+    # wrote zero sequences while pending_dm leads existed was
+    # indistinguishable from a run with nothing to do -- which is exactly
+    # how the daily 8am workflow stayed silently inert for weeks. Every
+    # pending_dm lead for this product is now accounted for: either
+    # written, or skipped with a named reason.
+    _all_pending = (
+        db.table("mse_leads").select("id,source,email_status")
+        .eq("product_id", product_id).eq("status", "pending_dm").execute().data or []
+    )
+    skip_reasons: dict[str, int] = {}
+
+    def _skip(reason: str, n: int = 1) -> None:
+        if n:
+            skip_reasons[reason] = skip_reasons.get(reason, 0) + n
+
     total_written = 0
     by_source: dict[str, int] = {}
     for source in ("linkedin_engager", "linkedin_manual"):
@@ -620,7 +640,38 @@ def run_o2_for_linkedin_leads(
     else:
         by_source["cloud_decoded_job_signal"] = 0
 
-    return {"status": "ready_for_hitl", "sequences_written": total_written, "by_source": by_source}
+    # Reconcile: every pending_dm lead must be either written or skipped
+    # with a named reason. An unexplained gap is the exact silent-failure
+    # shape that kept this engine inert -- surface it loudly rather than
+    # returning a clean-looking zero.
+    pending_total = len(_all_pending)
+    _skip("lead_finder_email_not_verified",
+          sum(1 for r in _all_pending
+              if r.get("source") not in ("job_posting_signal", "cloud_decoded_job_signal")
+              and r.get("email_status") != "verified"))
+    accounted = total_written + sum(skip_reasons.values())
+    unexplained = max(pending_total - accounted, 0)
+    if unexplained:
+        _skip("UNEXPLAINED", unexplained)
+
+    if pending_total and total_written == 0:
+        _log.warning(
+            "[MKT-O2] product=%s had %d pending_dm lead(s) but wrote 0 sequences; skip reasons=%s",
+            product_id, pending_total, skip_reasons,
+        )
+    else:
+        _log.info(
+            "[MKT-O2] product=%s pending_dm=%d written=%d skip_reasons=%s",
+            product_id, pending_total, total_written, skip_reasons,
+        )
+
+    return {
+        "status": "ready_for_hitl",
+        "sequences_written": total_written,
+        "by_source": by_source,
+        "pending_dm_total": pending_total,
+        "skip_reasons": skip_reasons,
+    }
 
 
 def run(research_report: dict, campaign_build: dict) -> dict:
