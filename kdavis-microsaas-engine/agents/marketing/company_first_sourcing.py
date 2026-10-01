@@ -456,12 +456,35 @@ def parse_decision_maker_title(snippet: str) -> Optional[str]:
     for pattern in _SNIPPET_TITLE_PATTERNS:
         match = pattern.search(snippet)
         if match:
-            title = match.group(1).strip(" .,-–—·|")
+            title = _trim_title_clause(match.group(1))
             # It must classify as a real seniority tier, or it isn't a
             # title we can assert.
             if title and classify_seniority(title) != "unknown":
                 return title
     return None
+
+
+# A snippet runs on past the title into prose, and the capture window is 60
+# characters wide. The 2026-10-01 run stored "VP of Data, after running
+# analytics and data engineering" as a title -- a factual over-claim that
+# MKT-O2 would assert verbatim. Cut at the first clause boundary: a comma or
+# dash followed by a lowercase word, or a joining word.
+# NOT re.IGNORECASE: the `(?=[a-z])` lookahead is the whole point -- a comma
+# followed by a CAPITALISED word is part of the title ("VP, Infrastructure"),
+# while a comma followed by lowercase starts prose ("VP of Data, after
+# running..."). Compiling this case-insensitively made the lookahead match
+# uppercase too and truncated "VP, Infrastructure" to "VP" -- the same trap
+# that let prose through as contact names in contact_discovery.
+_TITLE_CLAUSE_RE = re.compile(
+    r"\s*(?:[,;–—-]\s+(?=[a-z])|\s+(?i:after|who|where|while|and\s+also|responsible|leading)\b).*$"
+)
+
+
+def _trim_title_clause(raw: str, max_len: int = 60) -> str:
+    """A title, not a sentence about the person."""
+    title = _TITLE_CLAUSE_RE.sub("", (raw or "").strip())
+    title = title.strip(" .,-–—·|")
+    return title[:max_len].strip()
 
 
 # Company-name comparison lives in company_classification -- the lowest

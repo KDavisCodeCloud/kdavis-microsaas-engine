@@ -1465,3 +1465,48 @@ class TestThreeWayBudgetSplit:
         d = stats.as_dict()
         assert d["queries_total"] == (d["queries_discovery"] + d["queries_decision_maker"]
                                      + d["brave_domain_queries"])
+
+
+class TestTitleClauseTrim:
+    """A snippet runs on past the title into prose, and the capture window is
+    60 characters. The 2026-10-01 run stored "VP of Data, after running
+    analytics and data engineering" as a TITLE -- a sentence about the person,
+    which MKT-O2 would assert verbatim as their role."""
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("VP of Data, after running analytics and data engineering", "VP of Data"),
+        ("Head of Platform and also leading SRE", "Head of Platform"),
+        ("Director of Engineering, who joined in 2019", "Director of Engineering"),
+        ("CTO, responsible for the whole estate", "CTO"),
+    ])
+    def test_prose_clauses_are_cut(self, raw, expected):
+        from agents.marketing.company_first_sourcing import _trim_title_clause
+
+        assert _trim_title_clause(raw) == expected
+
+    @pytest.mark.parametrize("raw", [
+        "VP, Infrastructure",
+        "Vice-President, Infrastructure",
+        "VP of Engineering",
+        "CTO & co-founder",
+        "Head of Platform",
+        "Director of Platform Engineering",
+    ])
+    def test_real_titles_are_preserved(self, raw):
+        """A comma followed by a CAPITALISED word is part of the title; only a
+        comma followed by lowercase starts prose. Compiling the trim pattern
+        with re.IGNORECASE defeated that lookahead and truncated
+        "VP, Infrastructure" to "VP" -- the same trap that let prose through
+        as contact names."""
+        from agents.marketing.company_first_sourcing import _trim_title_clause
+
+        assert _trim_title_clause(raw) == raw
+
+    def test_length_is_bounded(self):
+        from agents.marketing.company_first_sourcing import _trim_title_clause
+
+        assert len(_trim_title_clause("VP of " + "Engineering " * 20)) <= 60
+
+    def test_end_to_end_through_the_snippet_parser(self):
+        assert parse_decision_maker_title(
+            "Eric Lay. VP of Data, after running analytics at Earnin") == "VP of Data"

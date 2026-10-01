@@ -208,3 +208,72 @@ class TestDiscoveredContact:
         assert DiscoveredContact(name="Jane Doe").is_usable is False
         assert DiscoveredContact(title="CTO").is_usable is False
         assert DiscoveredContact().is_usable is False
+
+
+class TestCaseSensitivityOfNames:
+    """THE bug from the 2026-10-01 consulting run.
+
+    The combined name+title patterns were compiled with a global
+    re.IGNORECASE, which makes `[A-Z][a-z]+` match ANY case -- so prose
+    matched the name shape. The run stored contacts literally called
+    "you will", "and leadership", "or senior", "of MeatEater", "with co" and
+    "Tech Leads", every one of which would have gone into outbound copy as
+    the recipient's name.
+
+    The fix wraps only the TITLE in a scoped inline flag `(?i:...)` so the
+    name stays case-sensitive. These are the exact strings that got through.
+    """
+
+    @pytest.mark.parametrize("text", [
+        "you will - CTO",
+        "and leadership, CEO",
+        "or senior, CEO",
+        "of MeatEater, founder",
+        "with co, founder",
+        "Tech Leads - CTO",
+        "of SofterWare, CEO",
+    ])
+    def test_prose_fragments_are_not_names(self, text):
+        from agents.marketing.contact_discovery import _contact_from_text
+
+        assert _contact_from_text(text, "t") is None, f"{text!r} is not a person"
+
+    @pytest.mark.parametrize("text", [
+        "Strutt Co - CTO",
+        "Acme Labs - CTO",
+        "Northwind Systems, CEO",
+    ])
+    def test_company_names_are_not_people(self, text):
+        """Reuses lead_qualification._COMPANY_SUFFIX_RE rather than growing a
+        second list that could disagree with it."""
+        from agents.marketing.contact_discovery import _contact_from_text
+
+        assert _contact_from_text(text, "t") is None
+
+    @pytest.mark.parametrize("text,name", [
+        ("Jane Doe - CTO", "Jane Doe"),
+        ("Marcus Webb, VP of Engineering", "Marcus Webb"),
+        ("CTO Priya Raman", "Priya Raman"),
+        ("Maria del Carmen, Head of Platform", "Maria del Carmen"),
+    ])
+    def test_real_names_still_parse(self, text, name):
+        from agents.marketing.contact_discovery import _contact_from_text
+
+        result = _contact_from_text(text, "t")
+        assert result is not None, f"{text!r} should still parse"
+        assert result.name == name
+
+    def test_titles_remain_case_insensitive(self):
+        """Only the NAME became case-sensitive; a lowercase title must still
+        match, because real pages write "cto" and "Head of engineering"."""
+        from agents.marketing.contact_discovery import _contact_from_text
+
+        assert _contact_from_text("Jane Doe - cto", "t") is not None
+        assert _contact_from_text("Marcus Webb, head of engineering", "t") is not None
+
+    def test_jd_prose_around_the_name_stays_case_insensitive(self):
+        """"You will report to" / "you will report to" must both work, while
+        the captured name stays case-sensitive."""
+        assert from_jd_text("You will report to Jane Doe, VP of Engineering.") is not None
+        assert from_jd_text("you will report to Jane Doe, VP of Engineering.") is not None
+        assert from_jd_text("You will report to the team, VP of Engineering.") is None

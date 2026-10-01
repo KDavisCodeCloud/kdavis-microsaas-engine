@@ -37,7 +37,11 @@ from urllib.robotparser import RobotFileParser
 
 import httpx
 
-from agents.marketing.lead_qualification import classify_seniority, is_negative_title
+from agents.marketing.lead_qualification import (
+    _COMPANY_SUFFIX_RE,
+    classify_seniority,
+    is_negative_title,
+)
 
 log = logging.getLogger(__name__)
 
@@ -74,21 +78,39 @@ _BUYER_TITLE_RE = re.compile(
 # backtrack to "Jane Doe", which is the actual person.
 _NAME_RE = r"[A-Z][a-z]+(?:\s+(?:van|von|de|der|del|da|di|la))?\s+[A-Z][a-z'\u2019\-]+"
 
+# CRITICAL: the NAME portion must stay CASE-SENSITIVE while the title stays
+# case-insensitive, so the title group is wrapped in a scoped inline flag
+# `(?i:...)` instead of compiling the whole pattern with re.IGNORECASE.
+#
+# The first version used a global re.IGNORECASE, which made `[A-Z][a-z]+`
+# match any case and turned prose into contact names. The 2026-10-01
+# consulting run duly stored contacts called "you will", "and leadership",
+# "or senior", "of MeatEater" and "with co" -- fragments that would have gone
+# into outbound copy as the recipient's name.
+_TITLE_I = f"(?i:{_BUYER_TITLE_RE.pattern})"
+
 # "Jane Doe, VP of Engineering" / "Jane Doe - CTO" / "Jane Doe – Head of Platform"
-_NAME_THEN_TITLE_RE = re.compile(
-    rf"({_NAME_RE})\s*(?:,|-|–|—|\||·)\s*({_BUYER_TITLE_RE.pattern})", re.IGNORECASE
-)
+_NAME_THEN_TITLE_RE = re.compile(rf"({_NAME_RE})\s*(?:,|-|–|—|\||·)\s*({_TITLE_I})")
 # "CTO Jane Doe" / "VP of Engineering, Jane Doe"
-_TITLE_THEN_NAME_RE = re.compile(
-    rf"({_BUYER_TITLE_RE.pattern})\s*(?:,|-|–|—|:)?\s+({_NAME_RE})", re.IGNORECASE
+_TITLE_THEN_NAME_RE = re.compile(rf"({_TITLE_I})\s*(?:,|-|–|—|:)?\s+({_NAME_RE})")
+
+# JD phrasing that names a hiring manager. The surrounding prose is matched
+# case-insensitively; the captured NAME is not.
+_JD_MANAGER_RES = (
+    re.compile(rf"(?i:report(?:s|ing)?\s+(?:directly\s+)?to\s+(?:our\s+)?)({_NAME_RE})\s*,?\s*(?i:(?:our\s+)?)({_TITLE_I})"),
+    re.compile(rf"(?i:\byou(?:'ll| will)\s+report\s+to\s+)({_NAME_RE})\s*,?\s*({_TITLE_I})"),
+    re.compile(rf"(?i:\b(?:hiring\s+manager|this\s+role\s+reports\s+to)\s*:?\s*)({_NAME_RE})\s*,?\s*({_TITLE_I})?"),
 )
 
-# JD phrasing that names a hiring manager.
-_JD_MANAGER_RES = (
-    re.compile(rf"report(?:s|ing)?\s+(?:directly\s+)?to\s+(?:our\s+)?({_NAME_RE})\s*,?\s*(?:our\s+)?({_BUYER_TITLE_RE.pattern})", re.IGNORECASE),
-    re.compile(rf"\byou(?:'ll| will)\s+report\s+to\s+({_NAME_RE})\s*,?\s*({_BUYER_TITLE_RE.pattern})", re.IGNORECASE),
-    re.compile(rf"\b(?:hiring\s+manager|this\s+role\s+reports\s+to)\s*:?\s*({_NAME_RE})\s*,?\s*({_BUYER_TITLE_RE.pattern})?", re.IGNORECASE),
-)
+# Prose words that can begin a capitalised two-word run at a sentence start
+# ("Our Team", "The Platform") but never begin a person's name.
+_NOT_NAME_FIRST_WORD = frozenset({
+    "the", "our", "your", "their", "this", "that", "these", "those", "and",
+    "or", "with", "of", "for", "from", "you", "we", "they", "it", "as", "at",
+    "in", "on", "by", "to", "all", "any", "each", "both", "join", "meet",
+    "about", "contact", "apply", "report", "reporting", "lead", "leads",
+    "tech", "senior", "staff", "principal", "head", "chief", "vice",
+})
 
 _TAG_RE = re.compile(r"<(?:script|style)[^>]*>.*?</(?:script|style)>", re.I | re.S)
 _ANY_TAG_RE = re.compile(r"<[^>]+>")
@@ -146,6 +168,24 @@ def _plausible_name(value: str) -> bool:
     if not v or len(v) > 60:
         return False
     if v.lower() in _NOT_A_NAME or any(v.lower().startswith(p) for p in _NOT_A_NAME):
+        return False
+    words = v.split()
+    if len(words) < 2:
+        return False
+    # Belt and braces alongside the case-sensitive regex: a prose word can
+    # legitimately be capitalised at a sentence start, so "Tech Leads" and
+    # "Senior Engineers" must still be refused even though both words are
+    # capitalised.
+    if words[0].lower() in _NOT_NAME_FIRST_WORD or words[-1].lower() in _NOT_NAME_FIRST_WORD:
+        return False
+    # Every word must START uppercase, checked case-SENSITIVELY.
+    if not all(w[:1].isupper() for w in words if w and w.lower() not in
+               {"van", "von", "de", "der", "del", "da", "di", "la"}):
+        return False
+    # A company name is not a person. Reuses lead_qualification's existing
+    # suffix detector rather than growing a second list that could disagree
+    # with it -- "Strutt Co" came through as a contact on the 2026-10-01 run.
+    if _COMPANY_SUFFIX_RE.search(v):
         return False
     # A role word inside the "name" means the split went wrong.
     return classify_seniority(v) == "unknown"
