@@ -331,3 +331,34 @@ STRIPE_PRICE_BROKERAGE=price_...       # product-specific Price ID (if 3-tier)
 **Owner-only blocking action, per product:** creating the Product + Price objects in the Stripe dashboard (or Claude Code doing it via API in the setup script, when explicitly authorized) and registering the webhook endpoint — Claude Code does not create Stripe accounts or generate live secret keys/Price IDs on its own initiative, per the existing "no autonomous outbound" / HITL design (see `MSE-Build-Order.md`). Once the owner drops the Price IDs and webhook secret into the product's env config, Claude Code wires the checkout session creation endpoint and the `checkout.session.completed`/subscription-lifecycle webhook handler.
 
 **Showing Signal is the reference implementation of this pattern** (2026-08-06): Product "Showing Signal", tiers `solo`/`team`/`brokerage` mapping to Solo Agent $97/mo, Independent Team $197/mo, Brokerage $397/mo, lookup keys `showingsignal_solo`/`showingsignal_team`/`showingsignal_brokerage`, webhook at `/billing/webhook`. The three Price IDs and the webhook secret are the only owner-only blocking action remaining on Showing Signal's Stripe side — see `showing-signal/CLAUDE.md`'s Build Status section.
+
+## RULE: mse-api DEPLOY CONFIGURATION (2026-10-01)
+
+**The Dockerfile is the single source of truth for how mse-api starts.** `CMD`
+carries the start command. Railway's service-level `builder` and `startCommand`
+overrides stay cleared, and `railpack.json` / `Procfile` are deleted.
+
+Before 2026-10-01 there were FOUR config sources — `railway.json`,
+`railpack.json`, `Procfile`, and Railway service-level overrides — naming three
+different start commands, while the *effective* builder was not the one any
+file claimed. Reconciling them caused a ten-minute 502. Full write-up:
+`docs/railway-start-command.md`.
+
+**STANDING RULE: no production service-config change without proving it in a
+separate Railway environment first.** Build and run the image locally, deploy
+to staging, confirm `/health` 200 plus a smoke test, and only then promote —
+keeping the last known-good deployment id for `deploymentRollback`.
+
+Three things that look true and are not:
+
+1. **A deployment can report SUCCESS while the container crash-loops.** Build
+   status is not health. Poll `/health` until 200 and read the DEPLOY logs.
+   `healthcheckPath=/health` makes Railway enforce it, so set it.
+2. **`deploymentRedeploy` reuses the old config snapshot** — after a
+   service-level change it keeps running the previous command and makes the fix
+   look ineffective. Use `serviceInstanceDeployV2`.
+3. **`get-service-config`'s `builder` is the service DEFAULT, not the effective
+   builder.** Confirm against a successful deployment's build logs.
+
+`supabase/migrations/` must stay in the image: `api/main.py`'s lifespan runs
+`run_pending_migrations()` against those files before the app serves a request.
