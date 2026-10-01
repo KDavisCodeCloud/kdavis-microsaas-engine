@@ -613,12 +613,11 @@ class TestBravePacing:
         assert len(delays) == 1
 
 
-class TestBoardCap:
-    """ATS expansion is free in Brave quota but not in wall clock: one
-    HTTP request (20s timeout) + a 1-2.5s pause per board. An uncapped run
-    that discovered 200 boards would run over an hour and get killed
-    mid-flight, leaving mse_lead_finder_runs stuck at "running" with no
-    funnel_stats -- the un-attributable failure this build removes."""
+class TestBoardSweepBudget:
+    """Decision 4 (2026-10-01): poll ALL cached boards, bounded on wall clock
+    rather than a board count. Expansion costs no Brave quota, so a count cap
+    was discarding free signal -- the first live runs discovered 225 boards
+    and polled 60, leaving 165 unread."""
 
     def _scraper(self, n):
         return FakeScraper(responses={
@@ -626,37 +625,56 @@ class TestBoardCap:
                 ats_result(f"https://boards.greenhouse.io/co{i}/jobs/1") for i in range(n)
             ],
             "site:linkedin.com/in": [],
+            "official website": [],
         })
 
-    def test_boards_polled_never_exceeds_the_cap(self):
-        payloads = {f"co{i}": GREENHOUSE_PAYLOAD for i in range(30)}
+    def test_all_discovered_boards_are_polled_when_time_allows(self):
+        payloads = {f"co{i}": GREENHOUSE_PAYLOAD for i in range(25)}
         _rows, stats = find_company_first_signals(
-            "p1", ["platform engineer"], scraper=self._scraper(30),
-            ats_client=board_client(payloads), max_queries=40, max_boards=5,
-            sleep=NO_SLEEP,
+            "p1", ["platform engineer"], scraper=self._scraper(25),
+            ats_client=board_client(payloads), max_queries=40, taxonomy=TAXONOMY,
+            http_get=fake_homepage(), dns_resolves=fake_dns, sleep=NO_SLEEP,
         )
-        assert stats.boards_polled == 5
-        assert stats.boards_skipped_over_cap == 25
+        assert stats.boards_polled == 25, "no 60-board cap any more"
+        assert stats.boards_not_reached == 0
 
-    def test_skipped_boards_are_counted_not_silently_dropped(self):
+    def test_wall_clock_budget_stops_the_sweep(self):
+        """A fake clock that jumps 100s per reading exhausts a 250s budget
+        after a few boards -- no real time passes in the test."""
+        ticks = iter(range(0, 100_000, 100))
+
+        payloads = {f"co{i}": GREENHOUSE_PAYLOAD for i in range(25)}
+        _rows, stats = find_company_first_signals(
+            "p1", ["platform engineer"], scraper=self._scraper(25),
+            ats_client=board_client(payloads), max_queries=40, taxonomy=TAXONOMY,
+            board_sweep_budget_seconds=250, clock=lambda: next(ticks),
+            http_get=fake_homepage(), dns_resolves=fake_dns, sleep=NO_SLEEP,
+        )
+        assert 0 < stats.boards_polled < 25
+        assert stats.boards_not_reached > 0
+
+    def test_unreached_boards_are_counted_not_treated_as_failures(self):
+        ticks = iter(range(0, 100_000, 500))
+        payloads = {f"co{i}": GREENHOUSE_PAYLOAD for i in range(10)}
         _rows, stats = find_company_first_signals(
             "p1", ["platform engineer"], scraper=self._scraper(10),
-            ats_client=board_client({}), max_queries=40, max_boards=3,
-            sleep=NO_SLEEP,
+            ats_client=board_client(payloads), max_queries=40, taxonomy=TAXONOMY,
+            board_sweep_budget_seconds=400, clock=lambda: next(ticks),
+            http_get=fake_homepage(), dns_resolves=fake_dns, sleep=NO_SLEEP,
         )
-        assert stats.boards_skipped_over_cap == 7
-        assert "boards_skipped_over_cap" in stats.as_dict()
+        d = stats.as_dict()
+        assert d["boards_not_reached"] > 0
+        # nothing was learned about them, so they must not inflate failures
+        assert d["ats_client_stats"]["boards_failed"] == 0
 
-    def test_under_the_cap_nothing_is_skipped(self):
-        payloads = {f"co{i}": GREENHOUSE_PAYLOAD for i in range(3)}
+    def test_safety_ceiling_still_truncates_an_absurd_cache(self):
+        payloads = {f"co{i}": GREENHOUSE_PAYLOAD for i in range(12)}
         _rows, stats = find_company_first_signals(
-            "p1", ["platform engineer"], scraper=self._scraper(3),
-            ats_client=board_client(payloads), max_queries=40, max_boards=60,
-            sleep=NO_SLEEP,
+            "p1", ["platform engineer"], scraper=self._scraper(12),
+            ats_client=board_client(payloads), max_queries=40, taxonomy=TAXONOMY,
+            max_boards=4, http_get=fake_homepage(), dns_resolves=fake_dns, sleep=NO_SLEEP,
         )
-        assert stats.boards_skipped_over_cap == 0
-        assert stats.boards_polled == 3
-
+        assert stats.boards_polled == 4
 
 class TestBoardTokenCacheWrite:
     def test_timestamps_are_real_iso_not_the_string_now(self):
@@ -914,7 +932,7 @@ class TestCallerOwnedStats:
             stats = type("S", (), {"as_dict": lambda self: {}})()
             board_status: dict = {}
 
-            def fetch_boards(self, _refs):
+            def fetch_boards(self, _refs, **_kw):
                 raise RuntimeError("ATS exploded")
 
         scraper = FakeScraper(responses={

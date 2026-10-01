@@ -181,3 +181,55 @@ class FakeSupabase:
 @pytest.fixture
 def fake_db():
     return FakeSupabase()
+
+
+# ── No test may touch the real network ───────────────────────────────────
+#
+# Added 2026-10-01 after agents/marketing/contact_discovery.py started
+# fetching company /team and /robots.txt pages: several existing tests called
+# find_company_first_signals without stubbing http_get, and the suite went
+# from 14 seconds to hanging — each unstubbed call sitting on a 12-second
+# timeout against a domain like "northwind.com".
+#
+# A hang is the worst possible failure mode here: it looks like an infinite
+# loop, not a missing stub. This makes the real failure immediate and names
+# the fix, and it closes the whole class of problem rather than the three
+# tests that happened to surface it.
+@pytest.fixture(autouse=True)
+def _no_real_network(monkeypatch, request):
+    """Fail fast on any un-stubbed outbound HTTP.
+
+    Opt out for a test that genuinely needs the network with
+    @pytest.mark.allow_network — nothing in this suite does today.
+    """
+    if request.node.get_closest_marker("allow_network"):
+        return
+
+    def _blocked(*args, **kwargs):
+        target = args[0] if args else kwargs.get("url", "<unknown>")
+        raise RuntimeError(
+            f"Unstubbed network call to {target!r}. Inject http_get / a fake client "
+            f"in this test rather than reaching the internet."
+        )
+
+    import httpx
+
+    # Only the MODULE-LEVEL convenience functions, which always open a real
+    # connection. httpx.Client itself is deliberately left alone: FastAPI's
+    # TestClient is an httpx.Client over an in-process ASGI transport, so
+    # patching Client.request would break every route test while blocking no
+    # actual network access.
+    for name in ("get", "post", "put", "patch", "delete", "request", "head", "stream"):
+        monkeypatch.setattr(httpx, name, _blocked, raising=False)
+
+    # socket.create_connection catches anything bypassing httpx (urllib,
+    # smtplib, raw sockets). socket.socket.connect is NOT patched: it is used
+    # by in-process machinery that never leaves the host.
+    import socket
+
+    def _blocked_socket(address, *args, **kwargs):
+        raise RuntimeError(
+            f"Unstubbed outbound connection to {address!r} in a test -- inject a fake client."
+        )
+
+    monkeypatch.setattr(socket, "create_connection", _blocked_socket, raising=False)

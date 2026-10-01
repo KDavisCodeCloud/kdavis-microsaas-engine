@@ -427,13 +427,39 @@ class AtsBoardClient:
         self.board_status[ref.cache_key] = "ok" if postings else "empty"
         return postings
 
-    def fetch_boards(self, refs: Iterable[BoardRef]) -> dict[str, list[AtsPosting]]:
-        """Several boards, deduped by cache_key, with a polite pause
-        between distinct boards. Returns {cache_key: postings}."""
+    def fetch_boards(
+        self,
+        refs: Iterable[BoardRef],
+        *,
+        deadline_seconds: Optional[float] = None,
+        clock: Optional[Callable[[], float]] = None,
+    ) -> dict[str, list[AtsPosting]]:
+        """Several boards, deduped by cache_key, with a polite pause between
+        distinct boards. Returns {cache_key: postings}.
+
+        `deadline_seconds` bounds the whole sweep on WALL CLOCK rather than
+        on a board count (Kelvin's decision 4, 2026-10-01: poll all cached
+        boards, with a wall-clock bound). Board expansion costs no Brave
+        quota, so the only real limit is time: each board is one HTTP request
+        (20s timeout) plus a 1-2.5s pause. Stopping on elapsed time polls as
+        many boards as the budget allows instead of an arbitrary 60, while
+        still guaranteeing the run cannot outlive its scheduler and strand
+        the mse_lead_finder_runs row at "running".
+
+        Boards not reached are simply absent from the result; the caller
+        reports them (`boards_not_reached`) rather than treating them as
+        failures, because nothing was learned about them either way.
+        """
+        now = clock or time.monotonic
+        started = now()
         seen: dict[str, list[AtsPosting]] = {}
         for i, ref in enumerate(refs):
             if ref.cache_key in seen:
                 continue
+            if deadline_seconds is not None and (now() - started) >= deadline_seconds:
+                log.info("[ATS] wall-clock budget %.0fs reached after %d boards -- stopping sweep",
+                         deadline_seconds, len(seen))
+                break
             if i:
                 self._polite_pause()
             seen[ref.cache_key] = self.fetch_board(ref)

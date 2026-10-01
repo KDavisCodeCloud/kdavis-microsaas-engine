@@ -183,6 +183,16 @@ class RoleMatch:
         return out
 
 
+# Intent penalty for a posting whose date cannot be established (Kelvin's
+# decision 3, 2026-10-01: "keep them; apply a x0.7 intent multiplier instead
+# of discarding"). The first two live runs discarded 83 and 84 such postings
+# respectively -- roughly half of every taxonomy match -- on a 30-day
+# freshness filter they could never satisfy. A board listing a role usually
+# means it is open, so the honest treatment is a weaker signal, not no
+# signal.
+UNDATED_INTENT_MULTIPLIER = 0.7
+
+
 def matching_postings(
     postings: Iterable[Any],
     taxonomy: RoleTaxonomy,
@@ -198,30 +208,54 @@ def matching_postings(
     (role_negative) versus simply not an infrastructure role at all --
     distinguishing those two is what tells you whether the include list or
     the negative list needs tuning.
+
+    A posting with NO ascertainable date is KEPT (counted under
+    `undated_kept`), and the caller applies UNDATED_INTENT_MULTIPLIER to its
+    intent score. Only a posting whose date is KNOWN and older than
+    `max_age_days` is dropped -- "we cannot tell when this was posted" and
+    "this was posted four months ago" are different facts and were being
+    conflated.
     """
     matched: list[Any] = []
     drops: dict[str, int] = {}
 
-    def _drop(reason: str) -> None:
+    def _count(reason: str) -> None:
         drops[reason] = drops.get(reason, 0) + 1
 
     for posting in postings:
         title = getattr(posting, "title", None)
         result = taxonomy.match(title)
         if result.negatives:
-            _drop(f"negative_{result.negatives[0]}")
+            _count(f"negative_{result.negatives[0]}")
             continue
         if not result.families:
-            _drop("no_role_family")
+            _count("no_role_family")
             continue
-        if max_age_days is not None:
-            age = getattr(posting, "age_days", None)
-            if age is None or age > max_age_days:
-                _drop("stale_or_undated")
-                continue
+        age = getattr(posting, "age_days", None)
+        if age is None:
+            # Kept, but tracked -- a run that is mostly undated postings
+            # should be visible in the funnel rather than silently ranked.
+            _count("undated_kept")
+        elif max_age_days is not None and age > max_age_days:
+            _count("stale_dated")
+            continue
         matched.append(posting)
 
     return matched, drops
+
+
+def intent_multiplier_for(postings: Iterable[Any]) -> tuple[float, str]:
+    """(multiplier, reason) for a company's matching postings.
+
+    Full weight when at least one matching posting has a known date; the
+    undated penalty only applies when NOTHING about this company's hiring
+    can be dated. One dated posting is enough to establish that the board is
+    current.
+    """
+    ages = [getattr(p, "age_days", None) for p in postings]
+    if any(a is not None for a in ages):
+        return 1.0, "dated posting present"
+    return UNDATED_INTENT_MULTIPLIER, f"all postings undated (x{UNDATED_INTENT_MULTIPLIER})"
 
 
 # ── Size proxy (Kelvin's decision 4) ─────────────────────────────────────

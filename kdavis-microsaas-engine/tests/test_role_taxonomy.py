@@ -18,7 +18,9 @@ from agents.marketing.role_taxonomy import (
     DEFAULT_NEGATIVE,
     SIZE_PROXY_MAX_OPEN_ROLES,
     SIZE_PROXY_MIN_OPEN_ROLES,
+    UNDATED_INTENT_MULTIPLIER,
     RoleTaxonomy,
+    intent_multiplier_for,
     matching_postings,
     size_proxy_in_band,
 )
@@ -189,12 +191,31 @@ class TestMatchingPostings:
         assert drops["negative_support"] == 1
         assert drops["no_role_family"] == 1
 
-    def test_undated_posting_dropped_only_when_a_freshness_filter_is_set(self, taxonomy):
+    def test_undated_posting_is_kept_and_counted(self, taxonomy):
+        """Decision 3 (2026-10-01): "keep them; apply a x0.7 intent
+        multiplier instead of discarding". Previously an undated posting was
+        dropped by any freshness filter -- that discarded 83 and 84 postings
+        in the first two live runs, about half of every taxonomy match."""
         postings = [_Posting("Platform Engineer", age_days=None)]
-        assert len(matching_postings(postings, taxonomy, max_age_days=None)[0]) == 1
         matched, drops = matching_postings(postings, taxonomy, max_age_days=30)
+        assert len(matched) == 1
+        assert drops["undated_kept"] == 1
+        assert "stale_dated" not in drops
+
+    def test_a_genuinely_old_dated_posting_is_still_dropped(self):
+        """"We cannot tell when this was posted" and "this was posted four
+        months ago" are different facts and were being conflated."""
+        tax = RoleTaxonomy.from_config(None)
+        matched, drops = matching_postings(
+            [_Posting("Platform Engineer", age_days=400)], tax, max_age_days=30)
         assert matched == []
-        assert drops["stale_or_undated"] == 1
+        assert drops["stale_dated"] == 1
+
+    def test_no_freshness_filter_keeps_everything_relevant(self, taxonomy):
+        postings = [_Posting("Platform Engineer", age_days=None),
+                    _Posting("DevOps Engineer", age_days=400)]
+        matched, _drops = matching_postings(postings, taxonomy, max_age_days=None)
+        assert len(matched) == 2
 
     def test_title_only_never_the_description(self, taxonomy):
         """Matching the description turns "we use Terraform to manage our
@@ -242,3 +263,41 @@ class TestSizeProxy:
     def test_declared_defaults_match_the_spec(self):
         assert SIZE_PROXY_MIN_OPEN_ROLES == 3
         assert SIZE_PROXY_MAX_OPEN_ROLES == 40
+
+
+class TestUndatedIntentMultiplier:
+    """Decision 3: undated postings are kept at x0.7 intent rather than
+    discarded. The penalty is per-COMPANY, not per-posting: one dated
+    posting is enough to establish that the board is current."""
+
+    def test_all_undated_gets_the_penalty(self):
+        mult, reason = intent_multiplier_for([_Posting("Platform Engineer", age_days=None)])
+        assert mult == UNDATED_INTENT_MULTIPLIER == 0.7
+        assert "undated" in reason
+
+    def test_one_dated_posting_restores_full_weight(self):
+        mult, reason = intent_multiplier_for([
+            _Posting("Platform Engineer", age_days=None),
+            _Posting("DevOps Engineer", age_days=3),
+        ])
+        assert mult == 1.0
+        assert "dated posting present" in reason
+
+    def test_empty_list_is_penalised_not_crashed(self):
+        mult, _ = intent_multiplier_for([])
+        assert mult == UNDATED_INTENT_MULTIPLIER
+
+    def test_the_multiplier_actually_lowers_the_intent_score(self):
+        from agents.marketing.lead_qualification import intent_score
+
+        full = intent_score(posting_age_days=None, open_role_count=3, undated_multiplier=1.0)
+        penalised = intent_score(posting_age_days=None, open_role_count=3, undated_multiplier=0.7)
+        assert penalised.value < full.value
+        assert any("undated" in r for r in penalised.reasons)
+
+    def test_an_undated_company_still_qualifies(self):
+        """The point of the change: a weaker signal, not no signal."""
+        from agents.marketing.lead_qualification import intent_score
+
+        assert intent_score(posting_age_days=None, open_role_count=4,
+                           stack=["Azure", "Terraform"], undated_multiplier=0.7).value > 0

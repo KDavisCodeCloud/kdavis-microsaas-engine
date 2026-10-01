@@ -1,0 +1,41 @@
+# Keep the image small, but stay CONSERVATIVE: this excludes only things
+# proven not to be imported or read at runtime. The app's lifespan reads
+# supabase/migrations/*.sql at boot, and agents/ imports rag/, so neither is
+# excluded. When in doubt, leave it in -- the whole repo minus frontend/ and
+# venv/ is about 7MB.
+
+# 786MB of Next.js app; the API serves no static files (no StaticFiles mount).
+frontend/
+
+# Local virtualenvs and caches -- never the ones the image should use.
+venv/
+.venv/
+node_modules/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# History and tooling, not runtime inputs.
+.git/
+.github/
+.gitignore
+.dockerignore
+Dockerfile
+
+# Local-only env files. Railway injects real variables; baking a stale .env
+# into the image would silently shadow them.
+.env
+.env.*
+!.env.example
+
+# Scratch and editor state.
+experiments/
+.obsidian/
+*.log
+*.tsbuildinfo
+.DS_Store

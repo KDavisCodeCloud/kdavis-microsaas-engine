@@ -640,6 +640,7 @@ def intent_score(
     open_role_count: int = 0,
     stack: Optional[list[str]] = None,
     funding_months: Optional[int] = None,
+    undated_multiplier: float = 1.0,
     config: Optional[ScoringConfig] = None,
 ) -> Score:
     """
@@ -687,6 +688,14 @@ def intent_score(
         reasons.append(f"funded {funding_months}mo ago")
     elif funding_months is not None:
         reasons.append(f"funded {funding_months}mo ago (stale)")
+
+    # Undated-posting penalty (Kelvin's decision 3, 2026-10-01). Applied at
+    # the END, to the whole intent score, because the uncertainty is about
+    # WHEN this company is hiring -- which discounts every intent component,
+    # not just the freshness term.
+    if undated_multiplier != 1.0:
+        total *= undated_multiplier
+        reasons.append(f"undated postings (x{undated_multiplier})")
 
     return Score(round(min(1.0, total), 3), reasons)
 

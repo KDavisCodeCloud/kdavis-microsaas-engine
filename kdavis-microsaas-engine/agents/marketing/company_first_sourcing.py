@@ -78,6 +78,10 @@ from agents.marketing.company_classification import (
     normalise_company_name,
     text_mentions_company,
 )
+from agents.marketing.contact_discovery import (
+    ContactDiscoveryStats,
+    discover_contact_free,
+)
 from agents.marketing.domain_resolution import (
     MAX_BRAVE_DOMAIN_QUERIES,
     DomainResolution,
@@ -85,6 +89,7 @@ from agents.marketing.domain_resolution import (
 )
 from agents.marketing.role_taxonomy import (
     RoleTaxonomy,
+    intent_multiplier_for,
     size_proxy_in_band,
 )
 from agents.marketing.role_taxonomy import matching_postings as taxonomy_matching_postings
@@ -119,15 +124,20 @@ DECISION_MAKER_TITLES = ("CTO", "VP Engineering", "Head of Platform", "Director 
 # A board that has failed this many times in a row stops being polled.
 MAX_CONSECUTIVE_BOARD_FAILURES = 3
 
-# Boards polled per run. ATS expansion costs no Brave quota, but it is not
-# free in WALL CLOCK: each board is one HTTP request (20s timeout) plus a
-# 1-2.5s politeness pause, so an uncapped run that discovered 200 boards
-# could sit there for over an hour and get killed mid-flight -- leaving
-# the mse_lead_finder_runs row stuck at "running" with no funnel_stats,
-# which is exactly the un-attributable failure this build removes.
-# Candidates are prioritised before the cap bites (see
-# find_company_first_signals), so the cap drops the least promising.
-MAX_BOARDS_PER_RUN = 60
+# Board expansion is bounded on WALL CLOCK, not on a board count (Kelvin's
+# decision 4, 2026-10-01: "raise the per-run cap from 60 to all cached
+# boards, with a wall-clock bound"). It costs no Brave quota, so a count cap
+# was throwing away free signal -- the first live runs discovered 225 and
+# polled 60, leaving 165 unread. Time is the real constraint: one HTTP
+# request (20s timeout) plus a 1-2.5s pause per board. A bound is still
+# required so a run cannot outlive its scheduler and strand the
+# mse_lead_finder_runs row at "running" with no funnel_stats.
+#
+# MAX_BOARDS_PER_RUN remains as a safety ceiling, raised well above the
+# cache size, so a runaway cache cannot produce an unbounded sweep even if
+# the clock budget is misconfigured.
+BOARD_SWEEP_BUDGET_SECONDS = 900
+MAX_BOARDS_PER_RUN = 1000
 
 # Brave request pacing. BraveSearchScraper.scrape() paces itself, but
 # _search() -- which this module calls directly, because v2 does not use
@@ -163,6 +173,7 @@ class FunnelStats:
     board_tokens_from_cache: int = 0
     boards_polled: int = 0
     boards_skipped_over_cap: int = 0
+    boards_not_reached: int = 0
     postings_returned: int = 0
     postings_title_matched: int = 0
     companies_considered: int = 0
@@ -178,6 +189,8 @@ class FunnelStats:
     downweighted: int = 0
     # Stage 2 (contact lookup -- only for Stage 1 passers)
     contact_found: int = 0
+    contacts_from_free_sources: dict[str, int] = field(default_factory=dict)
+    contact_discovery: dict = field(default_factory=dict)
     contact_pending: int = 0
     email_grades: dict[str, int] = field(default_factory=dict)
     dropped_negative_title: dict[str, int] = field(default_factory=dict)
@@ -729,11 +742,13 @@ def qualify_candidate(
         exclusion_multiplier=multiplier,
         config=cfg,
     )
+    undated_mult, undated_reason = intent_multiplier_for(candidate.matching)
     intent = intent_score(
         posting_age_days=candidate.freshest_age_days,
         open_role_count=len(candidate.matching),
         stack=stack,
         funding_months=funding,
+        undated_multiplier=undated_mult,
         config=cfg,
     )
 
@@ -817,6 +832,8 @@ def find_company_first_signals(
     ats_client: Optional[AtsBoardClient] = None,
     max_queries: int = 40,
     max_boards: int = MAX_BOARDS_PER_RUN,
+    board_sweep_budget_seconds: float = BOARD_SWEEP_BUDGET_SECONDS,
+    clock: Optional[Callable[[], float]] = None,
     max_age_days: Optional[int] = 30,
     existing_domains: Optional[set] = None,
     existing_companies: Optional[set] = None,
@@ -900,12 +917,18 @@ def find_company_first_signals(
     client = ats_client or AtsBoardClient()
     ordered = sorted(refs.values(), key=lambda r: r.cache_key not in cached_keys)
     if len(ordered) > max_boards:
-        log.info("[CompanyFirst] %d boards discovered, polling the first %d this run",
-                 len(ordered), max_boards)
-        stats.boards_skipped_over_cap = len(ordered) - max_boards
+        log.warning("[CompanyFirst] %d boards exceeds the %d safety ceiling -- truncating",
+                    len(ordered), max_boards)
         ordered = ordered[:max_boards]
-    boards = client.fetch_boards(ordered)
+    log.info("[CompanyFirst] sweeping up to %d boards within %.0fs",
+             len(ordered), board_sweep_budget_seconds)
+    boards = client.fetch_boards(
+        ordered, deadline_seconds=board_sweep_budget_seconds, clock=clock,
+    )
     stats.boards_polled = len(boards)
+    # Not reached within the time budget. NOT a failure -- nothing was
+    # learned about these either way, and they stay cached for the next run.
+    stats.boards_not_reached = max(0, len(ordered) - len(boards))
     stats.ats_client_stats = client.stats.as_dict()
 
     if db is not None:
@@ -930,14 +953,23 @@ def find_company_first_signals(
     # Step 3: candidates (taxonomy-matched roles).
     candidates = build_candidates(boards, refs, taxonomy, max_age_days=max_age_days, stats=stats)
 
-    # Most matching roles first, freshest as the tie-break, so a tight
-    # contact/domain budget is spent on the strongest companies rather than
-    # in board-fetch order.
-    candidates.sort(key=lambda c: (len(c.matching), -(c.freshest_age_days or 10_000)), reverse=True)
+    # Ordering decides who gets the scarce contact/domain budget, so it is
+    # explicit rather than incidental (Kelvin's decision 3: "Dated postings
+    # within 30 days rank first"):
+    #   1. a dated posting inside the freshness window beats an undated one
+    #   2. then the number of matching roles
+    #   3. then recency, with undated treated as oldest
+    def _rank(c: CompanyCandidate) -> tuple:
+        ages = [p.age_days for p in c.matching if p.age_days is not None]
+        has_fresh_dated = any(a <= (max_age_days or 30) for a in ages)
+        return (1 if has_fresh_dated else 0, len(c.matching), -(min(ages) if ages else 10_000))
+
+    candidates.sort(key=_rank, reverse=True)
 
     rows: list[dict] = []
     seen_domains: set = set()
     domain_stats_sink: dict = {}
+    contact_stats = ContactDiscoveryStats()
     domain_budget = max_brave_domain_queries
 
     for candidate in candidates:
@@ -988,8 +1020,24 @@ def find_company_first_signals(
             continue
 
         # ── STAGE 2: who do we talk to? Only for Stage 1 passers. ──
+        #
+        # FREE SOURCES FIRST (decision 5a): the JD's own named hiring
+        # manager costs nothing at all, and the company's /team, /about,
+        # /leadership pages cost one GET each against a domain Stage 1 has
+        # already verified. Brave is the last resort, not the first.
         contact = None
-        if lookup_decision_makers and stats.queries_decision_maker < dm_budget:
+        free = discover_contact_free(
+            domain=resolved_domain,
+            jd_text=candidate.jd_text_all,
+            http_get=http_get,
+            stats=contact_stats,
+        )
+        if free and free.is_usable:
+            contact = {"name": free.name, "title": free.title, "profile_url": None}
+            stats.contacts_from_free_sources[free.source or "unknown"] = (
+                stats.contacts_from_free_sources.get(free.source or "unknown", 0) + 1
+            )
+        elif lookup_decision_makers and stats.queries_decision_maker < dm_budget:
             contact = find_decision_maker(scraper, candidate.company, stats=stats, sleep=sleep)
 
         # A profile already used elsewhere: drop the ATTRIBUTION, keep the
@@ -1032,6 +1080,7 @@ def find_company_first_signals(
         qualified["product_id"] = product_id
         rows.append(qualified)
 
+    stats.contact_discovery = contact_stats.as_dict()
     return rows, stats
 
 
