@@ -1533,6 +1533,29 @@ SCRAPER_V2_KEYWORDS: dict[str, list[str]] = {
 }
 
 
+def _record_brave_spend(db, stats) -> int:
+    """Emit the Brave usage event for whatever this run actually spent.
+
+    Called on BOTH the success and failure paths: Brave bills a query when
+    it is issued, so a run that dies after discovery has genuinely spent
+    that quota. Emitting only on success under-reported the month's usage
+    in _this_months_brave_query_count -- the figure ground-rule 5 requires
+    be accurate before any live run.
+    """
+    if stats is None:
+        return 0
+    spent = stats.queries_discovery + stats.queries_decision_maker
+    if not spent:
+        return 0
+    try:
+        _emit_event(db, "brave_search_queries_used",
+                    {"month": date.today().isoformat()[:7], "count": spent})
+    except Exception as exc:
+        # Never let bookkeeping mask the real error on the failure path.
+        log.error("[SCRAPER-V2] failed to record %d Brave queries: %s", spent, exc)
+    return spent
+
+
 def _insert_leads_tolerating_conflicts(db, rows: list[dict], source: str) -> list[dict]:
     """Batch-insert leads, falling back to one-by-one on a unique-constraint
     conflict.
@@ -1602,6 +1625,7 @@ def run_scraper_v2_scout(
       reject          -> not written; counted under a named funnel reason
     """
     from agents.marketing.company_first_sourcing import (
+        FunnelStats,
         find_company_first_signals,
         to_mse_lead_row,
     )
@@ -1624,6 +1648,14 @@ def run_scraper_v2_scout(
         already_used_this_month = _this_months_brave_query_count(db)
         scraper = BraveSearchScraper(query_count=already_used_this_month)
 
+        # Hoisted so the except path can still report Brave spend. Queries
+        # are billed by Brave the moment they're issued, so a run that dies
+        # after discovery has really spent that quota -- emitting the usage
+        # event only on success made failed runs invisible to
+        # _this_months_brave_query_count, which is the number ground-rule 5
+        # requires be accurate before any live run. Two failed v2 runs on
+        # 2026-10-01 spent ~60 unrecorded queries exactly this way.
+        stats = FunnelStats()
         existing_linkedin_urls = {
             r["linkedin_url"]
             for r in (db.table("mse_leads").select("linkedin_url").execute().data or [])
@@ -1631,7 +1663,7 @@ def run_scraper_v2_scout(
         }
 
         qualified, stats = find_company_first_signals(
-            product_id, keywords,
+            product_id, keywords, stats=stats,
             db=db, scraper=scraper, max_queries=max_queries, max_age_days=max_age_days,
             existing_domains=_existing_job_signal_domains(db),
             existing_linkedin_urls=existing_linkedin_urls,
@@ -1644,10 +1676,7 @@ def run_scraper_v2_scout(
             _log_found_activities(db, product_id, inserted)
 
         funnel = stats.as_dict()
-        queries_this_run = stats.queries_discovery + stats.queries_decision_maker
-        if queries_this_run:
-            _emit_event(db, "brave_search_queries_used",
-                        {"month": date.today().isoformat()[:7], "count": queries_this_run})
+        queries_this_run = _record_brave_spend(db, stats)
 
         log.info("SCRAPER-V2 funnel for product %s (run %s): %s", product_id, run_id, funnel)
 
@@ -1667,12 +1696,18 @@ def run_scraper_v2_scout(
         }).eq("id", run_id).execute()
 
     except Exception as exc:
+        spent = _record_brave_spend(db, stats)
         db.table("mse_lead_finder_runs").update({
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "status": "failed", "error_message": str(exc),
+            # Record whatever the funnel DID establish before the failure --
+            # a failed run that discovered 186 boards still learned that.
+            "funnel_stats": stats.as_dict() if stats is not None else None,
             "current_step": None, "estimated_seconds_remaining": None,
         }).eq("id", run_id).execute()
-        _write_audit(db, "lose", product_id, {"run_id": run_id, "error": str(exc), "agent": "scraper_v2"})
+        _write_audit(db, "lose", product_id, {
+            "run_id": run_id, "error": str(exc), "agent": "scraper_v2", "brave_queries": spent,
+        })
         _emit_event(db, "scraper_v2_run_failed", {"product_id": product_id, "run_id": run_id, "error": str(exc)})
         raise RuntimeError(f"Scraper v2 run failed for product {product_id}: {exc}") from exc
 

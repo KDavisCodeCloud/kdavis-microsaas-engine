@@ -628,6 +628,7 @@ def find_company_first_signals(
     lookup_decision_makers: bool = True,
     today: Optional[date] = None,
     sleep: Optional[Callable[[float], None]] = None,
+    stats: Optional[FunnelStats] = None,
 ) -> tuple[list[dict], FunnelStats]:
     """
     The whole v2 pipeline for one product. Returns (qualified rows,
@@ -641,7 +642,10 @@ def find_company_first_signals(
     DECISION_MAKER_BUDGET_SHARE so neither step starves the other.
     """
     keywords = [k for k in keywords if k and k.strip()]
-    stats = FunnelStats()
+    # The caller may own the stats object so that a mid-run exception
+    # still leaves it with whatever was established -- notably the Brave
+    # queries already spent, which are billed when issued.
+    stats = stats if stats is not None else FunnelStats()
     cfg = config or ScoringConfig()
     existing_domains = existing_domains or set()
     # mse_leads.linkedin_url carries a UNIQUE partial index, so a profile

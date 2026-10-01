@@ -825,3 +825,47 @@ class TestQueuedBoardTokens:
         assert row["discovered_from"] == "brave_ats_discovery"
         assert "last_status" not in row, "never fetched is a distinct state from ok/empty/failed"
         assert "last_fetched_at" not in row
+
+
+class TestCallerOwnedStats:
+    """Brave bills a query when it is issued, so a run that dies partway
+    has really spent that quota. The caller owns the FunnelStats so the
+    failure path can still report the spend -- two failed v2 runs on
+    2026-10-01 spent ~60 queries that _this_months_brave_query_count never
+    saw, which is the figure ground-rule 5 requires be accurate."""
+
+    def test_caller_supplied_stats_object_is_the_one_populated(self):
+        mine = FunnelStats()
+        scraper = FakeScraper(responses={
+            "site:boards.greenhouse.io": [ats_result("https://boards.greenhouse.io/northwind/jobs/1")],
+            "site:linkedin.com/in": [],
+        })
+        _rows, returned = find_company_first_signals(
+            "p1", ["platform engineer"], scraper=scraper,
+            ats_client=board_client({"northwind": GREENHOUSE_PAYLOAD}), max_queries=40,
+            stats=mine, sleep=NO_SLEEP,
+        )
+        assert returned is mine, "the caller must hold the same object, not a copy"
+        assert mine.queries_discovery > 0
+
+    def test_spend_is_visible_on_the_caller_object_after_a_mid_run_failure(self):
+        """An exception inside expansion must still leave the queries
+        already spent recorded on the caller's stats."""
+        mine = FunnelStats()
+
+        class Exploding:
+            stats = type("S", (), {"as_dict": lambda self: {}})()
+            board_status: dict = {}
+
+            def fetch_boards(self, _refs):
+                raise RuntimeError("ATS exploded")
+
+        scraper = FakeScraper(responses={
+            "site:boards.greenhouse.io": [ats_result("https://boards.greenhouse.io/northwind/jobs/1")],
+        })
+        with pytest.raises(RuntimeError):
+            find_company_first_signals(
+                "p1", ["platform engineer"], scraper=scraper,
+                ats_client=Exploding(), max_queries=40, stats=mine, sleep=NO_SLEEP,
+            )
+        assert mine.queries_discovery > 0, "spend already incurred must survive the exception"
