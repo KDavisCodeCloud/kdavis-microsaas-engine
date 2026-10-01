@@ -1081,6 +1081,28 @@ def _fetch_job_posting_text(url: str, http_get=None) -> Optional[str]:
         return None
 
 
+def _existing_job_signal_companies(db) -> set:
+    """Normalised company NAMES already in either job-signal pipeline.
+
+    "One company, one pipeline, ever" was enforced on DOMAIN alone, which
+    silently stopped working for scraper v2: ATS feeds carry only the ATS's
+    own URL, so every v2 lead has domain=NULL and domain-based dedup
+    matches nothing. The 2026-10-01 live runs duly wrote Clutch twice --
+    once under consulting, once under Cloud Decoded.
+
+    Normalised the same way as the decision-maker company check
+    (punctuation and casing removed) so "Acme Corp" and "acme-corp" are one
+    company.
+    """
+    from agents.marketing.company_first_sourcing import _normalise_company
+
+    names: set = set()
+    for source in ("job_posting_signal", "cloud_decoded_job_signal"):
+        rows = db.table("mse_leads").select("company").eq("source", source).execute().data or []
+        names |= {_normalise_company(r["company"]) for r in rows if r.get("company")}
+    return {n for n in names if n}
+
+
 def _existing_job_signal_domains(db) -> set:
     """Every domain already present across BOTH job-signal pipelines --
     "one company, one pipeline, ever" (Kelvin's own routing spec): a
@@ -1666,6 +1688,7 @@ def run_scraper_v2_scout(
             product_id, keywords, stats=stats,
             db=db, scraper=scraper, max_queries=max_queries, max_age_days=max_age_days,
             existing_domains=_existing_job_signal_domains(db),
+            existing_companies=_existing_job_signal_companies(db),
             existing_linkedin_urls=existing_linkedin_urls,
             lookup_decision_makers=lookup_decision_makers,
         )

@@ -657,6 +657,7 @@ def find_company_first_signals(
     max_boards: int = MAX_BOARDS_PER_RUN,
     max_age_days: Optional[int] = 30,
     existing_domains: Optional[set] = None,
+    existing_companies: Optional[set] = None,
     existing_linkedin_urls: Optional[set] = None,
     config: Optional[ScoringConfig] = None,
     lookup_decision_makers: bool = True,
@@ -682,6 +683,11 @@ def find_company_first_signals(
     stats = stats if stats is not None else FunnelStats()
     cfg = config or ScoringConfig()
     existing_domains = existing_domains or set()
+    # "One company, one pipeline, ever" cannot rest on domain alone here:
+    # ATS feeds carry only the ATS's own URL, so v2 leads have no domain and
+    # domain dedup matches nothing. The 2026-10-01 live runs wrote Clutch
+    # twice, once per product, for exactly this reason.
+    existing_companies = set(existing_companies or set())
     # mse_leads.linkedin_url carries a UNIQUE partial index, so a profile
     # already on another lead must not be written again -- a batch insert
     # is all-or-nothing and one collision discards every good lead with it.
@@ -759,6 +765,10 @@ def find_company_first_signals(
         if domain and (domain in existing_domains or domain in seen_domains):
             stats.dropped_duplicate_company += 1
             continue
+        company_key = _normalise_company(candidate.company)
+        if company_key and company_key in existing_companies:
+            stats.dropped_duplicate_company += 1
+            continue
 
         # Step 4: decision-maker lookup, budgeted. The ONLY
         # site:linkedin.com/in query in v2.
@@ -801,6 +811,8 @@ def find_company_first_signals(
 
         if domain:
             seen_domains.add(domain)
+        if company_key:
+            existing_companies.add(company_key)
         qualified["product_id"] = product_id
         rows.append(qualified)
 

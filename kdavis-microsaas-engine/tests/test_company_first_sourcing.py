@@ -937,3 +937,105 @@ class TestSnippetTitleParsingRealWorldShapes:
         }])
         out = find_decision_maker(scraper, "Smith & Nephew", stats=FunnelStats(), sleep=NO_SLEEP)
         assert out["title"] == "CTO"
+
+
+class TestOneCompanyOnePipeline:
+    """Kelvin's routing spec: "one company, one pipeline, ever". It was
+    enforced on DOMAIN only, which silently stopped working for v2 -- ATS
+    feeds carry just the ATS URL, so every v2 lead has domain=NULL and
+    domain dedup matches nothing. The 2026-10-01 live runs wrote Clutch
+    twice, once under consulting and once under Cloud Decoded."""
+
+    def _run(self, existing_companies):
+        scraper = FakeScraper(responses={
+            "site:boards.greenhouse.io": [ats_result("https://boards.greenhouse.io/northwind/jobs/1")],
+            "site:linkedin.com/in": [],
+        })
+        return find_company_first_signals(
+            "p1", ["platform engineer"], scraper=scraper,
+            ats_client=board_client({"northwind": GREENHOUSE_PAYLOAD}), max_queries=40,
+            existing_companies=existing_companies, sleep=NO_SLEEP,
+        )
+
+    def test_company_already_in_a_pipeline_is_dropped_without_a_domain(self):
+        from agents.marketing.company_first_sourcing import _normalise_company
+
+        rows, stats = self._run({_normalise_company("Northwind Systems")})
+        assert rows == []
+        assert stats.dropped_duplicate_company == 1
+
+    def test_new_company_is_kept(self):
+        rows, stats = self._run({"someoneelse"})
+        assert len(rows) == 1
+        assert stats.dropped_duplicate_company == 0
+
+    def test_matching_ignores_punctuation_and_casing(self):
+        from agents.marketing.company_first_sourcing import _normalise_company
+
+        rows, _stats = self._run({_normalise_company("northwind-systems")})
+        assert rows == [], "'Northwind Systems' and 'northwind-systems' are one company"
+
+    def test_second_company_in_the_same_run_is_not_a_false_duplicate(self):
+        scraper = FakeScraper(responses={
+            "site:boards.greenhouse.io": [
+                ats_result("https://boards.greenhouse.io/northwind/jobs/1"),
+                ats_result("https://boards.greenhouse.io/helios/jobs/1"),
+            ],
+            "site:linkedin.com/in": [],
+        })
+        payloads = {
+            "northwind": GREENHOUSE_PAYLOAD,
+            # Firmographics rich enough to clear the fit threshold with no
+            # contact found -- this test is about dedup, not scoring. (That
+            # it has to be this rich is the structural point noted in
+            # TestFitScoreWithoutAContact below.)
+            "helios": {"meta": {"company_name": "Helios Energy"}, "jobs": [
+                {"title": "Platform Engineer", "absolute_url": "https://helios.example/c/1",
+                 "updated_at": date.today().isoformat(),
+                 "content": "Azure, Terraform and Kubernetes. A team of 60 employees."},
+            ]},
+        }
+        rows, stats = find_company_first_signals(
+            "p1", ["platform engineer"], scraper=scraper,
+            ats_client=board_client(payloads), max_queries=40, sleep=NO_SLEEP,
+        )
+        assert {r["company"] for r in rows} == {"Northwind Systems", "Helios Energy"}
+        assert stats.dropped_duplicate_company == 0
+
+
+class TestFitScoreWithoutAContact:
+    """A structural property worth pinning explicitly, surfaced by the
+    2026-10-01 live runs: fit_score weights contact seniority at 0.45, and
+    company-first sourcing finds the COMPANY first with the contact lookup
+    budgeted and optional. A company with no decision-maker found therefore
+    cannot exceed 0.55 even with perfect firmographics, and scores 0.45 or
+    less whenever headcount is unknown -- which it almost always is, since
+    ATS job descriptions rarely state it.
+
+    That is why 23 of the 32 companies with a matching role across both
+    live runs were dropped as low fit. Documented here rather than silently
+    retuned: the threshold and weighting are Kelvin's call."""
+
+    def test_no_contact_caps_fit_below_the_default_threshold_when_headcount_is_unknown(self):
+        from agents.marketing.lead_qualification import ScoringConfig, fit_score
+
+        cfg = ScoringConfig()
+        best_possible = fit_score(
+            seniority="unknown",              # no decision-maker found
+            headcount_band_value=None,        # ATS JDs rarely state headcount
+            stack=list(cfg.target_stack),     # perfect stack match
+            has_domain=True,                  # best case
+            config=cfg,
+        )
+        assert best_possible.value < cfg.fit_threshold, (
+            "a contact-less company can still be a real lead; if this ever passes, "
+            "the weighting changed and the live-run drop rate should be re-measured"
+        )
+
+    def test_a_contact_is_what_makes_the_difference(self):
+        from agents.marketing.lead_qualification import ScoringConfig, fit_score
+
+        cfg = ScoringConfig()
+        with_contact = fit_score(seniority="c_level", headcount_band_value=None,
+                                 stack=["Azure", "Terraform"], has_domain=False, config=cfg)
+        assert with_contact.passes(cfg.fit_threshold)
