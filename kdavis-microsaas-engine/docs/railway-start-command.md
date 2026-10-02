@@ -1,98 +1,105 @@
 # mse-api build + deploy configuration
 
-_Last updated 2026-10-01. Standardising on a Dockerfile; see Status._
+_Last updated 2026-10-01. The Dockerfile is live in production, verified end
+to end through a staging environment._
 
 ## Decision
 
 **The Dockerfile is the single source of truth for how this service starts.**
-`CMD` carries the start command; Railway's service-level `builder` and
-`startCommand` overrides are cleared. `railpack.json` and `Procfile` are
-deleted.
+`CMD` carries the start command; `railpack.json` and `Procfile` are deleted;
+`railway.json` keeps only `healthcheckPath` and the restart policy.
 
-Reason: the repo previously had FOUR config sources —`railway.json`,
-`railpack.json`, `Procfile`, and Railway service-level overrides — naming
-three different start commands, and the *effective* builder was not the one
-any file claimed. Reconciling them took five attempts and caused a ten-minute
-502. A Dockerfile removes the ambiguity: the image itself carries the command,
-and there is nothing left to disagree with.
+Reason: the repo previously had four config sources naming three different
+start commands, and the *effective* builder was not the one any file claimed.
+Reconciling them caused a ten-minute 502.
 
-## Status
+## Working configuration
 
-| Step | State |
-|---|---|
-| `Dockerfile` + `.dockerignore` written | ✅ done |
-| Build and run the image locally | ⛔ **blocked** — Docker Desktop's Linux engine is not reachable from WSL (`docker info` fails; no socket at `/var/run/docker.sock`, no `/mnt/wsl/**/docker.sock`). Needs Docker Desktop started with WSL integration enabled for this distro. |
-| Delete `railpack.json` + `Procfile` | pending the local build |
-| Clear service `builder` / `startCommand` overrides | pending |
-| `healthcheckPath=/health` | pending |
-| Deploy to a **staging** environment, verify `/health` 200 + smoke test | pending |
-| Promote to production, keeping the last good deployment for rollback | pending |
-| Enable autodeploy, confirm deployed SHA = HEAD | pending (GitHub App is now connected) |
+```
+rootDirectory   = kdavis-microsaas-engine   <- the build CONTEXT
+dockerfilePath  = Dockerfile                <- relative to rootDirectory
+startCommand    = ""                        <- the image's CMD governs
+healthcheckPath = /health                   <- a failing deploy never takes traffic
+```
 
-**Standing rule as of 2026-10-01: no production service-config change without
-proving it in a separate Railway environment first.**
+### THE load-bearing fact
+
+**MSE's code lives in a `kdavis-microsaas-engine/` SUBDIRECTORY of the repo.**
+The repo root holds only `.github`, `01-governance-aws`, `LICENSE` and
+`README.md`. Four failed attempts traced back to this one fact.
+
+| # | Config tried | Result |
+|---|---|---|
+| 1 | `startCommand=""`, builder RAILPACK | Railpack ran anyway: a root Dockerfile does **not** override an explicitly-set builder. `⚠ Script start.sh not found`. |
+| 2 | + `dockerfilePath=Dockerfile` | `couldn't locate the dockerfile at path Dockerfile in code archive`. |
+| 3 | removed `Dockerfile` from `.dockerignore` | Same error, so that was not the cause -- but Railway DOES apply `.dockerignore` when packing the code archive, so the exclusion was still wrong to have. |
+| 4 | `dockerfilePath=kdavis-microsaas-engine/Dockerfile` | Dockerfile finally **used**, then failed at `COPY requirements.txt` -- the build CONTEXT was still the repo root. |
+| 5 | `rootDirectory=kdavis-microsaas-engine` + `dockerfilePath=Dockerfile` | green. |
+
+Quirks worth knowing:
+
+- There is **no `DOCKERFILE` value** in Railway's `Builder` enum. `builder`
+  still reads `RAILPACK` and is simply inert once `dockerfilePath` is set.
+- `builder: null` and `startCommand: null` are **silently ignored**. Use `""`
+  to clear a start command.
 
 ## Dockerfile notes
 
 - `python:3.11-slim`, matching `runtime.txt` / `.python-version`.
 - `git` is installed to match the previous runtime's package set
-  (`RAILPACK_DEPLOY_APT_PACKAGES=git`). No runtime shell-out to git was found
-  in this codebase; remove it deliberately, in its own change, rather than as
-  a side effect of the builder migration.
-- `CMD` uses `python -m uvicorn`, not bare `uvicorn`: it does not depend on
-  the console script being on PATH, which is exactly what broke the Railpack
-  attempt. Shell form so `${PORT}` expands, with an `8000` default so
-  `docker run -p 8000:8000` works locally with no env.
+  (`RAILPACK_DEPLOY_APT_PACKAGES=git`). No runtime shell-out to git was found;
+  remove it deliberately, in its own change, not as a side effect.
+- `CMD` uses `python -m uvicorn`, not bare `uvicorn`: it does not depend on the
+  console script being on PATH, which is what broke the Railpack attempt.
+  Shell form so `${PORT}` expands, with an `8000` default for local runs.
 - **`supabase/migrations/` must stay in the image.** `api/main.py`'s lifespan
   runs `run_pending_migrations()` against those files before the app serves a
-  single request. `.dockerignore` excludes `frontend/` (786MB), `venv/` and
-  the git history, and nothing else that is imported or read at runtime — the
-  whole repo minus those is about 7MB, so when in doubt, leave it in.
+  request.
 - Runs as an unprivileged user.
 
-## The incident this replaces (2026-10-01)
+## Staging
 
-Before: `railway.json` said `builder: NIXPACKS` + `uvicorn api.main:app …`;
-`railpack.json` said `provider: python` + `uvicorn …`; `Procfile` said
-`uvicorn …`; and the live service said `builder: RAILPACK` +
-`python3 -m uvicorn …`.
+`staging` (`bb49ff5e-f97e-4773-9a9f-392c192f4a17`), cloned from production,
+at `mse-api-staging-abc7.up.railway.app`, same build config as production.
 
-| Attempt | Change | Result |
-|---|---|---|
-| 1 | Clear the service `startCommand` so a file would win | Build FAILED at `BUILD_IMAGE`: `⚠ Script start.sh not found`. An empty service start command does **not** fall back to any file. No outage. |
-| 2 | Service `startCommand` = `uvicorn api.main:app …` | Build SUCCESS, container crash-loop: `uvicorn: command not found`. **502 outage.** |
-| 3 | Service `startCommand` = `python3 -m uvicorn …` | Still crash-looping: `python3: command not found`. |
-| 4 | `deploymentRollback` to the last good deployment | Health 200 restored. |
-| 5 | Service `builder` = NIXPACKS | Build FAILED: *"Nixpacks was unable to generate a build plan for this app."* No outage. |
-| 6 | Restored the service exactly as found | Healthy. |
+**It shares production's `DATABASE_URL`** because it was cloned. Migrations are
+idempotent so a staging boot is a no-op against them, but keep staging smoke
+tests READ-ONLY until staging gets its own database.
 
-### What actually went wrong
+Smoke test that gated the production promotion:
 
-`get-service-config` reports `builder: RAILPACK`, and I read that as the
-effective builder. It is the service-level **default**. The last known-good
-deployment was built by **Nixpacks** from a CLI `railway up` snapshot — its
-metadata has `reason: "deploy"` and **no `commitHash`**, and its build log
-shows the Nixpacks shape (`[stage-0 6/8] RUN … python -m venv`). GitHub-sourced
-builds use the service builder (Railpack), where neither `python3` nor
-`uvicorn` is on PATH.
+```
+/health      200  {"status":"ok","commit_sha":"<sha>"}
+/docs        200
+/openapi.json 200  (73 routes, incl. the 3 buyer-research endpoints)
+/marketing/buyer-research 401  (auth enforced)
+```
 
-So the running service and the GitHub deploy path had silently diverged, and
-had probably been diverging for some time. Trying to deploy from GitHub only
-exposed it.
+`/health` returning `commit_sha` is what makes "deployed SHA == HEAD"
+verifiable from outside the platform.
 
-### Three lessons worth keeping
+## Autodeploy -- still blocked
 
-1. **A deployment can report SUCCESS while the container crash-loops.** Build
-   status is not health. Poll `/health` until 200 and read the DEPLOY logs,
-   not only the build logs. `healthcheckPath` exists so Railway enforces this
-   itself — set it.
-2. **`deploymentRedeploy` reuses the old config snapshot.** After a
-   service-level change it silently keeps running the previous command and
-   makes the fix look ineffective. Use `serviceInstanceDeployV2`.
-3. **Do not trust a config API field as the effective value.** Confirm against
-   a successful deployment's build logs.
+Refused as of 2026-10-01 even after GitHub was reported connected. Both paths,
+verbatim:
 
-## Deploying by hand (while autodeploy is off)
+```
+serviceInstanceAutoDeployUpdate:
+  No workspace member has their GitHub account connected with access to
+  this repository.
+
+deploymentTriggerCreate:
+  Cannot create deployment trigger for KDavisCodeCloud/kdavis-microsaas-engine
+  because no one in the project has access to it
+```
+
+Caveat on reading those: `query { githubRepos }` returns **"Not Authorized"**
+for the CLI token, so this token cannot see GitHub identities at all. The
+refusal may be a limitation of the CLI auth context rather than proof the
+GitHub App lacks the repo. The Railway dashboard runs as the GitHub-linked
+browser session, so toggling autodeploy there is the fastest way to tell.
+
+Until then, deploy explicitly:
 
 ```bash
 railway api 'mutation($svc:String!,$env:String!,$sha:String){
@@ -100,5 +107,19 @@ railway api 'mutation($svc:String!,$env:String!,$sha:String){
 }' --variables '{"svc":"<serviceId>","env":"<environmentId>","sha":"<commit>"}'
 ```
 
-The commit must already be pushed — deploying a local-only SHA returns
+The commit must already be pushed -- a local-only SHA returns
 `INTERNAL_SERVER_ERROR`.
+
+## Three lessons that cost an outage
+
+1. **A deployment can report SUCCESS while the container crash-loops.** Build
+   status is not health. Poll `/health` until 200 and read the DEPLOY logs.
+   `healthcheckPath` now makes Railway enforce this.
+2. **`deploymentRedeploy` reuses the old config snapshot**, so after a
+   service-level change it keeps running the previous command and makes the fix
+   look ineffective. Use `serviceInstanceDeployV2`.
+3. **Do not trust a config-API field as the effective value.** Confirm against
+   a successful deployment's build logs.
+
+Rollback target kept for this migration: `e8352db3-85e6-4d36-b511-428462cad2f2`
+(the last pre-Dockerfile deployment).
