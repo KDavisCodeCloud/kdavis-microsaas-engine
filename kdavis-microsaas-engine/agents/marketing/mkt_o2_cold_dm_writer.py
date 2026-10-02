@@ -119,6 +119,19 @@ TOUCH_1_INFRA_MAX_CHARS = 300  # LinkedIn's own connection-note character cap
 TOUCH_2_INFRA_MAX_CHARS = 500
 TOUCH_3_INFRA_MAX_CHARS = 300
 
+# The live consulting site (verified 2026-10-02: HTTP 200 on Vercel, title
+# "Production AI & Agentic Systems Consulting | Kelvin Davis"). Outreach had
+# NO destination at all before this -- every stored touch_1/touch_2 for this
+# ICP contained no link, so a prospect who was interested could only reply or
+# drop it.
+#
+# It goes in touch_2, not touch_1, for two reasons: touch_1's own spec is "no
+# pitch, no ask" and a URL contradicts that, and a link in a first cold email
+# measurably raises spam scoring -- which matters more than usual while the
+# sending domain is still in warmup under a 12/day cap. touch_2 already
+# carries the "Worth a 20-minute call?" ask, so the link belongs with it.
+CONSULTING_OFFER_URL = "https://thdagentic.com"
+
 _INFRA_CONSULTING_SYSTEM_PROMPT = f"""You are writing a 3-touch LinkedIn cold outreach sequence for Kelvin \
 Davis, a senior cloud/platform engineer, targeting a CTO/VP Engineering/Engineering Director/Head of \
 Platform/Founder+CTO at a funded startup (20-200 employees) about infrastructure consulting work. Return \
@@ -142,7 +155,8 @@ includes production infrastructure work in aerospace and other regulated environ
 Aerospace) and currently at CorVel — reference this as real professional context, NEVER invent a specific \
 dollar figure, project name, or quantified outcome at any of these companies, since none is documented or \
 true to claim. End with exactly this soft ask, adapted naturally to fit the message: "Worth a 20-minute \
-call?"
+call?" — and include the URL {CONSULTING_OFFER_URL} exactly once, immediately before or after that ask, as \
+a bare URL with no tracking parameters and no link text. Do NOT put a URL in touch_1 or touch_3.
 
 touch_3 = sent 5 days after touch_2 ONLY IF there has been no reply, max {TOUCH_3_INFRA_MAX_CHARS} chars. \
 One line. A different angle than touch_2 — reference the specific pain point again, briefly. This is the \
