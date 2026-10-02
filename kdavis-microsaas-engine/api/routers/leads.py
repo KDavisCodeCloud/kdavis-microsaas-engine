@@ -9,6 +9,7 @@ check (n8n/internal-triggered, no end-customer tenant of the marketing
 engine itself).
 """
 
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
@@ -16,6 +17,8 @@ from pydantic import BaseModel
 
 from api.middleware.auth import require_marketing_api_key
 from core.supabase_client import get_supabase
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/marketing", tags=["marketing", "leads"])
 
@@ -60,6 +63,19 @@ async def trigger_lead_finder(
     require_marketing_api_key(authorization)
     db = get_supabase()
 
+    # Brave budget guard (decision 1e, 2026-10-02). Checked BEFORE the run row
+    # is created, so a refused run leaves no misleading 'pending' row behind.
+    # 409 not 429: nothing is rate-limiting the caller, the monthly budget is
+    # exhausted to its reserve threshold and retrying now cannot succeed.
+    from agents.marketing.brave_budget import check_budget
+    budget = check_budget(db)
+    if not budget.allowed:
+        log.warning("[LeadFinder] refusing run for %s: %s", body.product_id, budget.reason)
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "brave_budget_exhausted", "budget": budget.as_dict()},
+        )
+
     run_row = db.table("mse_lead_finder_runs").insert({
         "product_id": body.product_id, "status": "pending", "sources_used": [],
     }).execute()
@@ -68,7 +84,7 @@ async def trigger_lead_finder(
     run_id = run_row.data[0]["id"]
 
     background_tasks.add_task(_run_lead_finder_background, body.product_id, run_id, body.limit)
-    return {"run_id": run_id, "status": "pending"}
+    return {"run_id": run_id, "status": "pending", "brave_budget": budget.as_dict()}
 
 
 def _run_lead_finder_background(product_id: str, run_id: str, limit: Optional[int] = None) -> None:
@@ -156,6 +172,147 @@ async def list_icp_configured_products(authorization: Optional[str] = Header(def
 
 
 _PIPELINE_STAGES = ["new", "contacted", "replied", "qualified", "demo", "won", "lost"]
+
+
+@router.get("/leads/outbound-products")
+async def list_outbound_enabled_products(authorization: Optional[str] = Header(default=None)):
+    """Products the weekly Lead Finder sweep is authorised to run for
+    (decision 1b, 2026-10-02).
+
+    This replaces n8n's old "read every row of mse_icp_configs" node, which
+    swept all 9 configured products including shelved ones -- the 2026-10-02
+    run burned 2h20m on a real-estate product nobody is selling. The gate is
+    mse_icp_configs.outbound_enabled, so turning a product's outbound on or
+    off is a config change, not a workflow edit.
+    """
+    require_marketing_api_key(authorization)
+    db = get_supabase()
+
+    rows = (db.table("mse_icp_configs")
+            .select("product_id,vertical,target_count,selling_stage,outbound_enabled")
+            .eq("outbound_enabled", True).execute().data or [])
+    products = {p["id"]: p for p in
+                (db.table("mse_products").select("id,name,status").execute().data or [])}
+    out = []
+    for r in rows:
+        pid = r.get("product_id")
+        if not pid:
+            continue
+        out.append({
+            "product_id": pid,
+            "name": (products.get(pid) or {}).get("name"),
+            "vertical": r.get("vertical"),
+            "selling_stage": r.get("selling_stage"),
+            "target_count": r.get("target_count"),
+        })
+    out.sort(key=lambda p: (p["name"] or p["product_id"]))
+    return {"products": out, "count": len(out)}
+
+
+@router.get("/leads/weekly-summary")
+async def get_weekly_lead_summary(
+    days: int = 7,
+    authorization: Optional[str] = Header(default=None),
+):
+    """What the week actually produced, for the Sunday digest and the CEO
+    Decoded Marketing page (decision 1d + 5b).
+
+    Replaces the old pattern where n8n waited 15 minutes and polled a single
+    run. A real run takes hours, so that wait could only ever report an
+    unfinished run as though it were the result. The runs are asynchronous and
+    write their own progress; this reads whatever has actually completed in
+    the window and says plainly what is still running.
+    """
+    require_marketing_api_key(authorization)
+    db = get_supabase()
+
+    from datetime import datetime, timedelta, timezone
+    since = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
+
+    runs = (db.table("mse_lead_finder_runs").select("*")
+            .gte("started_at", since).order("started_at", desc=True).execute().data or [])
+    products = {p["id"]: p for p in
+                (db.table("mse_products").select("id,name").execute().data or [])}
+
+    by_status: dict[str, int] = {}
+    run_rows = []
+    for r in runs:
+        st = r.get("status") or "unknown"
+        by_status[st] = by_status.get(st, 0) + 1
+        run_rows.append({
+            "run_id": r.get("id"),
+            "product_id": r.get("product_id"),
+            "product": (products.get(r.get("product_id")) or {}).get("name"),
+            "status": st,
+            "started_at": r.get("started_at"),
+            "completed_at": r.get("completed_at"),
+            "leads_found": r.get("leads_found"),
+            "leads_verified": r.get("leads_verified"),
+            "current_step": r.get("current_step") if st == "running" else None,
+            "error_message": r.get("error_message"),
+        })
+
+    from agents.marketing.brave_budget import check_budget
+    budget = check_budget(db)
+
+    return {
+        "window_days": days,
+        "since": since,
+        "runs": run_rows,
+        "runs_by_status": by_status,
+        "still_running": by_status.get("running", 0),
+        "funnel": _outreach_funnel(db, since),
+        "brave_budget": budget.as_dict(),
+    }
+
+
+def _outreach_funnel(db, since: str) -> dict:
+    """qualified -> approved -> sent -> replies -> calls booked.
+
+    Each stage is counted from the row that PROVES it happened rather than
+    from a status that merely implies it: 'sent' counts a real
+    touch_1_sent_at timestamp, not a status string. Stages with no source of
+    truth yet report None, not 0 -- a zero would read as "nothing happened"
+    when the truth is "we do not measure this".
+    """
+    leads = (db.table("mse_leads")
+             .select("id,status,contact_status,lead_route,created_at").execute().data or [])
+    seqs = (db.table("mse_dm_sequences")
+            .select("id,status,touch_1_sent_at,touch_2_sent_at,created_at")
+            .execute().data or [])
+
+    recent_leads = [l for l in leads if (l.get("created_at") or "") >= since]
+    qualified = sum(1 for l in recent_leads
+                    if l.get("status") in ("company_qualified", "pending_dm", "pending_email",
+                                           "contacted", "converted"))
+    approved = sum(1 for s in seqs
+                   if (s.get("created_at") or "") >= since
+                   and s.get("status") in ("approved_hitl", "approved_manual",
+                                           "touch_1_sent", "touch_2_sent", "replied"))
+    sent = sum(1 for s in seqs if (s.get("touch_1_sent_at") or "") >= since)
+
+    return {
+        "qualified": qualified,
+        "approved": approved,
+        "sent": sent,
+        # REPLIES AND CALLS ARE NOT MEASURED, and are reported as null rather
+        # than 0 so the dashboard cannot render "0 replies" as a result. There
+        # is no reply-capture path at all: mse_dm_sequences has no replied_at
+        # column (verified against information_schema), and Reply-To points at
+        # a personal Gmail mailbox, so a prospect's reply never reaches this
+        # system. Measuring it needs either Resend inbound parsing on a domain
+        # mailbox or IMAP against the reply inbox -- neither is wired.
+        "replies": None,
+        "calls_booked": None,
+        "notes": {
+            "qualified": "mse_leads created in the window that reached a qualified status",
+            "approved": "mse_dm_sequences created in the window that cleared HITL",
+            "sent": "counted from a real touch_1_sent_at timestamp, not a status string",
+            "replies": ("NOT MEASURED: no replied_at column and replies go to a personal "
+                        "mailbox; needs Resend inbound or IMAP capture"),
+            "calls_booked": "NOT MEASURED: no calendar/booking source is wired yet",
+        },
+    }
 
 
 @router.get("/leads/pipeline-summary")

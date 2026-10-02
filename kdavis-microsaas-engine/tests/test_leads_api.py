@@ -48,7 +48,15 @@ def test_find_leads_returns_run_id(fake_db, monkeypatch):
     resp = client.post("/marketing/leads/find", json={"product_id": "prod-1"}, headers=AUTH)
 
     assert resp.status_code == 200
-    assert resp.json() == {"run_id": "run-1", "status": "pending"}
+    payload = resp.json()
+    assert payload["run_id"] == "run-1"
+    assert payload["status"] == "pending"
+    # The Brave budget decision now rides along on the response (decision 1e,
+    # 2026-10-02) so a caller -- n8n included -- can report the budget without
+    # a second request.
+    assert payload["brave_budget"]["allowed"] is True
+    assert payload["brave_budget"]["cap"] == 900
+    assert payload["brave_budget"]["threshold"] == 720
 
     inserts = [c for c in fake_db.executed if c.table_name == "mse_lead_finder_runs" and c.calls[0][0] == "insert"]
     assert inserts[0]._payload["product_id"] == "prod-1"
@@ -307,3 +315,73 @@ def test_get_icp_config_404_when_not_found(fake_db, monkeypatch):
 
     resp = client.get("/marketing/icp/prod-1", headers=AUTH)
     assert resp.status_code == 404
+
+
+# ── Brave budget guard on the trigger endpoint (decision 1e, 2026-10-02) ──
+
+def test_find_leads_refuses_when_the_brave_budget_is_spent(fake_db, monkeypatch):
+    """A refused run must leave NO run row behind -- a 'pending' row for a run
+    that was never started is exactly the kind of misleading artifact this
+    codebase keeps having to clean up."""
+    from agents.marketing import brave_budget as bb
+    monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(
+        leads_router, "_run_lead_finder_background",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not start a run")),
+    )
+    monkeypatch.setattr(
+        bb, "check_budget",
+        lambda db, **kw: bb.BudgetDecision(
+            allowed=False, used=800, cap=900, threshold=720, projected=835,
+            reason="already at 800/900 Brave queries this month"),
+    )
+
+    resp = client.post("/marketing/leads/find", json={"product_id": "prod-1"}, headers=AUTH)
+
+    assert resp.status_code == 409, "409: the budget is exhausted, retrying now cannot help"
+    detail = resp.json()["detail"]
+    assert detail["error"] == "brave_budget_exhausted"
+    assert detail["budget"]["used"] == 800
+    inserts = [c for c in fake_db.executed
+               if c.table_name == "mse_lead_finder_runs" and c.calls[0][0] == "insert"]
+    assert not inserts, "a refused run must not create a run row"
+
+
+def test_outbound_products_only_lists_enabled_ones(fake_db, monkeypatch):
+    monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    fake_db.responses["mse_icp_configs"] = [
+        {"product_id": "p-consulting", "vertical": None, "target_count": 50,
+         "selling_stage": "active", "outbound_enabled": True},
+    ]
+    fake_db.responses["mse_products"] = [
+        {"id": "p-consulting", "name": "THD Agentic Systems Consulting", "status": "active"},
+    ]
+    resp = client.get("/marketing/leads/outbound-products", headers=AUTH)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 1
+    assert body["products"][0]["name"] == "THD Agentic Systems Consulting"
+    # The filter must be applied as a query, not in Python, so a large config
+    # table cannot leak disabled products through pagination.
+    calls = [c for c in fake_db.executed if c.table_name == "mse_icp_configs"]
+    assert any("outbound_enabled" in str(c.calls) for c in calls)
+
+
+def test_weekly_summary_reports_unmeasured_stages_as_null_not_zero(fake_db, monkeypatch):
+    """0 replies reads as 'nobody replied'. None reads as 'we do not measure
+    this'. Those are different claims and the dashboard must not conflate
+    them."""
+    monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    fake_db.responses["mse_lead_finder_runs"] = []
+    fake_db.responses["mse_products"] = []
+    fake_db.responses["mse_leads"] = []
+    fake_db.responses["mse_dm_sequences"] = []
+
+    resp = client.get("/marketing/leads/weekly-summary", headers=AUTH)
+    assert resp.status_code == 200
+    funnel = resp.json()["funnel"]
+    assert funnel["replies"] is None
+    assert funnel["calls_booked"] is None
+    assert funnel["qualified"] == 0 and funnel["sent"] == 0
+    assert "NOT MEASURED" in funnel["notes"]["replies"]
+    assert "NOT MEASURED" in funnel["notes"]["calls_booked"]
