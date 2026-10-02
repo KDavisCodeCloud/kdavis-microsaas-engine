@@ -13,7 +13,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from api.middleware.auth import require_marketing_api_key
 from core.supabase_client import get_supabase
@@ -32,6 +32,21 @@ class FindLeadsRequest(BaseModel):
     # caller had no way to ask for a quick handful instead of a full,
     # multi-hour run (target_count leads at 3-6 min/lead SMTP verification).
     limit: Optional[int] = None
+    # "v2" (default) = scraper v2, the company-first ATS pipeline that
+    # produced every qualified lead this quarter. "v1" = the legacy
+    # keyword/Brave-scrape path, kept reachable for keyword-shaped ICPs.
+    # The default was v1 until 2026-10-02, which made the automated Sunday
+    # run execute the pipeline v2 was built to replace -- see
+    # _run_lead_finder_background's docstring.
+    pipeline: str = "v2"
+
+    @field_validator("pipeline")
+    @classmethod
+    def _known_pipeline(cls, v: str) -> str:
+        v = (v or "v2").strip().lower()
+        if v not in ("v1", "v2"):
+            raise ValueError("pipeline must be 'v1' or 'v2'")
+        return v
 
 
 class IcpConfigRequest(BaseModel):
@@ -83,17 +98,46 @@ async def trigger_lead_finder(
         raise HTTPException(status_code=500, detail="Failed to create lead finder run")
     run_id = run_row.data[0]["id"]
 
-    background_tasks.add_task(_run_lead_finder_background, body.product_id, run_id, body.limit)
+    background_tasks.add_task(_run_lead_finder_background, body.product_id, run_id, body.limit, body.pipeline)
     return {"run_id": run_id, "status": "pending", "brave_budget": budget.as_dict()}
 
 
-def _run_lead_finder_background(product_id: str, run_id: str, limit: Optional[int] = None) -> None:
-    from agents.marketing.mkt_lead_finder import run_lead_finder_for_product
+def _run_lead_finder_background(
+    product_id: str, run_id: str, limit: Optional[int] = None, pipeline: str = "v2",
+) -> None:
+    """Run the find. Defaults to SCRAPER V2.
 
+    WHY THE DEFAULT CHANGED (2026-10-02). This called run_lead_finder_for_product
+    -- the v1 keyword/Brave-scrape path -- while every good result this quarter
+    came from run_scraper_v2_scout, the company-first ATS path. So the
+    AUTOMATED Sunday run was executing the pipeline v2 was built to replace,
+    and the two are distinguishable in the data: the n8n-triggered run at
+    2026-10-02T04:24 recorded v1-shaped funnel_stats (queries_fired,
+    raw_results_returned) all zero with sources_used=[], while the v2 runs
+    record ats_urls_seen/boards_polled and sources_used=['job_posting_signal'].
+    It completed in 1.4 seconds and found nothing, reporting 'complete'.
+
+    Same "active but inert" failure as the HITL approval allowlist and
+    decision 3b's unreachable cap: the thing ran, reported success, and did
+    nothing. v1 stays reachable for products whose ICP is keyword-shaped
+    (pass pipeline='v1'), but it is no longer what a bare trigger gets.
+    """
+    if pipeline == "v1":
+        from agents.marketing.mkt_lead_finder import run_lead_finder_for_product
+        try:
+            run_lead_finder_for_product(product_id=product_id, run_id=run_id, limit=limit)
+        except Exception:
+            pass  # run_lead_finder_for_product writes the failure to the run row + audit log
+        return
+
+    from agents.marketing.mkt_lead_finder import run_scraper_v2_scout
     try:
-        run_lead_finder_for_product(product_id=product_id, run_id=run_id, limit=limit)
+        # max_queries is this run's HARD Brave cap, enforced across discovery
+        # and decision-maker lookups together -- 40 matches the standing
+        # per-run ceiling.
+        run_scraper_v2_scout(product_id=product_id, run_id=run_id, max_queries=40)
     except Exception:
-        pass  # run_lead_finder_for_product already writes the failure to the run row + audit log
+        log.exception("[LeadFinder] scraper v2 run %s failed for %s", run_id, product_id)
 
 
 @router.get("/leads/runs/{run_id}")

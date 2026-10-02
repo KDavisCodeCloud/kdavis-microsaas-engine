@@ -42,7 +42,8 @@ def test_find_leads_returns_run_id(fake_db, monkeypatch):
     captured = {}
     monkeypatch.setattr(
         leads_router, "_run_lead_finder_background",
-        lambda product_id, run_id, limit=None: captured.update(product_id=product_id, run_id=run_id, limit=limit),
+        lambda product_id, run_id, limit=None, pipeline="v2": captured.update(
+            product_id=product_id, run_id=run_id, limit=limit, pipeline=pipeline),
     )
 
     resp = client.post("/marketing/leads/find", json={"product_id": "prod-1"}, headers=AUTH)
@@ -67,7 +68,8 @@ def test_find_leads_returns_run_id(fake_db, monkeypatch):
     # given in the request, so it must reach the background task as None
     # (run_lead_finder_for_product then falls back to the ICP config's
     # own target_count).
-    assert captured == {"product_id": "prod-1", "run_id": "run-1", "limit": None}
+    assert captured == {"product_id": "prod-1", "run_id": "run-1", "limit": None,
+                        "pipeline": "v2"}
 
 
 def test_find_leads_threads_limit_through_to_background_task(fake_db, monkeypatch):
@@ -81,13 +83,15 @@ def test_find_leads_threads_limit_through_to_background_task(fake_db, monkeypatc
     captured = {}
     monkeypatch.setattr(
         leads_router, "_run_lead_finder_background",
-        lambda product_id, run_id, limit=None: captured.update(product_id=product_id, run_id=run_id, limit=limit),
+        lambda product_id, run_id, limit=None, pipeline="v2": captured.update(
+            product_id=product_id, run_id=run_id, limit=limit, pipeline=pipeline),
     )
 
     resp = client.post("/marketing/leads/find", json={"product_id": "prod-1", "limit": 3}, headers=AUTH)
 
     assert resp.status_code == 200
-    assert captured == {"product_id": "prod-1", "run_id": "run-1", "limit": 3}
+    assert captured == {"product_id": "prod-1", "run_id": "run-1", "limit": 3,
+                        "pipeline": "v2"}
 
 
 def test_run_lead_finder_background_passes_limit_through(monkeypatch):
@@ -100,7 +104,9 @@ def test_run_lead_finder_background_passes_limit_through(monkeypatch):
     captured = {}
     monkeypatch.setattr(mlf, "run_lead_finder_for_product", lambda **kwargs: captured.update(kwargs))
 
-    leads_router._run_lead_finder_background("prod-1", "run-1", limit=3)
+    # pipeline="v1" is now explicit: a bare trigger runs scraper v2 instead
+    # (2026-10-02), and this test is specifically about v1's forwarding.
+    leads_router._run_lead_finder_background("prod-1", "run-1", limit=3, pipeline="v1")
 
     assert captured == {"product_id": "prod-1", "run_id": "run-1", "limit": 3}
 
@@ -385,3 +391,60 @@ def test_weekly_summary_reports_unmeasured_stages_as_null_not_zero(fake_db, monk
     assert funnel["qualified"] == 0 and funnel["sent"] == 0
     assert "NOT MEASURED" in funnel["notes"]["replies"]
     assert "NOT MEASURED" in funnel["notes"]["calls_booked"]
+
+
+# ── Pipeline default: v2, not the legacy keyword path (2026-10-02) ────────
+
+def test_find_leads_defaults_to_scraper_v2(monkeypatch):
+    """The automated Sunday run was executing v1 -- the pipeline v2 was built
+    to replace -- and reporting 'complete' after 1.4s with zero leads. A bare
+    trigger must now reach run_scraper_v2_scout."""
+    import agents.marketing.mkt_lead_finder as mlf
+    called = {}
+    monkeypatch.setattr(mlf, "run_scraper_v2_scout", lambda **kw: called.update(v2=kw))
+    monkeypatch.setattr(mlf, "run_lead_finder_for_product",
+                        lambda **kw: called.update(v1=kw))
+
+    leads_router._run_lead_finder_background("prod-1", "run-1")
+
+    assert "v2" in called, "a bare trigger must run scraper v2"
+    assert "v1" not in called
+    assert called["v2"]["product_id"] == "prod-1"
+    assert called["v2"]["run_id"] == "run-1", "v2 must adopt the caller's run row"
+    assert called["v2"]["max_queries"] == 40, "the standing per-run Brave cap"
+
+
+def test_v1_is_still_reachable_explicitly(monkeypatch):
+    import agents.marketing.mkt_lead_finder as mlf
+    called = {}
+    monkeypatch.setattr(mlf, "run_scraper_v2_scout", lambda **kw: called.update(v2=kw))
+    monkeypatch.setattr(mlf, "run_lead_finder_for_product", lambda **kw: called.update(v1=kw))
+
+    leads_router._run_lead_finder_background("prod-1", "run-1", limit=5, pipeline="v1")
+
+    assert "v1" in called and "v2" not in called
+    assert called["v1"]["limit"] == 5
+
+
+def test_an_unknown_pipeline_is_rejected_not_silently_defaulted(fake_db, monkeypatch):
+    monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    resp = client.post("/marketing/leads/find",
+                       json={"product_id": "p", "pipeline": "v3"}, headers=AUTH)
+    assert resp.status_code == 422
+
+
+def test_scraper_v2_adopts_an_existing_run_row_instead_of_inserting(fake_db, monkeypatch):
+    """Two rows for one run would double every per-run count."""
+    import agents.marketing.mkt_lead_finder as mlf
+    fake_db.responses["mse_icp_configs"] = []
+    monkeypatch.setattr(mlf, "get_supabase", lambda: fake_db)
+    try:
+        mlf.run_scraper_v2_scout(product_id="prod-1", supabase_client=fake_db, run_id="existing-run")
+    except Exception:
+        pass  # the run itself will fail on fakes; only the row handling matters
+    inserts = [c for c in fake_db.executed
+               if c.table_name == "mse_lead_finder_runs" and c.calls[0][0] == "insert"]
+    updates = [c for c in fake_db.executed
+               if c.table_name == "mse_lead_finder_runs" and c.calls[0][0] == "update"]
+    assert not inserts, "must not insert a second run row when given run_id"
+    assert updates, "must mark the adopted row as running"

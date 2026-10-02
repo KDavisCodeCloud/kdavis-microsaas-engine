@@ -1782,6 +1782,7 @@ def run_scraper_v2_scout(
     max_age_days: Optional[int] = 30,
     lookup_decision_makers: bool = True,
     contact_retry_budget: int = 5,
+    run_id: Optional[str] = None,
 ) -> dict:
     """
     Scraper v2 production entry point for ONE product.
@@ -1819,12 +1820,21 @@ def run_scraper_v2_scout(
     source = ("cloud_decoded_job_signal" if product_id == CLOUD_DECODED_PRODUCT_ID
               else "job_posting_signal")
 
-    run_row = db.table("mse_lead_finder_runs").insert({
-        "product_id": product_id, "status": "running", "sources_used": [source],
-    }).execute()
-    if not run_row.data:
-        raise RuntimeError(f"Scraper v2 failed to create a run row for product {product_id}")
-    run_id = run_row.data[0]["id"]
+    if run_id:
+        # The caller already created the row (api/routers/leads.py does, so it
+        # can hand a pollable run_id back on the HTTP response before this
+        # multi-minute run starts). Adopt it rather than inserting a second
+        # one -- two rows for one run makes every per-run count double.
+        db.table("mse_lead_finder_runs").update(
+            {"status": "running", "sources_used": [source]}
+        ).eq("id", run_id).execute()
+    else:
+        run_row = db.table("mse_lead_finder_runs").insert({
+            "product_id": product_id, "status": "running", "sources_used": [source],
+        }).execute()
+        if not run_row.data:
+            raise RuntimeError(f"Scraper v2 failed to create a run row for product {product_id}")
+        run_id = run_row.data[0]["id"]
     _emit_event(db, "scraper_v2_run_started", {"product_id": product_id, "run_id": run_id})
 
     try:
