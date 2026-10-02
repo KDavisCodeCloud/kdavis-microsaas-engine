@@ -313,10 +313,49 @@ class TestEmailGrades:
     def test_role_address_detection(self, email, is_role):
         assert is_role_address(email) is is_role
 
-    def test_only_valid_may_send(self):
+    def test_only_valid_sends_unconditionally(self):
+        """email_may_send is the UNCONDITIONAL gate. "risky" is excluded here
+        on purpose -- it sends only via MKT-O5's capped branch, which runs
+        before this check."""
         assert email_may_send("valid") is True
         for grade in ("risky", "invalid", "unknown"):
-            assert email_may_send(grade) is False, f"{grade} must never enter MKT-O5"
+            assert email_may_send(grade) is False, f"{grade} must not send unconditionally"
+
+    def test_valid_and_risky_may_be_routed_outbound(self):
+        """Decision 3b (2026-10-01): catch-all addresses may take the
+        outbound route, with volume capped at send time."""
+        from agents.marketing.lead_qualification import email_may_route_outbound
+        assert email_may_route_outbound("valid") is True
+        assert email_may_route_outbound("risky") is True
+        for grade in ("invalid", "unknown", None, ""):
+            assert email_may_route_outbound(grade) is False, f"{grade!r} must not be routed outbound"
+
+    def test_risky_routes_outbound_and_says_it_is_capped(self):
+        """Regression: route_lead used to send every risky lead to
+        manual_linkedin, and MKT-O5 checks the stored lead_route BEFORE its
+        risky branch -- so the warmup cap was unreachable for exactly the
+        leads it was written for."""
+        from agents.marketing.lead_qualification import (
+            ROUTE_OUTBOUND_EMAIL, Score, route_lead,
+        )
+        route, reason = route_lead(
+            email_grade="risky", has_domain=True,
+            fit=Score(0.85, []), intent=Score(0.80, []),
+        )
+        assert route == ROUTE_OUTBOUND_EMAIL
+        assert "cap" in reason.lower(), (
+            f"the route must record that risky volume is bounded; got {reason!r}")
+
+    def test_invalid_and_unknown_still_route_manual(self):
+        from agents.marketing.lead_qualification import (
+            ROUTE_MANUAL_LINKEDIN, Score, route_lead,
+        )
+        for grade in ("invalid", "unknown"):
+            route, _ = route_lead(
+                email_grade=grade, has_domain=True,
+                fit=Score(0.85, []), intent=Score(0.80, []),
+            )
+            assert route == ROUTE_MANUAL_LINKEDIN, f"{grade} must stay off the email track"
 
 
 # ── 3.9 Scoring ──────────────────────────────────────────────────────────
@@ -390,10 +429,21 @@ class TestRouting:
         assert route == ROUTE_MANUAL_LINKEDIN
         assert reason == "no domain"
 
-    @pytest.mark.parametrize("grade", ["risky", "invalid", "unknown"])
-    def test_non_valid_email_never_routes_to_email(self, grade):
+    @pytest.mark.parametrize("grade", ["invalid", "unknown"])
+    def test_ungradeable_email_never_routes_to_email(self, grade):
+        """"risky" is deliberately NOT in this list any more (decision 3b,
+        2026-10-01): a catch-all takes the outbound route and is rationed at
+        send time instead. invalid and unknown stay off the email track
+        entirely."""
         fit, intent = self._good()
         assert route_lead(email_grade=grade, has_domain=True, fit=fit, intent=intent)[0] == ROUTE_MANUAL_LINKEDIN
+
+    def test_a_domainless_risky_lead_is_still_manual(self):
+        """The no-domain rule outranks the risky allowance -- there is no
+        address to send to."""
+        fit, intent = self._good()
+        assert route_lead(email_grade="risky", has_domain=False,
+                          fit=fit, intent=intent)[0] == ROUTE_MANUAL_LINKEDIN
 
     def test_low_fit_rejects_before_email_grade_matters(self):
         low = fit_score(seniority="unknown", has_domain=False)

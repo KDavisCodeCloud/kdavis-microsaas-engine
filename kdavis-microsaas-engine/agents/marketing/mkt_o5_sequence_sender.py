@@ -78,29 +78,44 @@ def _write_audit(db, outcome: str, product_id: str, metadata: dict) -> None:
     }).execute()
 
 
-def _send_email(resend_client, to_email: str, subject: str, body: str) -> None:
-    # RFC 8058 one-click headers (2026-09-21) -- required on every
-    # marketing send, not just the in-body unsubscribe link
-    # append_compliance_footer already adds. See
-    # core/email_compliance.py's build_list_unsubscribe_headers.
-    headers = build_list_unsubscribe_headers(to_email)
-    if resend_client is not None:
-        resend_client.Emails.send({
-            "from": os.environ.get("RESEND_FROM_EMAIL", "outreach@resend.dev"),
-            "to": to_email,
-            "subject": subject,
-            "text": body,
-            "headers": headers,
-        })
-        return
-    resend.api_key = os.environ["RESEND_API_KEY"]
-    resend.Emails.send({
+def _build_send_payload(to_email: str, subject: str, body: str) -> dict:
+    """The exact Resend payload, built once.
+
+    This was duplicated across the injected-client and module-level
+    branches of _send_email, which is how the send path reached production
+    with no Reply-To: a header added to one branch would silently not
+    apply to the other. One builder, both branches.
+
+    reply_to (2026-10-02, Kelvin's decision 4): without it, a prospect
+    hitting Reply lands on RESEND_FROM_EMAIL -- a send-only outreach
+    mailbox nobody reads, so an interested reply is lost in the one moment
+    the campaign is working. Set via RESEND_REPLY_TO_EMAIL rather than
+    hardcoded, and OMITTED when unset so the header is never a guess.
+    """
+    payload = {
         "from": os.environ.get("RESEND_FROM_EMAIL", "outreach@resend.dev"),
         "to": to_email,
         "subject": subject,
         "text": body,
-        "headers": headers,
-    })
+        # RFC 8058 one-click headers (2026-09-21) -- required on every
+        # marketing send, not just the in-body unsubscribe link
+        # append_compliance_footer already adds. See
+        # core/email_compliance.py's build_list_unsubscribe_headers.
+        "headers": build_list_unsubscribe_headers(to_email),
+    }
+    reply_to = (os.environ.get("RESEND_REPLY_TO_EMAIL") or "").strip()
+    if reply_to:
+        payload["reply_to"] = reply_to
+    return payload
+
+
+def _send_email(resend_client, to_email: str, subject: str, body: str) -> None:
+    payload = _build_send_payload(to_email, subject, body)
+    if resend_client is not None:
+        resend_client.Emails.send(payload)
+        return
+    resend.api_key = os.environ["RESEND_API_KEY"]
+    resend.Emails.send(payload)
 
 
 def _get_active_product_ids(db) -> set:

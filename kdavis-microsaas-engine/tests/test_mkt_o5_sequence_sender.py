@@ -650,3 +650,71 @@ class TestScraperV2SendGate:
         source = inspect.getsource(o5._get_lead)
         assert "lead_route" in source
         assert "email_grade" in source
+
+
+# --- Reply-To (Kelvin's decision 4, 2026-10-02) -------------------------
+# The send path had no Reply-To at all, so a prospect hitting Reply landed
+# on the send-only outreach mailbox. These pin the header on, pin it OFF
+# when unconfigured (never a guessed address), and pin it onto BOTH send
+# branches -- the duplication between them is exactly how the header went
+# missing in the first place.
+
+def test_reply_to_is_set_from_the_environment(fake_db, monkeypatch):
+    monkeypatch.setenv("RESEND_REPLY_TO_EMAIL", "kdav2k5@gmail.com")
+    _seed_sequence(fake_db, status="approved_hitl")
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_resend = FakeResend()
+
+    run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
+
+    assert fake_resend.Emails.sent, "nothing was sent"
+    assert fake_resend.Emails.sent[0]["reply_to"] == "kdav2k5@gmail.com"
+
+
+def test_reply_to_is_omitted_when_not_configured(fake_db, monkeypatch):
+    """Absent, not empty-string: Resend would reject or silently drop a
+    blank reply_to, and an omitted header is the honest representation of
+    'nobody has told us where replies go'."""
+    monkeypatch.delenv("RESEND_REPLY_TO_EMAIL", raising=False)
+    _seed_sequence(fake_db, status="approved_hitl")
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_resend = FakeResend()
+
+    run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
+
+    assert "reply_to" not in fake_resend.Emails.sent[0]
+
+
+def test_reply_to_blank_or_whitespace_is_treated_as_unset(monkeypatch):
+    from agents.marketing.mkt_o5_sequence_sender import _build_send_payload
+    for value in ("", "   ", "\t"):
+        monkeypatch.setenv("RESEND_REPLY_TO_EMAIL", value)
+        assert "reply_to" not in _build_send_payload("a@b.com", "s", "b")
+
+
+def test_both_send_branches_use_the_same_payload_builder():
+    """The injected-client branch and the module-level resend branch must
+    not drift: a header added to one and not the other is invisible in
+    tests that only exercise the injected client."""
+    import inspect
+    from agents.marketing.mkt_o5_sequence_sender import _send_email
+    src = inspect.getsource(_send_email)
+    assert src.count("_build_send_payload(") == 1, (
+        "both branches must send the ONE payload built by _build_send_payload; "
+        f"source is:\n{src}")
+    # No literal payload keys left inline in either branch.
+    for key in ('"from"', '"subject"', '"headers"'):
+        assert key not in src, f"{key} is still built inline in _send_email"
+
+
+def test_touch_2_also_carries_reply_to(fake_db, monkeypatch):
+    monkeypatch.setenv("RESEND_REPLY_TO_EMAIL", "kdav2k5@gmail.com")
+    sent_at = datetime.now(timezone.utc) - timedelta(days=4)
+    _seed_sequence(fake_db, status="touch_1_sent", touch_1_sent_at=sent_at.isoformat())
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_resend = FakeResend()
+
+    run_send_touch_2(supabase_client=fake_db, resend_client=fake_resend)
+
+    assert fake_resend.Emails.sent, "touch_2 sent nothing"
+    assert fake_resend.Emails.sent[0]["reply_to"] == "kdav2k5@gmail.com"

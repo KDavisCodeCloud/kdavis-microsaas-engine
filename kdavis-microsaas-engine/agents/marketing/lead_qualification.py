@@ -476,9 +476,31 @@ def is_role_address(email: Optional[str]) -> bool:
 
 
 def email_may_send(grade: str) -> bool:
-    """The MKT-O5 gate in one place. Only "valid" sends -- risky,
-    invalid and unknown never do."""
+    """The UNCONDITIONAL send gate: only "valid" sends with no further
+    checks. "risky" is handled separately and earlier, in MKT-O5's
+    _email_send_block_reason, because it is allowed only while the warmup
+    sub-cap has room -- see email_may_route_outbound below."""
     return grade == "valid"
+
+
+# Grades allowed into the outbound-email TRACK. "risky" (catch-all) is
+# included per Kelvin's decision 3b (2026-10-01).
+#
+# Routing and sending are deliberately two different questions. Decision 3b
+# was previously implemented only on the send side: MKT-O5 rationed risky
+# sends against RISKY_SHARE_OF_DAILY_CAP correctly, but route_lead still
+# assigned every risky lead to manual_linkedin -- and MKT-O5 checks the
+# stored lead_route BEFORE it ever reaches the risky branch, so the cap
+# logic was unreachable for exactly the leads it was written for. A route is
+# a durable property of the lead; a cap is a property of today. Routing
+# admits risky, the sender rations it.
+ROUTABLE_EMAIL_GRADES = frozenset({"valid", "risky"})
+
+
+def email_may_route_outbound(grade: Optional[str]) -> bool:
+    """Whether this grade may be placed on the outbound_email route at all.
+    Volume for "risky" is bounded later, at send time."""
+    return grade in ROUTABLE_EMAIL_GRADES
 
 
 # ── 6. Scoring ───────────────────────────────────────────────────────────
@@ -727,8 +749,13 @@ def route_lead(
         return ROUTE_REJECT, f"intent {intent.value} < {cfg.intent_threshold}"
     if not has_domain:
         return ROUTE_MANUAL_LINKEDIN, "no domain"
-    if not email_may_send(email_grade):
+    if not email_may_route_outbound(email_grade):
         return ROUTE_MANUAL_LINKEDIN, f"email grade={email_grade}"
+    if email_grade == "risky":
+        # Routed, but MKT-O5 will only send it while the warmup sub-cap has
+        # room. Said in the reason so the route is never mistaken for an
+        # unconditional green light.
+        return ROUTE_OUTBOUND_EMAIL, "qualified (catch-all, capped during warmup)"
     return ROUTE_OUTBOUND_EMAIL, "qualified"
 
 

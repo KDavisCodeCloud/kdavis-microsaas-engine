@@ -54,6 +54,7 @@ from typing import Any, Callable, Iterable, Optional
 from agents.marketing.lead_qualification import (
     ROUTE_MANUAL_LINKEDIN,
     company_fit_score,
+    email_may_route_outbound,
     email_may_send,
     ROUTE_OUTBOUND_EMAIL,
     ROUTE_REJECT,
@@ -805,9 +806,10 @@ def qualify_candidate(
         contact_title = None
 
     has_contact = bool(contact.get("name") or contact_title)
-    if has_contact and domain and email_may_send(grade):
+    if has_contact and domain and email_may_route_outbound(grade):
         route = ROUTE_OUTBOUND_EMAIL
-        route_reason = "contact + valid email"
+        route_reason = (f"contact + {grade} email"
+                        + (" (capped during warmup)" if grade == "risky" else ""))
     elif has_contact:
         route = ROUTE_MANUAL_LINKEDIN
         route_reason = f"contact, email_grade={grade}"
