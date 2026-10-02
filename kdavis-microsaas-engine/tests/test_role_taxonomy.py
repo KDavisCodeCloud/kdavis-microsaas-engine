@@ -18,9 +18,13 @@ from agents.marketing.role_taxonomy import (
     DEFAULT_NEGATIVE,
     SIZE_PROXY_MAX_OPEN_ROLES,
     SIZE_PROXY_MIN_OPEN_ROLES,
-    UNDATED_INTENT_MULTIPLIER,
+    CLOUD_DECODED_FRESHNESS,
+    CONSULTING_FRESHNESS,
+    FRESHNESS_AGEING_WEIGHT,
+    MAX_POSTING_AGE_DAYS,
+    FreshnessPolicy,
     RoleTaxonomy,
-    intent_multiplier_for,
+    freshness_multiplier_for,
     matching_postings,
     size_proxy_in_band,
 )
@@ -192,30 +196,28 @@ class TestMatchingPostings:
         assert drops["no_role_family"] == 1
 
     def test_undated_posting_is_kept_and_counted(self, taxonomy):
-        """Decision 3 (2026-10-01): "keep them; apply a x0.7 intent
-        multiplier instead of discarding". Previously an undated posting was
-        dropped by any freshness filter -- that discarded 83 and 84 postings
-        in the first two live runs, about half of every taxonomy match."""
+        """Decision 2 folds the undated case into the freshness policy: kept
+        at the ageing weight, flagged, never dropped."""
         postings = [_Posting("Platform Engineer", age_days=None)]
-        matched, drops = matching_postings(postings, taxonomy, max_age_days=30)
+        matched, drops = matching_postings(postings, taxonomy, freshness=CONSULTING_FRESHNESS)
         assert len(matched) == 1
-        assert drops["undated_kept"] == 1
-        assert "stale_dated" not in drops
+        assert drops["ageing_downweighted"] == 1
+        assert "over_max_age" not in drops
 
-    def test_a_genuinely_old_dated_posting_is_still_dropped(self):
-        """"We cannot tell when this was posted" and "this was posted four
-        months ago" are different facts and were being conflated."""
+    def test_a_posting_past_the_window_is_dropped(self):
+        """"We cannot tell when this was posted" and "this was posted a year
+        ago" are different facts and were being conflated."""
         tax = RoleTaxonomy.from_config(None)
         matched, drops = matching_postings(
-            [_Posting("Platform Engineer", age_days=400)], tax, max_age_days=30)
+            [_Posting("Platform Engineer", age_days=400)], tax, freshness=CONSULTING_FRESHNESS)
         assert matched == []
-        assert drops["stale_dated"] == 1
+        assert drops["over_max_age"] == 1
 
-    def test_no_freshness_filter_keeps_everything_relevant(self, taxonomy):
-        postings = [_Posting("Platform Engineer", age_days=None),
-                    _Posting("DevOps Engineer", age_days=400)]
-        matched, _drops = matching_postings(postings, taxonomy, max_age_days=None)
-        assert len(matched) == 2
+    def test_a_bare_max_age_days_still_works_as_a_legacy_override(self, taxonomy):
+        """Kept so callers passing a plain number keep working."""
+        matched, _drops = matching_postings(
+            [_Posting("Platform Engineer", age_days=45)], taxonomy, max_age_days=30)
+        assert matched == []
 
     def test_title_only_never_the_description(self, taxonomy):
         """Matching the description turns "we use Terraform to manage our
@@ -265,39 +267,104 @@ class TestSizeProxy:
         assert SIZE_PROXY_MAX_OPEN_ROLES == 40
 
 
-class TestUndatedIntentMultiplier:
-    """Decision 3: undated postings are kept at x0.7 intent rather than
-    discarded. The penalty is per-COMPANY, not per-posting: one dated
-    posting is enough to establish that the board is current."""
+class TestFreshnessWindow:
+    """Decision 2 (2026-10-01): the window widens to 60 days and is split by
+    product. The 30-day window was discarding 342 and 384 MATCHED
+    infrastructure roles per run -- more than it kept.
 
-    def test_all_undated_gets_the_penalty(self):
-        mult, reason = intent_multiplier_for([_Posting("Platform Engineer", age_days=None)])
-        assert mult == UNDATED_INTENT_MULTIPLIER == 0.7
+    Consulting reads a 31-60 day req as "struggling to hire", which is the
+    pitch, so it stays at full weight. Cloud Decoded sells to a team that is
+    already operating, so a stale req is a weaker signal and is downweighted.
+    """
+
+    @pytest.mark.parametrize("age,expected", [
+        (0, 1.0), (15, 1.0), (30, 1.0), (31, 1.0), (45, 1.0), (60, 1.0),
+    ])
+    def test_consulting_keeps_full_weight_across_the_whole_window(self, age, expected):
+        weight, _reason = CONSULTING_FRESHNESS.weight_for(age)
+        assert weight == expected
+
+    @pytest.mark.parametrize("age,expected", [
+        (0, 1.0), (15, 1.0), (30, 1.0),
+        (31, FRESHNESS_AGEING_WEIGHT), (45, FRESHNESS_AGEING_WEIGHT), (60, FRESHNESS_AGEING_WEIGHT),
+    ])
+    def test_cloud_decoded_downweights_the_second_month(self, age, expected):
+        weight, _reason = CLOUD_DECODED_FRESHNESS.weight_for(age)
+        assert weight == expected
+
+    @pytest.mark.parametrize("policy", [CONSULTING_FRESHNESS, CLOUD_DECODED_FRESHNESS])
+    @pytest.mark.parametrize("age", [61, 90, 400])
+    def test_over_sixty_days_is_dropped_for_both(self, policy, age):
+        weight, reason = policy.weight_for(age)
+        assert weight is None
+        assert "60d" in reason
+
+    @pytest.mark.parametrize("policy", [CONSULTING_FRESHNESS, CLOUD_DECODED_FRESHNESS])
+    def test_undated_is_folded_into_the_oldest_in_window_band(self, policy):
+        """The separate x0.7 undated rule was inert -- both 2026-10-01 runs
+        reported undated_kept=0, because every ATS posting in this dataset
+        carries a date. What I had called "stale_or_undated" was entirely
+        STALE. An undated posting is now kept at the ageing weight: never
+        dropped, never at full weight."""
+        weight, reason = policy.weight_for(None)
+        assert weight == FRESHNESS_AGEING_WEIGHT
         assert "undated" in reason
 
-    def test_one_dated_posting_restores_full_weight(self):
-        mult, reason = intent_multiplier_for([
-            _Posting("Platform Engineer", age_days=None),
-            _Posting("DevOps Engineer", age_days=3),
-        ])
-        assert mult == 1.0
-        assert "dated posting present" in reason
+    def test_window_constant_matches_the_spec(self):
+        assert MAX_POSTING_AGE_DAYS == 60
+        assert FRESHNESS_AGEING_WEIGHT == 0.7
 
-    def test_empty_list_is_penalised_not_crashed(self):
-        mult, _ = intent_multiplier_for([])
-        assert mult == UNDATED_INTENT_MULTIPLIER
 
-    def test_the_multiplier_actually_lowers_the_intent_score(self):
+class TestFreshnessDropCounts:
+    def test_over_age_postings_are_counted_separately(self, taxonomy):
+        postings = [_Posting("Platform Engineer", age_days=90),
+                    _Posting("DevOps Engineer", age_days=45)]
+        matched, drops = matching_postings(postings, taxonomy, freshness=CONSULTING_FRESHNESS)
+        assert [p.title for p in matched] == ["DevOps Engineer"]
+        assert drops["over_max_age"] == 1
+
+    def test_ageing_postings_are_kept_and_flagged_for_cloud_decoded(self, taxonomy):
+        postings = [_Posting("Platform Engineer", age_days=45)]
+        matched, drops = matching_postings(postings, taxonomy, freshness=CLOUD_DECODED_FRESHNESS)
+        assert len(matched) == 1
+        assert drops["ageing_downweighted"] == 1
+
+    def test_consulting_does_not_flag_the_same_posting(self, taxonomy):
+        postings = [_Posting("Platform Engineer", age_days=45)]
+        matched, drops = matching_postings(postings, taxonomy, freshness=CONSULTING_FRESHNESS)
+        assert len(matched) == 1
+        assert "ageing_downweighted" not in drops
+
+
+class TestFreshnessMultiplierPerCompany:
+    """The FRESHEST matching posting decides. One recent req establishes that
+    the company is hiring now, so an older sibling must not drag it down."""
+
+    def test_freshest_posting_wins(self):
+        postings = [_Posting("Platform Engineer", age_days=45),
+                    _Posting("DevOps Engineer", age_days=3)]
+        weight, _ = freshness_multiplier_for(postings, CLOUD_DECODED_FRESHNESS)
+        assert weight == 1.0
+
+    def test_all_ageing_gives_the_ageing_weight(self):
+        postings = [_Posting("Platform Engineer", age_days=45),
+                    _Posting("DevOps Engineer", age_days=50)]
+        weight, _ = freshness_multiplier_for(postings, CLOUD_DECODED_FRESHNESS)
+        assert weight == FRESHNESS_AGEING_WEIGHT
+
+    def test_consulting_full_weight_even_at_fifty_days(self):
+        weight, _ = freshness_multiplier_for(
+            [_Posting("Platform Engineer", age_days=50)], CONSULTING_FRESHNESS)
+        assert weight == 1.0
+
+    def test_empty_list_does_not_crash(self):
+        weight, _ = freshness_multiplier_for([], CONSULTING_FRESHNESS)
+        assert 0 < weight <= 1.0
+
+    def test_the_multiplier_lowers_the_intent_score(self):
         from agents.marketing.lead_qualification import intent_score
 
-        full = intent_score(posting_age_days=None, open_role_count=3, undated_multiplier=1.0)
-        penalised = intent_score(posting_age_days=None, open_role_count=3, undated_multiplier=0.7)
-        assert penalised.value < full.value
-        assert any("undated" in r for r in penalised.reasons)
-
-    def test_an_undated_company_still_qualifies(self):
-        """The point of the change: a weaker signal, not no signal."""
-        from agents.marketing.lead_qualification import intent_score
-
-        assert intent_score(posting_age_days=None, open_role_count=4,
-                           stack=["Azure", "Terraform"], undated_multiplier=0.7).value > 0
+        full = intent_score(posting_age_days=45, open_role_count=3, undated_multiplier=1.0)
+        reduced = intent_score(posting_age_days=45, open_role_count=3,
+                              undated_multiplier=FRESHNESS_AGEING_WEIGHT)
+        assert reduced.value < full.value

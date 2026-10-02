@@ -22,7 +22,7 @@ from agents.marketing.company_classification import (
     CONSULTING_EXCLUSION_POLICY,
 )
 from agents.marketing.lead_qualification import ROUTE_MANUAL_LINKEDIN, ROUTE_OUTBOUND_EMAIL
-from agents.marketing.role_taxonomy import RoleTaxonomy
+from agents.marketing.role_taxonomy import CONSULTING_FRESHNESS, RoleTaxonomy
 from agents.marketing.company_first_sourcing import (
     Stage1Result,
     stage1_qualify,
@@ -304,7 +304,7 @@ class TestCandidateBuilding:
     def test_only_title_matching_roles_count(self):
         boards, refs = self._boards()
         stats = FunnelStats()
-        cands = build_candidates(boards, refs, TAXONOMY, max_age_days=30, stats=stats)
+        cands = build_candidates(boards, refs, TAXONOMY, freshness=CONSULTING_FRESHNESS, stats=stats)
         assert len(cands) == 1
         assert cands[0].company == "Northwind Systems"
         assert len(cands[0].matching) == 2, "two platform roles match; Office Manager does not"
@@ -315,17 +315,17 @@ class TestCandidateBuilding:
         boards, refs = self._boards()
         stats = FunnelStats()
         narrow = RoleTaxonomy.from_config({"include": {"quantum": r"\bquantum\s+chemist\b"}})
-        assert build_candidates(boards, refs, narrow, max_age_days=30, stats=stats) == []
+        assert build_candidates(boards, refs, narrow, freshness=CONSULTING_FRESHNESS, stats=stats) == []
         assert stats.dropped_no_matching_role == 1
 
     def test_domain_comes_from_the_posting_not_the_ats_host(self):
         boards, refs = self._boards()
-        cands = build_candidates(boards, refs, TAXONOMY, max_age_days=30, stats=FunnelStats())
+        cands = build_candidates(boards, refs, TAXONOMY, freshness=CONSULTING_FRESHNESS, stats=FunnelStats())
         assert cands[0].domain == "northwind.example"
 
     def test_open_role_count_feeds_intent(self):
         boards, refs = self._boards()
-        cands = build_candidates(boards, refs, TAXONOMY, max_age_days=30, stats=FunnelStats())
+        cands = build_candidates(boards, refs, TAXONOMY, freshness=CONSULTING_FRESHNESS, stats=FunnelStats())
         st = Stage1Result(passed=True, size_ok=True)
         low = qualify_candidate(CompanyCandidate(
             ref=cands[0].ref, company=cands[0].company, domain=cands[0].domain,

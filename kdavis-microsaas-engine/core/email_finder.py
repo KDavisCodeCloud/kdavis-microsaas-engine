@@ -41,11 +41,18 @@ MAX_VERIFY_DELAY_SECONDS = 360
 SMTP_TIMEOUT_SECONDS = 10
 SMTP_PORT = 25
 
+# All six common shapes (Kelvin's decision 3a, 2026-10-01). The first four
+# were the original set; "f.lastname" and "firstname_lastname" were added
+# after the 2026-10-01 runs graded 10 of 19 contacts "invalid" -- a verdict
+# that only means "none of the patterns we TRIED exists", which is a much
+# weaker claim than "this person has no address".
 _PATTERN_BUILDERS = {
     "firstname": lambda first, last: f"{first}@{{domain}}" if first else None,
     "firstname.lastname": lambda first, last: f"{first}.{last}@{{domain}}" if first and last else None,
     "flastname": lambda first, last: f"{first[0]}{last}@{{domain}}" if first and last else None,
     "firstnamelastname": lambda first, last: f"{first}{last}@{{domain}}" if first and last else None,
+    "f.lastname": lambda first, last: f"{first[0]}.{last}@{{domain}}" if first and last else None,
+    "firstname_lastname": lambda first, last: f"{first}_{last}@{{domain}}" if first and last else None,
 }
 
 

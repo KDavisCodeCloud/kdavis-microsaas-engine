@@ -242,7 +242,12 @@ def test_touch_1_resolves_lead_finder_lead_via_mse_leads(fake_db):
     assert result == {"sent": 1, "failed": [], "skipped": []}
     assert fake_resend.Emails.sent[0]["to"] == "verified@example.com"
 
-    lead_selects = [c for c in fake_db.executed if c.table_name == "mse_leads" and c.calls[0][0] == "select"]
+    # Filtered by the LEAD lookup's own filter shape rather than counting
+    # every mse_leads select: the 7-day bounce-rate check (decision 3c) also
+    # reads mse_leads, so a bare count is no longer the lead lookup.
+    lead_selects = [c for c in fake_db.executed
+                    if c.table_name == "mse_leads" and c.calls[0][0] == "select"
+                    and any(k == "id" for k, _ in c._filters)]
     assert len(lead_selects) == 1
     assert ("id", "lf-lead-1") in lead_selects[0]._filters
 
@@ -326,7 +331,13 @@ def test_touch_1_skips_mse_leads_activity_wiring_for_apollo_sequences(fake_db):
     result = run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
     assert result == {"sent": 1, "failed": [], "skipped": []}
 
-    assert "mse_leads" not in fake_db.tables_touched
+    # The point of this test is that an APOLLO sequence never reads or writes
+    # the lead_finder tables. mse_leads is now touched unconditionally by the
+    # 7-day bounce-rate check (decision 3c), so the assertion is on the LEAD
+    # lookup -- a select filtered by id -- rather than on the table name.
+    lead_lookups = [c for c in fake_db.executed
+                    if c.table_name == "mse_leads" and any(k == "id" for k, _ in c._filters)]
+    assert lead_lookups == []
     assert "mse_activities" not in fake_db.tables_touched
 
 
@@ -569,16 +580,24 @@ class TestScraperV2SendGate:
                   if c.table_name == "audit_log" and c.calls[0][0] == "insert"]
         assert audits[0]._payload["metadata"]["skipped"] == "lead_route=manual_linkedin"
 
-    def test_risky_graded_email_is_skipped_even_though_an_address_exists(self, fake_db):
-        """A catch-all domain accepts every RCPT TO, so a deliverable-looking
-        address there is not a proven mailbox."""
+    def test_risky_graded_email_sends_while_the_warmup_budget_lasts(self, fake_db):
+        """Decision 3b (2026-10-01): catch-all addresses MAY send, capped at
+        25% of the daily cap during warmup. A catch-all accepts every RCPT TO,
+        so these carry real bounce risk -- the cap bounds the exposure rather
+        than refusing the volume."""
         result, fake_resend = self._run(
             fake_db, {"email": "a@b.com", "first_name": "A",
                       "lead_route": "outbound_email", "email_grade": "risky"})
 
-        assert result["sent"] == 0
-        assert result["skipped"] == ["seq-v2"]
-        assert len(fake_resend.Emails.sent) == 0
+        assert result["sent"] == 1
+        assert len(fake_resend.Emails.sent) == 1
+
+    def test_risky_is_blocked_once_its_sub_cap_is_exhausted(self):
+        import agents.marketing.mkt_o5_sequence_sender as o5
+
+        lead = {"email": "a@b.com", "lead_route": "outbound_email", "email_grade": "risky"}
+        assert o5._email_send_block_reason(lead, risky_budget_left=1) is None
+        assert o5._email_send_block_reason(lead, risky_budget_left=0) == "risky_daily_cap_reached"
 
     def test_valid_graded_outbound_email_lead_still_sends(self, fake_db):
         """The gate must not break the path it is protecting."""
@@ -596,7 +615,9 @@ class TestScraperV2SendGate:
             {"email": None, "lead_route": "manual_linkedin"}) == "lead_route=manual_linkedin"
         assert o5._email_send_block_reason(
             {"email": "a@b.com", "lead_route": "reject"}) == "lead_route=reject"
-        for grade in ("risky", "invalid", "unknown"):
+        # 'risky' is handled by its own warmup sub-cap (decision 3b) and is
+        # covered separately; invalid and unknown never send at all.
+        for grade in ("invalid", "unknown"):
             assert o5._email_send_block_reason(
                 {"email": "a@b.com", "lead_route": "outbound_email", "email_grade": grade}
             ) == f"email_grade={grade}", f"{grade} must never send"

@@ -18,6 +18,7 @@ own comment for why), checked via mse_email_suppressions
 import hashlib
 import hmac
 import os
+from typing import Optional
 from urllib.parse import quote
 
 _TOKEN_LENGTH = 32
@@ -124,3 +125,112 @@ def sends_today(db) -> int:
 
 def daily_send_cap() -> int:
     return int(os.environ.get("MARKETING_DAILY_SEND_CAP", _DEFAULT_DAILY_SEND_CAP))
+
+
+# ── Warmup gates (Kelvin's decision 3b/3c, 2026-10-01) ───────────────────
+#
+# 3b: "risky" (catch-all) addresses MAY now route to outbound email, but
+#     capped at 25% of the daily send cap during warmup. A catch-all accepts
+#     every RCPT TO, so those sends carry real bounce risk -- the cap bounds
+#     the damage rather than refusing the volume entirely.
+# 3c: ALL sends pause automatically if the bounce rate exceeds 3% in a
+#     rolling 7-day window. That is a reputation cliff, not a metric: past
+#     it, mailbox providers start filing everything as spam, and the damage
+#     outlives the batch that caused it.
+
+RISKY_SHARE_OF_DAILY_CAP = 0.25
+BOUNCE_RATE_PAUSE_THRESHOLD = 0.03
+BOUNCE_WINDOW_DAYS = 7
+# Below this many sends the rate is statistically meaningless -- 1 bounce out
+# of 3 sends is 33% and tells you nothing. Pausing on it would stop the
+# programme before it ever warmed up.
+BOUNCE_MIN_SENDS_FOR_RATE = 20
+
+
+def risky_send_cap() -> int:
+    """How many of today's sends may go to catch-all ("risky") addresses."""
+    return max(1, int(daily_send_cap() * RISKY_SHARE_OF_DAILY_CAP))
+
+
+def _sends_since(db, iso_timestamp: str) -> int:
+    result = (
+        db.table("audit_log")
+        .select("id")
+        .eq("agent_id", "mkt-o5")
+        .eq("action", "sequence_send")
+        .eq("outcome", "win")
+        .gte("created_at", iso_timestamp)
+        .execute()
+    )
+    return len(result.data or [])
+
+
+def risky_sends_today(db) -> int:
+    """Sends today whose audit metadata recorded a risky email grade.
+
+    Counted from the audit log rather than from the leads table because a
+    lead's grade can change after the send, and what the cap governs is what
+    we DID, not what is currently true.
+    """
+    from datetime import datetime, timezone
+
+    midnight_utc = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0).isoformat()
+    result = (
+        db.table("audit_log")
+        .select("metadata")
+        .eq("agent_id", "mkt-o5")
+        .eq("action", "sequence_send")
+        .eq("outcome", "win")
+        .gte("created_at", midnight_utc)
+        .execute()
+    )
+    return sum(1 for row in (result.data or [])
+               if (row.get("metadata") or {}).get("email_grade") == "risky")
+
+
+def bounce_rate_7d(db) -> tuple[Optional[float], int, int]:
+    """(rate, bounced, sent) over the rolling window.
+
+    `rate` is None when there have been fewer than
+    BOUNCE_MIN_SENDS_FOR_RATE sends -- a rate computed from a handful of
+    sends is noise, and pausing on noise would stop the programme before it
+    ever warmed up.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    window_start = (datetime.now(timezone.utc) - timedelta(days=BOUNCE_WINDOW_DAYS)).isoformat()
+    sent = _sends_since(db, window_start)
+    bounced_rows = (
+        db.table("mse_leads")
+        .select("id")
+        .eq("status", "bounced")
+        .gte("last_contacted_at", window_start)
+        .execute()
+    )
+    bounced = len(bounced_rows.data or [])
+    if sent < BOUNCE_MIN_SENDS_FOR_RATE:
+        return None, bounced, sent
+    return (bounced / sent if sent else 0.0), bounced, sent
+
+
+def sends_paused(db) -> tuple[bool, str]:
+    """(paused, reason). A True here stops EVERY send, not just risky ones.
+
+    Deliberately fails OPEN on a read error: a transient database problem
+    must not silently halt the outbound programme, and a halt nobody is told
+    about is worse than the risk it avoids. The error is logged by the
+    caller's audit entry either way.
+    """
+    try:
+        rate, bounced, sent = bounce_rate_7d(db)
+    except Exception as exc:  # noqa: BLE001 -- see docstring
+        return False, f"bounce check unavailable ({exc}); sends continue"
+    if rate is None:
+        return False, f"bounce rate not yet meaningful ({bounced}/{sent} in {BOUNCE_WINDOW_DAYS}d)"
+    if rate > BOUNCE_RATE_PAUSE_THRESHOLD:
+        return True, (
+            f"bounce rate {rate:.1%} ({bounced}/{sent} in {BOUNCE_WINDOW_DAYS}d) "
+            f"exceeds the {BOUNCE_RATE_PAUSE_THRESHOLD:.0%} pause threshold"
+        )
+    return False, f"bounce rate {rate:.1%} ({bounced}/{sent} in {BOUNCE_WINDOW_DAYS}d)"

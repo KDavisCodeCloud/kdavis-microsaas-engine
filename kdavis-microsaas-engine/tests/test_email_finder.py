@@ -12,7 +12,13 @@ from tests.conftest import FakeSupabase
 def test_build_pattern_candidates_generates_standard_patterns_in_order():
     candidates = build_pattern_candidates("Jane", "Doe", "example.com")
     assert candidates == [
-        "jane@example.com", "jane.doe@example.com", "jdoe@example.com", "janedoe@example.com",
+        # Decision 3a (2026-10-01): six patterns, ordered by real-world
+        # prevalence so the earliest SMTP probe is the likeliest hit. The
+        # first four were the original set; f.lastname and firstname_lastname
+        # were added after 10 of 19 contacts graded "invalid" -- a verdict
+        # that only means "none of the patterns we TRIED exists".
+        "jane.doe@example.com", "jane@example.com", "jdoe@example.com",
+        "janedoe@example.com", "j.doe@example.com", "jane_doe@example.com",
     ]
 
 
@@ -138,6 +144,12 @@ def test_find_email_records_every_attempt_to_pattern_db(monkeypatch):
     find_email("Jane", "Doe", "example.com", supabase_client=fake_db, smtp_client=smtp, resolver=_FakeResolver())
 
     upserts = [c for c in fake_db.executed if c.table_name == "mse_email_patterns" and c.calls[0][0] == "upsert"]
-    assert len(upserts) == 1
-    assert upserts[0]._payload["pattern"] == "firstname"
-    assert upserts[0]._payload["success_count"] == 1
+    # Decision 3a (2026-10-01) reordered the patterns so firstname.lastname is
+    # tried FIRST, which makes this test demonstrate its own point better than
+    # before: the failed first attempt is recorded too, not just the success.
+    # The pattern database only learns from failures if they are written.
+    assert len(upserts) == 2
+    assert upserts[0]._payload["pattern"] == "firstname.lastname"
+    assert upserts[0]._payload["success_count"] == 0
+    assert upserts[1]._payload["pattern"] == "firstname"
+    assert upserts[1]._payload["success_count"] == 1

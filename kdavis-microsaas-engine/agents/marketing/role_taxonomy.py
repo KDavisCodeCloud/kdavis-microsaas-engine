@@ -183,39 +183,86 @@ class RoleMatch:
         return out
 
 
-# Intent penalty for a posting whose date cannot be established (Kelvin's
-# decision 3, 2026-10-01: "keep them; apply a x0.7 intent multiplier instead
-# of discarding"). The first two live runs discarded 83 and 84 such postings
-# respectively -- roughly half of every taxonomy match -- on a 30-day
-# freshness filter they could never satisfy. A board listing a role usually
-# means it is open, so the honest treatment is a weaker signal, not no
-# signal.
-UNDATED_INTENT_MULTIPLIER = 0.7
+# Freshness policy (Kelvin's decision 2, 2026-10-01). The 60-day window
+# replaces a 30-day one that was discarding 342 and 384 MATCHED
+# infrastructure roles per run -- more matched roles than it kept.
+#
+# The two products read an ageing posting differently, which is why this is
+# per-product rather than one constant:
+#   Consulting    0-60 days at full weight. A role still open at 31-60 days
+#                 means they are STRUGGLING to hire, which is the pitch.
+#   Cloud Decoded 0-30 full, 31-60 at x0.7. It sells to a team that is
+#                 already operating, so a stale req is a weaker signal.
+# Over 60 days: dropped for both.
+#
+# This also absorbs the undated case. The previous x0.7 undated multiplier was
+# inert -- both 2026-10-01 runs reported undated_kept=0, because every ATS
+# posting in this dataset carries a date. What I had earlier called
+# "stale_or_undated" was entirely STALE. An undated posting is now treated as
+# the oldest in-window band rather than carrying its own separate rule.
+MAX_POSTING_AGE_DAYS = 60
+
+FRESHNESS_FULL_WEIGHT = 1.0
+FRESHNESS_AGEING_WEIGHT = 0.7
+
+
+@dataclass(frozen=True)
+class FreshnessPolicy:
+    """How one product weights an ageing posting."""
+
+    max_age_days: int = MAX_POSTING_AGE_DAYS
+    full_weight_days: int = MAX_POSTING_AGE_DAYS
+    ageing_multiplier: float = FRESHNESS_AGEING_WEIGHT
+
+    def weight_for(self, age_days: Optional[int]) -> tuple[Optional[float], str]:
+        """(multiplier, reason). None means DROP.
+
+        An undated posting is treated as the oldest in-window band: kept, at
+        the ageing weight, because an ATS listing a role usually means it is
+        open -- but never at full weight, since nothing establishes it is
+        recent.
+        """
+        if age_days is None:
+            return self.ageing_multiplier, f"undated (x{self.ageing_multiplier})"
+        if age_days > self.max_age_days:
+            return None, f"posting {age_days}d old > {self.max_age_days}d"
+        if age_days <= self.full_weight_days:
+            return FRESHNESS_FULL_WEIGHT, f"posting {age_days}d old (full weight)"
+        return self.ageing_multiplier, (
+            f"posting {age_days}d old, past {self.full_weight_days}d "
+            f"(x{self.ageing_multiplier})"
+        )
+
+
+# Consulting: a req open 31-60 days is EVIDENCE, not decay.
+CONSULTING_FRESHNESS = FreshnessPolicy(max_age_days=60, full_weight_days=60)
+
+# Cloud Decoded: 0-30 full, 31-60 downweighted.
+CLOUD_DECODED_FRESHNESS = FreshnessPolicy(max_age_days=60, full_weight_days=30)
 
 
 def matching_postings(
     postings: Iterable[Any],
     taxonomy: RoleTaxonomy,
     *,
+    freshness: Optional[FreshnessPolicy] = None,
     max_age_days: Optional[int] = None,
 ) -> tuple[list[Any], dict[str, int]]:
     """
     (matched postings, drop-reason counts).
 
-    Replaces scrapers.ats_boards.matching_postings' keyword-list signature
-    for the v2 path. Returns the reason counts so the funnel can show
-    whether a posting was dropped for being the wrong FUNCTION
-    (role_negative) versus simply not an infrastructure role at all --
-    distinguishing those two is what tells you whether the include list or
-    the negative list needs tuning.
+    Role matching is on the TITLE FIELD ONLY, word-boundary anchored -- see
+    the module docstring. The returned reason counts distinguish "not an
+    infrastructure role" (no_role_family) from "the wrong FUNCTION"
+    (negative_*), which is what tells you whether the include list or the
+    negative list needs tuning.
 
-    A posting with NO ascertainable date is KEPT (counted under
-    `undated_kept`), and the caller applies UNDATED_INTENT_MULTIPLIER to its
-    intent score. Only a posting whose date is KNOWN and older than
-    `max_age_days` is dropped -- "we cannot tell when this was posted" and
-    "this was posted four months ago" are different facts and were being
-    conflated.
+    `freshness` is the per-product policy (decision 2). `max_age_days` is
+    kept only as a legacy override for callers that pass a bare number; the
+    policy wins when both are given.
     """
+    policy = freshness or (FreshnessPolicy(max_age_days=max_age_days, full_weight_days=max_age_days)
+                           if max_age_days is not None else FreshnessPolicy())
     matched: list[Any] = []
     drops: dict[str, int] = {}
 
@@ -231,31 +278,37 @@ def matching_postings(
         if not result.families:
             _count("no_role_family")
             continue
-        age = getattr(posting, "age_days", None)
-        if age is None:
-            # Kept, but tracked -- a run that is mostly undated postings
-            # should be visible in the funnel rather than silently ranked.
-            _count("undated_kept")
-        elif max_age_days is not None and age > max_age_days:
-            _count("stale_dated")
+        weight, _reason = policy.weight_for(getattr(posting, "age_days", None))
+        if weight is None:
+            _count("over_max_age")
             continue
+        if weight < FRESHNESS_FULL_WEIGHT:
+            _count("ageing_downweighted")
         matched.append(posting)
 
     return matched, drops
 
 
-def intent_multiplier_for(postings: Iterable[Any]) -> tuple[float, str]:
+def freshness_multiplier_for(
+    postings: Iterable[Any], policy: Optional[FreshnessPolicy] = None
+) -> tuple[float, str]:
     """(multiplier, reason) for a company's matching postings.
 
-    Full weight when at least one matching posting has a known date; the
-    undated penalty only applies when NOTHING about this company's hiring
-    can be dated. One dated posting is enough to establish that the board is
-    current.
+    The FRESHEST matching posting decides. One recent req establishes that the
+    company is hiring now, so an older sibling req must not drag the company's
+    intent down.
     """
-    ages = [getattr(p, "age_days", None) for p in postings]
-    if any(a is not None for a in ages):
-        return 1.0, "dated posting present"
-    return UNDATED_INTENT_MULTIPLIER, f"all postings undated (x{UNDATED_INTENT_MULTIPLIER})"
+    policy = policy or FreshnessPolicy()
+    best_weight, best_reason = policy.ageing_multiplier, "no in-window posting"
+    for posting in postings:
+        weight, reason = policy.weight_for(getattr(posting, "age_days", None))
+        if weight is None:
+            continue
+        if weight > best_weight or best_reason == "no in-window posting":
+            best_weight, best_reason = weight, reason
+        if weight >= FRESHNESS_FULL_WEIGHT:
+            return weight, reason
+    return best_weight, best_reason
 
 
 # ── Size proxy (Kelvin's decision 4) ─────────────────────────────────────

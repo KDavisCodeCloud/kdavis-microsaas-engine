@@ -78,6 +78,7 @@ from agents.marketing.company_classification import (
     normalise_company_name,
     text_mentions_company,
 )
+from agents.marketing.contact_fit import evaluate_contact_fit
 from agents.marketing.contact_discovery import (
     ContactDiscoveryStats,
     discover_contact_free,
@@ -88,8 +89,11 @@ from agents.marketing.domain_resolution import (
     resolve_domain,
 )
 from agents.marketing.role_taxonomy import (
+    CLOUD_DECODED_FRESHNESS,
+    CONSULTING_FRESHNESS,
+    FreshnessPolicy,
     RoleTaxonomy,
-    intent_multiplier_for,
+    freshness_multiplier_for,
     size_proxy_in_band,
 )
 from agents.marketing.role_taxonomy import matching_postings as taxonomy_matching_postings
@@ -190,6 +194,7 @@ class FunnelStats:
     # Stage 2 (contact lookup -- only for Stage 1 passers)
     contact_found: int = 0
     contacts_from_free_sources: dict[str, int] = field(default_factory=dict)
+    contacts_rejected_on_fit: int = 0
     contact_discovery: dict = field(default_factory=dict)
     contact_pending: int = 0
     email_grades: dict[str, int] = field(default_factory=dict)
@@ -601,7 +606,7 @@ def build_candidates(
     refs: dict[str, BoardRef],
     taxonomy: RoleTaxonomy,
     *,
-    max_age_days: Optional[int],
+    freshness: FreshnessPolicy,
     stats: FunnelStats,
 ) -> list[CompanyCandidate]:
     """Boards -> companies that actually have a relevant open role.
@@ -619,7 +624,7 @@ def build_candidates(
             continue
         stats.companies_considered += 1
         stats.postings_returned += len(postings)
-        matching, drops = taxonomy_matching_postings(postings, taxonomy, max_age_days=max_age_days)
+        matching, drops = taxonomy_matching_postings(postings, taxonomy, freshness=freshness)
         for reason, count in drops.items():
             stats.role_drop_reasons[reason] = stats.role_drop_reasons.get(reason, 0) + count
         stats.postings_title_matched += len(matching)
@@ -723,6 +728,7 @@ def stage1_qualify(
 def qualify_candidate(
     candidate: CompanyCandidate,
     *,
+    freshness: Optional[FreshnessPolicy] = None,
     stage1: Optional[Stage1Result] = None,
     contact: Optional[dict] = None,
     email_grade: Optional[str] = None,
@@ -765,22 +771,36 @@ def qualify_candidate(
         exclusion_multiplier=multiplier,
         config=cfg,
     )
-    undated_mult, undated_reason = intent_multiplier_for(candidate.matching)
+    fresh_mult, fresh_reason = freshness_multiplier_for(candidate.matching, freshness)
     intent = intent_score(
         posting_age_days=candidate.freshest_age_days,
         open_role_count=len(candidate.matching),
         stack=stack,
         funding_months=funding,
-        undated_multiplier=undated_mult,
+        undated_multiplier=fresh_mult,
         config=cfg,
     )
 
     grade = email_grade or grade_email(None)
 
+    # Two gates on the contact, in order of cost. A wrong contact never
+    # invalidates the COMPANY -- Stage 1 already qualified it, so the lead
+    # stays and only the contact is dropped.
     rejected, negative_reason = is_negative_title(contact_title)
+    fit_reason = None
+    if not rejected and contact_title:
+        # Decision 4 (2026-10-01): seniority is not the same question as
+        # "is this person the buyer". Both contacts that survived the earlier
+        # runs were senior AND wrong -- "VP of Data" (wrong function) and a
+        # large company's "CEO" (right function, wrong company size).
+        # Named contact_fit, NOT fit: `fit` below is the company's
+        # company_fit_score Score, and shadowing it swapped a Score for a
+        # ContactFit further down.
+        contact_fit = evaluate_contact_fit(
+            contact_title, open_role_count=candidate.total_open_roles)
+        if not contact_fit.accepted:
+            rejected, fit_reason = True, contact_fit.reason
     if rejected:
-        # The COMPANY still qualified; only this contact is wrong. Keep the
-        # company and drop the contact rather than discarding a real signal.
         contact = {}
         contact_title = None
 
@@ -832,6 +852,7 @@ def qualify_candidate(
         "status": status,
         "contact_status": contact_status,
         "negative_reason": negative_reason,
+        "contact_fit_reason": fit_reason,
         "ats_provider": candidate.ref.provider,
         "ats_board_token": candidate.ref.token,
     }
@@ -845,6 +866,7 @@ def find_company_first_signals(
     *,
     policy: Optional[ExclusionPolicy] = None,
     taxonomy: Optional[RoleTaxonomy] = None,
+    freshness: Optional[FreshnessPolicy] = None,
     role_taxonomy_config: Optional[dict] = None,
     email_resolver: Optional[Callable[[str, str], tuple[Optional[str], str]]] = None,
     max_brave_domain_queries: int = MAX_BRAVE_DOMAIN_QUERIES,
@@ -885,6 +907,10 @@ def find_company_first_signals(
     # POSTINGS count as relevant is the taxonomy's job.
     taxonomy = taxonomy or RoleTaxonomy.from_config(role_taxonomy_config)
     policy = policy or CONSULTING_EXCLUSION_POLICY
+    # Per-product freshness (decision 2): consulting reads a 31-60 day req as
+    # "struggling to hire" and keeps it at full weight; Cloud Decoded
+    # downweights it. Over 60 days is dropped for both.
+    freshness = freshness or CONSULTING_FRESHNESS
     # The caller may own the stats object so that a mid-run exception
     # still leaves it with whatever was established -- notably the Brave
     # queries already spent, which are billed when issued.
@@ -974,7 +1000,7 @@ def find_company_first_signals(
             queue_board_tokens(db, unpolled, product_id)
 
     # Step 3: candidates (taxonomy-matched roles).
-    candidates = build_candidates(boards, refs, taxonomy, max_age_days=max_age_days, stats=stats)
+    candidates = build_candidates(boards, refs, taxonomy, freshness=freshness, stats=stats)
 
     # Ordering decides who gets the scarce contact/domain budget, so it is
     # explicit rather than incidental (Kelvin's decision 3: "Dated postings
@@ -984,7 +1010,7 @@ def find_company_first_signals(
     #   3. then recency, with undated treated as oldest
     def _rank(c: CompanyCandidate) -> tuple:
         ages = [p.age_days for p in c.matching if p.age_days is not None]
-        has_fresh_dated = any(a <= (max_age_days or 30) for a in ages)
+        has_fresh_dated = any(a <= freshness.full_weight_days for a in ages)
         return (1 if has_fresh_dated else 0, len(c.matching), -(min(ages) if ages else 10_000))
 
     candidates.sort(key=_rank, reverse=True)
@@ -1082,7 +1108,7 @@ def find_company_first_signals(
         stats.email_grades[grade] = stats.email_grades.get(grade, 0) + 1
 
         qualified = qualify_candidate(
-            candidate, stage1=stage1, contact=contact,
+            candidate, freshness=freshness, stage1=stage1, contact=contact,
             email_grade=grade, email=email_value, config=cfg, today=today,
         )
 
@@ -1090,6 +1116,8 @@ def find_company_first_signals(
             stats.contact_found += 1
         else:
             stats.contact_pending += 1
+            if qualified.get("contact_fit_reason"):
+                stats.contacts_rejected_on_fit += 1
 
         if qualified["lead_route"] == ROUTE_OUTBOUND_EMAIL:
             stats.routed_outbound_email += 1

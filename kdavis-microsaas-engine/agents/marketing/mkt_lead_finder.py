@@ -1807,7 +1807,11 @@ def run_scraper_v2_scout(
         find_company_first_signals,
         to_mse_lead_row,
     )
-    from agents.marketing.role_taxonomy import RoleTaxonomy
+    from agents.marketing.role_taxonomy import (
+        CLOUD_DECODED_FRESHNESS,
+        CONSULTING_FRESHNESS,
+        RoleTaxonomy,
+    )
     from scrapers.brave_search import BraveSearchScraper
 
     db = supabase_client if supabase_client is not None else get_supabase()
@@ -1847,13 +1851,16 @@ def run_scraper_v2_scout(
         policy = policy_for_product(product_id, CLOUD_DECODED_PRODUCT_ID)
         icp = _get_icp_config(db, product_id) or {}
         taxonomy = RoleTaxonomy.from_config(icp.get("role_taxonomy"))
+        freshness = (CLOUD_DECODED_FRESHNESS if product_id == CLOUD_DECODED_PRODUCT_ID
+                     else CONSULTING_FRESHNESS)
 
         email_sink: dict = {}
         email_resolver = _make_email_resolver(db, email_sink)
 
         qualified, stats = find_company_first_signals(
             product_id, keywords, stats=stats,
-            policy=policy, taxonomy=taxonomy, email_resolver=email_resolver,
+            policy=policy, taxonomy=taxonomy, freshness=freshness,
+            email_resolver=email_resolver,
             db=db, scraper=scraper, max_queries=max_queries, max_age_days=max_age_days,
             existing_domains=_existing_job_signal_domains(db),
             existing_companies=_existing_job_signal_companies(db),

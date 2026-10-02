@@ -57,7 +57,13 @@ _COPY_FILES = [
     ("requirements.txt", "requirements.txt"),
     ("requirements-dev.txt", "requirements-dev.txt"),
     ("runtime.txt", "runtime.txt"),
-    ("railpack.json", "railpack.json"),
+    # Dockerfile + .dockerignore replaced railpack.json 2026-10-01: mse-api
+    # standardised on a Dockerfile as the single source of truth for how a
+    # service starts, after four competing config sources caused a production
+    # outage. New products inherit that, so they never grow the same mess.
+    # See docs/railway-start-command.md.
+    ("Dockerfile", "Dockerfile"),
+    (".dockerignore", ".dockerignore"),
     ("pytest.ini", "pytest.ini"),
     (".gitignore", ".gitignore"),
     # Generic Next.js config — no MSE branding/colors in these, safe to copy.
@@ -286,7 +292,7 @@ verbatim from kdavis-microsaas-engine, which runs this exact code live).
    UsageTracker wiring only). Read the ICP, run the design system
    generator, apply an aesthetic matching this vertical's customer —
    per CLAUDE.md's design workflow. Never ship generic SaaS defaults.
-5. Deploy backend (Railway, see `railpack.json`) and frontend (Vercel).
+5. Deploy backend (Railway, built from the `Dockerfile`) and frontend (Vercel).
 
 ## Tier structure (from research)
 

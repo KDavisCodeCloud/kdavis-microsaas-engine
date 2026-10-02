@@ -14,7 +14,17 @@ from core.supabase_client import get_supabase
 
 # Order tried when a domain has no learned pattern history yet — the most
 # statistically common professional email patterns, per the task spec.
-DEFAULT_PATTERN_ORDER = ["firstname", "firstname.lastname", "flastname", "firstnamelastname"]
+# Ordered by real-world prevalence, commonest first, so the earliest SMTP
+# probe is the likeliest hit. Extended to all six shapes 2026-10-01
+# (decision 3a) -- see core/email_finder._PATTERN_BUILDERS.
+DEFAULT_PATTERN_ORDER = [
+    "firstname.lastname",
+    "firstname",
+    "flastname",
+    "firstnamelastname",
+    "f.lastname",
+    "firstname_lastname",
+]
 
 
 def get_known_patterns(domain: str, supabase_client: Optional[Any] = None) -> list[dict]:

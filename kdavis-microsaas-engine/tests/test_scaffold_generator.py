@@ -85,7 +85,7 @@ def test_generates_expected_file_tree(fake_db, tmp_path):
 
     assert out == tmp_path / "freight-audit-copilot"
     expected = [
-        "requirements.txt", "railpack.json", "runtime.txt", "README.md", ".env.example",
+        "requirements.txt", "Dockerfile", "runtime.txt", "README.md", ".env.example",
         "api/main.py", "api/middleware/auth.py", "api/middleware/tenant_context.py",
         "api/routers/events.py", "api/routers/milestones.py", "api/routers/digest.py",
         "api/routers/reengagement.py", "api/routers/stripe.py", "api/routers/mcp.py",

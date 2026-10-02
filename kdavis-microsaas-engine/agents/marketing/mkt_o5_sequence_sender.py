@@ -45,6 +45,9 @@ from core.email_compliance import (
     build_list_unsubscribe_headers,
     daily_send_cap,
     is_suppressed,
+    risky_send_cap,
+    risky_sends_today,
+    sends_paused,
     sends_today,
 )
 from agents.marketing.lead_qualification import email_may_send
@@ -139,7 +142,7 @@ def _get_lead(db, seq: dict) -> Optional[dict]:
 
 # ── Scraper v2 send gate (item 3.8, 2026-10-01) ──────────────────────────
 
-def _email_send_block_reason(lead: dict) -> Optional[str]:
+def _email_send_block_reason(lead: dict, *, risky_budget_left: int = 0) -> Optional[str]:
     """Why this lead must not be emailed, or None if it may be.
 
     Kelvin's rule (2026-10-01): "only 'valid' enters MKT-O5", and
@@ -169,6 +172,14 @@ def _email_send_block_reason(lead: dict) -> Optional[str]:
     if route and route != "outbound_email":
         return f"lead_route={route}"
     grade = lead.get("email_grade")
+    if grade == "risky":
+        # Decision 3b (2026-10-01): catch-all addresses MAY send, capped at
+        # 25% of the daily cap during warmup. A catch-all accepts every
+        # RCPT TO, so a 250 proved only that the domain answers -- the cap
+        # bounds the bounce exposure instead of refusing the volume.
+        if risky_budget_left <= 0:
+            return "risky_daily_cap_reached"
+        return None
     if grade is not None and not email_may_send(grade):
         return f"email_grade={grade}"
     return None
@@ -273,9 +284,20 @@ def run_send_touch_1(supabase_client: Optional[Any] = None, resend_client: Optio
     sequences = db.table("mse_dm_sequences").select("*").eq("status", "approved_hitl").execute().data or []
     _emit_event(db, "sequence_send_touch1_started", {"count": len(sequences)})
 
+    # Decision 3c (2026-10-01): a bounce rate over 3% in a rolling 7-day
+    # window pauses EVERY send. Past that point mailbox providers start
+    # filing everything as spam, and the damage outlives the batch that
+    # caused it -- so this is a hard stop, not a warning.
+    paused, pause_reason = sends_paused(db)
+    if paused:
+        log.error("[MKT-O5] SENDS PAUSED: %s", pause_reason)
+        _emit_event(db, "sequence_send_paused_bounce_rate", {"reason": pause_reason})
+        return {"sent": 0, "failed": [], "skipped": [], "paused": pause_reason}
+
     active_product_ids = _get_active_product_ids(db)
     cap = daily_send_cap()
     sent_count = sends_today(db)
+    risky_budget_left = max(0, risky_send_cap() - risky_sends_today(db))
 
     sent, failed, skipped = 0, [], []
     for seq in sequences:
@@ -294,7 +316,7 @@ def run_send_touch_1(supabase_client: Optional[Any] = None, resend_client: Optio
             if not lead:
                 raise ValueError(f"No lead row for sequence {seq['id']}")
 
-            block = _email_send_block_reason(lead)
+            block = _email_send_block_reason(lead, risky_budget_left=risky_budget_left)
             if block:
                 skipped.append(seq["id"])
                 _write_audit(db, "lose", seq.get("product_id", ""),
@@ -322,6 +344,8 @@ def run_send_touch_1(supabase_client: Optional[Any] = None, resend_client: Optio
                 subject = f"Quick question, {first_name}".strip() if first_name else "Quick question"
                 body = append_compliance_footer(DataSanitizationShield.clean(seq["touch_1"]), lead["email"])
                 _send_email(resend_client, lead["email"], subject, body)
+                if lead.get("email_grade") == "risky":
+                    risky_budget_left -= 1
             except Exception:
                 _release_claim(db, seq["id"], "touch_1_sending", "approved_hitl")
                 raise
@@ -359,9 +383,20 @@ def run_send_touch_2(supabase_client: Optional[Any] = None, resend_client: Optio
     )
     _emit_event(db, "sequence_send_touch2_started", {"count": len(sequences)})
 
+    # Decision 3c (2026-10-01): a bounce rate over 3% in a rolling 7-day
+    # window pauses EVERY send. Past that point mailbox providers start
+    # filing everything as spam, and the damage outlives the batch that
+    # caused it -- so this is a hard stop, not a warning.
+    paused, pause_reason = sends_paused(db)
+    if paused:
+        log.error("[MKT-O5] SENDS PAUSED: %s", pause_reason)
+        _emit_event(db, "sequence_send_paused_bounce_rate", {"reason": pause_reason})
+        return {"sent": 0, "failed": [], "skipped": [], "paused": pause_reason}
+
     active_product_ids = _get_active_product_ids(db)
     cap = daily_send_cap()
     sent_count = sends_today(db)
+    risky_budget_left = max(0, risky_send_cap() - risky_sends_today(db))
 
     sent, failed, skipped = 0, [], []
     for seq in sequences:
@@ -380,7 +415,7 @@ def run_send_touch_2(supabase_client: Optional[Any] = None, resend_client: Optio
             if not lead:
                 raise ValueError(f"No lead row for sequence {seq['id']}")
 
-            block = _email_send_block_reason(lead)
+            block = _email_send_block_reason(lead, risky_budget_left=risky_budget_left)
             if block:
                 skipped.append(seq["id"])
                 _write_audit(db, "lose", seq.get("product_id", ""),
@@ -410,6 +445,8 @@ def run_send_touch_2(supabase_client: Optional[Any] = None, resend_client: Optio
                 subject = f"Following up, {first_name}".strip() if first_name else "Following up"
                 body = append_compliance_footer(DataSanitizationShield.clean(seq["touch_2"]), lead["email"])
                 _send_email(resend_client, lead["email"], subject, body)
+                if lead.get("email_grade") == "risky":
+                    risky_budget_left -= 1
             except Exception:
                 _release_claim(db, seq["id"], "touch_2_sending", "touch_1_sent")
                 raise
