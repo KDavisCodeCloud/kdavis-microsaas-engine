@@ -204,6 +204,71 @@
           "name": "microsaas-prod Supabase"
         }
       }
+    },
+    {
+      "id": "wd-leadsummary",
+      "name": "Get Weekly Lead Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        460,
+        620
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.API_BASE_URL }}/marketing/leads/weekly-summary",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.MARKETING_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "wd-leadreport",
+      "name": "Build Lead Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        620
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Weekly lead-finder report. Reads /marketing/leads/weekly-summary, which\n// reports what COMPLETED -- the 06:00 workflow only queues.\nconst d = $input.first().json || {};\nconst f = d.funnel || {};\nconst b = d.brave_budget || {};\nconst runs = Array.isArray(d.runs) ? d.runs : [];\n\nconst lines = [];\nlines.push('FUNNEL (last ' + (d.window_days || 7) + ' days)');\nlines.push('  qualified : ' + (f.qualified != null ? f.qualified : 'n/a'));\nlines.push('  approved  : ' + (f.approved != null ? f.approved : 'n/a'));\nlines.push('  sent      : ' + (f.sent != null ? f.sent : 'n/a'));\n// null means NOT MEASURED. Printing 0 here would claim nobody replied.\nlines.push('  replies   : ' + (f.replies == null ? 'not measured' : f.replies));\nlines.push('  calls     : ' + (f.calls_booked == null ? 'not measured' : f.calls_booked));\n\nlines.push('');\nlines.push('RUNS');\nif (!runs.length) {\n  lines.push('  none in the window');\n} else {\n  for (const r of runs) {\n    let line = '  ' + String(r.started_at || '').slice(0, 16) + '  ' +\n               (r.product || r.product_id || '?') + '  ' + r.status;\n    if (r.status === 'running' && r.current_step) line += ' (at: ' + r.current_step + ')';\n    if (r.leads_found != null) line += '  found=' + r.leads_found;\n    if (r.error_message) line += '  ERROR: ' + String(r.error_message).slice(0, 110);\n    lines.push(line);\n  }\n}\nif (d.still_running) {\n  lines.push('');\n  lines.push('  ' + d.still_running + ' run(s) still in progress; they will appear in a later digest.');\n}\n\nlines.push('');\nlines.push('BRAVE BUDGET');\nlines.push('  ' + b.used + '/' + b.cap + ' used (' + b.percent_used + '%), stop threshold ' +\n           b.threshold + ', ' + b.remaining_to_threshold + ' left before it.');\nif (b.allowed === false) {\n  lines.push('  RUNS ARE BEING REFUSED: ' + b.reason);\n}\n\nreturn [{ json: { subject: 'Lead Finder - weekly report', body: lines.join('\\n') } }];\n"
+      }
+    },
+    {
+      "id": "wd-leadsend",
+      "name": "Send Lead Report via Resend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        940,
+        620
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.RESEND_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ from: 'leads@' + $env.PRODUCT_DOMAIN, to: $env.KELVIN_EMAIL, subject: $json.subject, text: $json.body }) }}",
+        "options": {}
+      }
     }
   ],
   "connections": {
@@ -212,6 +277,11 @@
         [
           {
             "node": "Get Active Tenants",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Weekly Lead Summary",
             "type": "main",
             "index": 0
           }
@@ -274,6 +344,28 @@
         [
           {
             "node": "Log Sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Weekly Lead Summary": {
+      "main": [
+        [
+          {
+            "node": "Build Lead Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Lead Report": {
+      "main": [
+        [
+          {
+            "node": "Send Lead Report via Resend",
             "type": "main",
             "index": 0
           }

@@ -3,12 +3,12 @@
   "active": true,
   "nodes": [
     {
-      "id": "cron-trigger",
+      "id": "lf-trigger",
       "name": "Sunday 6am MST",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
       "position": [
-        200,
+        240,
         300
       ],
       "parameters": {
@@ -23,45 +23,52 @@
       }
     },
     {
-      "id": "get-icp-products",
-      "name": "Get ICP-Configured Products",
-      "type": "n8n-nodes-base.supabase",
-      "typeVersion": 1,
-      "position": [
-        420,
-        300
-      ],
-      "parameters": {
-        "operation": "getAll",
-        "tableId": "mse_icp_configs"
-      },
-      "credentials": {
-        "supabaseApi": {
-          "id": "pUAkmUAHr9FYYZCw",
-          "name": "microsaas-prod Supabase"
-        }
-      }
-    },
-    {
-      "id": "for-each-product",
-      "name": "For Each Product",
-      "type": "n8n-nodes-base.splitInBatches",
-      "typeVersion": 3,
-      "position": [
-        640,
-        300
-      ],
-      "parameters": {
-        "batchSize": 1
-      }
-    },
-    {
-      "id": "trigger-find",
-      "name": "Trigger POST /marketing/leads/find",
+      "id": "lf-products",
+      "name": "Get Outbound-Enabled Products",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        860,
+        460,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.API_BASE_URL }}/marketing/leads/outbound-products",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.MARKETING_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "lf-fanout",
+      "name": "One Item Per Product",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// One item per outbound-enabled product. The endpoint returns\n// {products:[...], count:n}; without this the HTTP node downstream would see a\n// single item and trigger exactly one product.\nconst body = $input.first().json || {};\nconst products = Array.isArray(body.products) ? body.products : [];\nif (!products.length) {\n  // Emit a marker rather than nothing, so the digest can say \"none enabled\"\n  // instead of the workflow ending silently with no email at all.\n  return [{ json: { __none: true, count: 0 } }];\n}\nreturn products.map((p) => ({ json: p }));\n"
+      }
+    },
+    {
+      "id": "lf-find",
+      "name": "Trigger POST /marketing/leads/find",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "position": [
+        900,
         300
       ],
       "parameters": {
@@ -78,109 +85,32 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ product_id: $json.product_id }) }}"
+        "jsonBody": "={{ JSON.stringify({ product_id: $json.product_id }) }}",
+        "options": {}
       }
     },
     {
-      "id": "wait-for-run",
-      "name": "Wait 15 Minutes",
-      "webhookId": "57824d84-e3df-49c4-a5d7-8ca4c3a3d1e1",
-      "type": "n8n-nodes-base.wait",
-      "typeVersion": 1.1,
-      "position": [
-        1080,
-        300
-      ],
-      "parameters": {
-        "amount": 15,
-        "unit": "minutes"
-      }
-    },
-    {
-      "id": "get-run-status",
-      "name": "Poll Run Status",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        1300,
-        300
-      ],
-      "parameters": {
-        "method": "GET",
-        "url": "={{ $env.API_BASE_URL }}/marketing/leads/runs/{{ $('Trigger POST /marketing/leads/find').item.json.run_id }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Authorization",
-              "value": "={{ 'Bearer ' + $env.MARKETING_API_KEY }}"
-            }
-          ]
-        }
-      }
-    },
-    {
-      "id": "is-run-done",
-      "name": "Run Complete?",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2,
-      "position": [
-        1520,
-        300
-      ],
-      "parameters": {
-        "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "strict"
-          },
-          "conditions": [
-            {
-              "id": "check-status",
-              "leftValue": "={{ $json.status }}",
-              "rightValue": "running",
-              "operator": {
-                "type": "string",
-                "operation": "notEquals"
-              }
-            },
-            {
-              "id": "check-not-pending",
-              "leftValue": "={{ $json.status }}",
-              "rightValue": "pending",
-              "operator": {
-                "type": "string",
-                "operation": "notEquals"
-              }
-            }
-          ],
-          "combinator": "and"
-        }
-      }
-    },
-    {
-      "id": "build-weekly-digest",
-      "name": "Build Weekly Digest",
+      "id": "lf-receipt",
+      "name": "Build Queued Receipt",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        860,
-        500
+        1120,
+        300
       ],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// Same defensive rewrite as the LinkedIn digest: a weekly report must be\n// deliverable even when a poll returned nothing. Previously an empty\n// $('Poll Run Status') produced a crash instead of a digest.\nlet runs = [];\nlet readError = null;\ntry {\n  runs = $('Poll Run Status').all() || [];\n} catch (e) {\n  readError = e && e.message ? e.message : String(e);\n}\n\nconst lines = runs.map((item) => {\n  const r = (item && item.json) || {};\n  const found    = r.leads_found    != null ? r.leads_found    : 0;\n  const verified = r.leads_verified != null ? r.leads_verified : 0;\n  const product  = r.product_id || '?';\n  const status   = r.status || 'unknown';\n  return 'Product ' + product + ': ' + found + ' new leads found, ' + verified +\n         ' verified, ' + found + ' ready for outreach (run ' + status + ')';\n});\n\nlet body;\nif (readError) {\n  body = 'Could not read run status: ' + readError;\n} else if (!lines.length) {\n  body = 'No ICP-configured products reported a run this week.';\n} else {\n  body = lines.join('\\n');\n}\n\nreturn [{ json: { subject: 'Lead Finder - Weekly Digest', body } }];\n"
+        "jsCode": "// A QUEUED receipt, not a result. Each run takes hours; the Sunday 20:00\n// Weekly Digest reports what completed. Saying \"queued\" here keeps the two\n// claims from being confused.\nconst items = $input.all();\nconst lines = [];\nlet queued = 0, refused = 0, failed = 0;\nlet budgetLine = null;\n\nfor (const it of items) {\n  const j = it.json || {};\n  if (j.__none) {\n    lines.push('No products have outbound_enabled = true. Nothing was queued.');\n    continue;\n  }\n  // continueRegularOutput puts a failed request's payload under .error\n  const err = j.error || null;\n  const detail = (err && err.detail) || j.detail || null;\n\n  if (detail && detail.error === 'brave_budget_exhausted') {\n    refused++;\n    const b = detail.budget || {};\n    lines.push('REFUSED (Brave budget): ' + (b.reason || 'budget exhausted'));\n  } else if (j.run_id) {\n    queued++;\n    lines.push('queued run ' + j.run_id + ' (status ' + (j.status || '?') + ')');\n    if (j.brave_budget) budgetLine = j.brave_budget;\n  } else if (err) {\n    failed++;\n    lines.push('FAILED to queue: ' + (err.message || JSON.stringify(err)).slice(0, 180));\n  } else {\n    failed++;\n    lines.push('FAILED to queue: unrecognised response ' + JSON.stringify(j).slice(0, 180));\n  }\n}\n\nconst header = queued + ' run(s) queued, ' + refused + ' refused on budget, ' + failed + ' failed.';\nconst body = [header, ''].concat(lines);\nif (budgetLine) {\n  body.push('');\n  body.push('Brave budget: ' + budgetLine.used + '/' + budgetLine.cap +\n            ' used (' + budgetLine.percent_used + '%), stop threshold ' +\n            budgetLine.threshold + ', ' + budgetLine.remaining_to_threshold +\n            ' left before it.');\n}\nbody.push('');\nbody.push('These runs take hours. The Sunday 20:00 Weekly Digest reports what completed.');\n\nreturn [{ json: { subject: 'Lead Finder - runs queued', body: body.join('\\n') } }];\n"
       }
     },
     {
-      "id": "send-digest",
+      "id": "lf-send",
       "name": "Send Digest via Resend",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1080,
-        500
+        1340,
+        300
       ],
       "parameters": {
         "method": "POST",
@@ -196,7 +126,8 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ from: 'leads@' + $env.PRODUCT_DOMAIN, to: $env.KELVIN_EMAIL, subject: $json.subject, text: $json.body }) }}"
+        "jsonBody": "={{ JSON.stringify({ from: 'leads@' + $env.PRODUCT_DOMAIN, to: $env.KELVIN_EMAIL, subject: $json.subject, text: $json.body }) }}",
+        "options": {}
       }
     }
   ],
@@ -205,33 +136,26 @@
       "main": [
         [
           {
-            "node": "Get ICP-Configured Products",
+            "node": "Get Outbound-Enabled Products",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Get ICP-Configured Products": {
+    "Get Outbound-Enabled Products": {
       "main": [
         [
           {
-            "node": "For Each Product",
+            "node": "One Item Per Product",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "For Each Product": {
+    "One Item Per Product": {
       "main": [
-        [
-          {
-            "node": "Build Weekly Digest",
-            "type": "main",
-            "index": 0
-          }
-        ],
         [
           {
             "node": "Trigger POST /marketing/leads/find",
@@ -245,54 +169,14 @@
       "main": [
         [
           {
-            "node": "Wait 15 Minutes",
+            "node": "Build Queued Receipt",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Wait 15 Minutes": {
-      "main": [
-        [
-          {
-            "node": "Poll Run Status",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Poll Run Status": {
-      "main": [
-        [
-          {
-            "node": "Run Complete?",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Run Complete?": {
-      "main": [
-        [
-          {
-            "node": "For Each Product",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Wait 15 Minutes",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Build Weekly Digest": {
+    "Build Queued Receipt": {
       "main": [
         [
           {

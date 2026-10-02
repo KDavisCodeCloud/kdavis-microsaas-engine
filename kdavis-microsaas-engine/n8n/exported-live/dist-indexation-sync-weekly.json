@@ -7,26 +7,30 @@
       "name": "Monday 6am MST",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
+      "position": [
+        200,
+        300
+      ],
       "parameters": {
         "rule": {
           "interval": [
             {
               "field": "cronExpression",
-              "expression": "0 13 * * 1"
+              "expression": "0 6 * * 1"
             }
           ]
         }
-      },
-      "position": [
-        200,
-        300
-      ]
+      }
     },
     {
       "id": "run-indexation-sync",
       "name": "Sync All Products",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
+      "position": [
+        420,
+        300
+      ],
       "parameters": {
         "method": "POST",
         "url": "={{ $env.API_BASE_URL }}/dist/indexation/sync",
@@ -39,11 +43,7 @@
             }
           ]
         }
-      },
-      "position": [
-        420,
-        300
-      ]
+      }
     }
   ],
   "connections": {
