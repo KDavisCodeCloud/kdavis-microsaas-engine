@@ -16,7 +16,7 @@
           "interval": [
             {
               "field": "cronExpression",
-              "expression": "0 13 * * 0"
+              "expression": "0 6 * * 0"
             }
           ]
         }
@@ -162,14 +162,15 @@
     {
       "id": "build-weekly-digest",
       "name": "Build Weekly Digest",
-      "type": "n8n-nodes-base.function",
-      "typeVersion": 1,
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
         860,
         500
       ],
       "parameters": {
-        "functionCode": "const runs = $('Poll Run Status').all();\nconst lines = runs.map(item => {\n  const r = item.json;\n  return `Product ${r.product_id || '?'}: ${r.leads_found || 0} new leads found, ${r.leads_verified || 0} verified, ${r.leads_found || 0} ready for outreach (run ${r.status})`;\n});\nconst body = lines.length ? lines.join('\\n') : 'No ICP-configured products this week.';\nreturn [{ json: { subject: 'Lead Finder \u2014 Weekly Digest', body } }];"
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Same defensive rewrite as the LinkedIn digest: a weekly report must be\n// deliverable even when a poll returned nothing. Previously an empty\n// $('Poll Run Status') produced a crash instead of a digest.\nlet runs = [];\nlet readError = null;\ntry {\n  runs = $('Poll Run Status').all() || [];\n} catch (e) {\n  readError = e && e.message ? e.message : String(e);\n}\n\nconst lines = runs.map((item) => {\n  const r = (item && item.json) || {};\n  const found    = r.leads_found    != null ? r.leads_found    : 0;\n  const verified = r.leads_verified != null ? r.leads_verified : 0;\n  const product  = r.product_id || '?';\n  const status   = r.status || 'unknown';\n  return 'Product ' + product + ': ' + found + ' new leads found, ' + verified +\n         ' verified, ' + found + ' ready for outreach (run ' + status + ')';\n});\n\nlet body;\nif (readError) {\n  body = 'Could not read run status: ' + readError;\n} else if (!lines.length) {\n  body = 'No ICP-configured products reported a run this week.';\n} else {\n  body = lines.join('\\n');\n}\n\nreturn [{ json: { subject: 'Lead Finder - Weekly Digest', body } }];\n"
       }
     },
     {
@@ -184,8 +185,6 @@
       "parameters": {
         "method": "POST",
         "url": "https://api.resend.com/emails",
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpHeaderAuth",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [

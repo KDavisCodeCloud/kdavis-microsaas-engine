@@ -16,7 +16,7 @@
           "interval": [
             {
               "field": "cronExpression",
-              "expression": "0 15 * * *"
+              "expression": "0 8 * * *"
             }
           ]
         }
@@ -153,14 +153,15 @@
     {
       "id": "build-digest",
       "name": "Build Digest Body",
-      "type": "n8n-nodes-base.function",
-      "typeVersion": 1,
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
         1300,
         300
       ],
       "parameters": {
-        "functionCode": "const engagerCount = $('Get Engager Leads Pending DM').first().json.leads.length;\nconst manualCount = $('Get Manual Leads Pending DM').first().json.leads.length;\nconst approvedCount = $('Get Approved Ready-To-Paste Count').all().length;\nconst pendingReviewCount = $('Get Pending Wife Review Count').all().length;\n\nconst body = [\n  `${engagerCount} engager leads queued for DM`,\n  `${manualCount} manual leads queued for DM`,\n  `${approvedCount} sequences approved and ready to paste`,\n  `${pendingReviewCount} sequences pending wife review`,\n].join('\\n');\n\nreturn [{ json: { subject: 'LinkedIn Outreach \u2014 Daily Digest', body } }];"
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Each source is read independently: one empty or failed upstream node must\n// not take down the digest. The previous version used unguarded chains like\n// $(ref).first().json.leads.length and crashed the whole workflow (0 successes\n// in 8 runs). Anything unreadable is named in the body rather than silently\n// reported as zero.\nconst readLeads = (ref) => {\n  try {\n    const items = $(ref).all();\n    if (!items || !items.length) return { n: 0, ok: false };\n    const leads = items[0].json && items[0].json.leads;\n    return Array.isArray(leads) ? { n: leads.length, ok: true } : { n: 0, ok: false };\n  } catch (e) {\n    return { n: 0, ok: false };\n  }\n};\nconst readRows = (ref) => {\n  try {\n    const items = $(ref).all();\n    return { n: items ? items.length : 0, ok: true };\n  } catch (e) {\n    return { n: 0, ok: false };\n  }\n};\n\nconst engager  = readLeads('Get Engager Leads Pending DM');\nconst manual   = readLeads('Get Manual Leads Pending DM');\nconst approved = readRows('Get Approved Ready-To-Paste Count');\nconst pending  = readRows('Get Pending Wife Review Count');\n\nconst lines = [\n  engager.n  + ' engager leads queued for DM',\n  manual.n   + ' manual leads queued for DM',\n  approved.n + ' sequences approved and ready to paste',\n  pending.n  + ' sequences pending wife review',\n];\n\nconst unreadable = [];\nif (!engager.ok)  unreadable.push('engager leads');\nif (!manual.ok)   unreadable.push('manual leads');\nif (!approved.ok) unreadable.push('approved sequences');\nif (!pending.ok)  unreadable.push('sequences pending review');\nif (unreadable.length) {\n  lines.push('');\n  lines.push('NOTE: could not read ' + unreadable.join(', ') + ' -- the counts above may undercount.');\n}\n\nreturn [{ json: { subject: 'LinkedIn Outreach - Daily Digest', body: lines.join('\\n') } }];\n"
       }
     },
     {
@@ -175,8 +176,6 @@
       "parameters": {
         "method": "POST",
         "url": "https://api.resend.com/emails",
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpHeaderAuth",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
