@@ -90,6 +90,48 @@ async def preview_dm_sequence(sequence_id: str, request: Request):
     }
 
 
+# Email-capable sources, for sequences with no v2 routing fields to consult.
+_EMAILABLE_LEGACY_SOURCES = ("apollo", "lead_finder")
+
+
+def _approval_target_status(db, lead_source: str, lead_finder_lead_id: str | None) -> str:
+    """'approved_hitl' (MKT-O5 will email it) or 'approved_manual' (it won't).
+
+    Decided from the LEAD's own routing rather than from a hardcoded list of
+    sources, because the list silently went stale. Scraper v2 writes
+    lead_source='job_posting_signal' / 'cloud_decoded_job_signal', neither of
+    which was in the ("apollo","lead_finder") allowlist -- so every v2 lead
+    approved through HITL landed on 'approved_manual', a status MKT-O5 never
+    polls. Approving it looked like it worked and nothing ever sent. Found
+    2026-10-01 while setting up the first real send test.
+
+    Keying on lead_route/email_grade asks the question that actually matters
+    -- can this lead be emailed at all? -- so a new source added later
+    inherits the right behaviour instead of silently becoming inert. LinkedIn
+    sequences still land on 'approved_manual': their leads have no email and
+    route to the manual track, so the gate reaches the same answer by reading
+    the data rather than by naming the source.
+    """
+    if lead_finder_lead_id:
+        lead = (
+            db.table("mse_leads")
+            .select("lead_route,email,email_grade")
+            .eq("id", lead_finder_lead_id)
+            .maybe_single()
+            .execute()
+        )
+        row = lead.data if lead is not None else None
+        if row:
+            route = row.get("lead_route")
+            # A lead with no v2 route is a pre-v2 row; fall through to the
+            # legacy source check rather than guessing.
+            if route:
+                sendable = route == "outbound_email" and bool(row.get("email"))
+                return "approved_hitl" if sendable else "approved_manual"
+
+    return "approved_hitl" if lead_source in _EMAILABLE_LEGACY_SOURCES else "approved_manual"
+
+
 @router.post("/dm-sequences/{sequence_id}/approve")
 async def approve_dm_sequence(sequence_id: str, body: ResolveSequence, request: Request):
     _require_admin(request)
@@ -108,7 +150,7 @@ async def approve_dm_sequence(sequence_id: str, body: ResolveSequence, request: 
     # matching lookup change.
     existing = (
         db.table("mse_dm_sequences")
-        .select("lead_source")
+        .select("lead_source,lead_finder_lead_id")
         .eq("id", sequence_id)
         .eq("status", "pending_hitl")
         .maybe_single()
@@ -118,7 +160,7 @@ async def approve_dm_sequence(sequence_id: str, body: ResolveSequence, request: 
         raise HTTPException(status_code=404, detail="Sequence not found or already resolved")
 
     lead_source = existing.data.get("lead_source") or "apollo"
-    new_status = "approved_hitl" if lead_source in ("apollo", "lead_finder") else "approved_manual"
+    new_status = _approval_target_status(db, lead_source, existing.data.get("lead_finder_lead_id"))
     now = datetime.now(timezone.utc)
 
     update_payload = {
