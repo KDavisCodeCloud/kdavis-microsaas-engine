@@ -40,6 +40,7 @@ class FakeQuery:
         self._filters = []
         self._single = False
         self._count_requested = False
+        self._in_filters = []
 
     def insert(self, payload):
         self.calls.append(("insert", payload))
@@ -101,6 +102,17 @@ class FakeQuery:
         self._filters.append((key, value))
         return self
 
+    def in_(self, key, values):
+        """PostgREST `in` filter. Recorded like the others AND actually
+        applied to the seeded rows, because the one caller that needs it
+        (MKT-O2's duplicate/regeneration lookup) branches on which rows come
+        back -- a filter that recorded the call but returned everything would
+        make those tests pass against behaviour that is wrong in production."""
+        self.calls.append(("in_", key, list(values)))
+        self._filters.append((key, list(values)))
+        self._in_filters.append((key, set(values)))
+        return self
+
     def maybe_single(self):
         self.calls.append(("maybe_single",))
         self._single = True
@@ -136,6 +148,12 @@ class FakeQuery:
             self.store.next_update_returns_empty.remove(key)
             return type("Result", (), {"data": []})()
         result_data = self.store.responses.get(self.table_name, [])
+        # Unlike .eq(), an .in_() filter IS applied here: its callers branch on
+        # which rows come back, so returning everything would let a test pass
+        # against production-wrong behaviour.
+        for field, allowed in self._in_filters:
+            result_data = [r for r in result_data
+                           if isinstance(r, dict) and r.get(field) in allowed]
         if self._count_requested:
             return type("Result", (), {"data": result_data, "count": len(result_data)})()
         if getattr(self, "_single", False):

@@ -10,13 +10,13 @@ import type { DmSequence, ApolloLead, LinkedInLead } from "@/lib/types";
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 function leadDisplayName(seq: DmSequence): string {
-  const lead = seq.mse_apollo_leads ?? seq.mse_linkedin_leads;
+  const lead = seq.mse_leads ?? seq.mse_apollo_leads ?? seq.mse_linkedin_leads;
   if (!lead) return "Unknown";
   return `${lead.first_name ?? "Unknown"} ${lead.last_name ?? ""}`.trim();
 }
 
 function leadCompanyLine(seq: DmSequence): string {
-  const lead = seq.mse_apollo_leads ?? seq.mse_linkedin_leads;
+  const lead = seq.mse_leads ?? seq.mse_apollo_leads ?? seq.mse_linkedin_leads;
   return lead?.company ? ` · ${lead.company}` : "";
 }
 
@@ -69,7 +69,13 @@ export default function OutreachPage() {
   const fetchData = useCallback(async () => {
     const leadEmbed =
       "*, mse_apollo_leads(id, first_name, last_name, company, title, email, linkedin_url), " +
-      "mse_linkedin_leads(id, first_name, last_name, company, title, linkedin_url, source, interaction_type, interaction_note)";
+      "mse_linkedin_leads(id, first_name, last_name, company, title, linkedin_url, source, interaction_type, interaction_note), " +
+      // mse_leads is where scraper v2 writes EVERY lead. Omitting it is why
+      // all 11 pending sequences showed "Unknown / no contact on file" while
+      // their contacts sat in the row all along -- same stale-v1-assumption
+      // bug as the HITL approval allowlist. The FK
+      // mse_dm_sequences_lead_finder_lead_id_fkey makes this embed valid.
+      "mse_leads(id, first_name, last_name, company, title, email, email_grade, linkedin_url, lead_route, contact_status, job_posting_title, fit_score, intent_score)";
 
     const [{ data: seqData }, { data: readyData }, { data: leadData }, { data: liLeadData }] = await Promise.all([
       supabase.from("mse_dm_sequences").select(leadEmbed).eq("status", "pending_hitl").order("created_at", { ascending: true }),
@@ -224,7 +230,7 @@ export default function OutreachPage() {
                         </p>
                       </div>
                       <p className="text-[11px] font-mono truncate-text" style={{ color: "#5b6673" }}>
-                        {seq.mse_apollo_leads?.email ?? seq.mse_linkedin_leads?.linkedin_url ?? "no contact on file"}
+                        {seq.mse_leads?.email ?? seq.mse_leads?.linkedin_url ?? seq.mse_apollo_leads?.email ?? seq.mse_linkedin_leads?.linkedin_url ?? "no contact on file"}
                       </p>
                       {seq.mse_linkedin_leads?.source === "linkedin_engager" && seq.mse_linkedin_leads.interaction_note && (
                         <p className="text-[11px] font-mono truncate-text" style={{ color: "#6fce8f" }}>

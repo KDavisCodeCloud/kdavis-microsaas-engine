@@ -136,7 +136,10 @@ def test_lead_finder_source_uses_lead_finder_lead_id_and_standard_prompt():
         "mse_icp_configs": [{"selling_stage": "active"}],
     })
     anthropic_client = FakeAnthropic(responses=[SEQUENCE_JSON])
-    leads = [{"id": "lf-lead-1", "first_name": "Alex", "title": "Broker", "company": "Sun Realty"}]
+    # contact_status + a fit-accepted title are preconditions for drafting
+    # as of the 2026-10-05 contact-first gate.
+    leads = [{"id": "lf-lead-1", "first_name": "Alex", "title": "VP Engineering",
+              "company": "Sun Realty", "contact_status": "found", "open_role_count": 4}]
 
     result = run_o2_cold_dm_writer(
         product_id="prod-1", research_report=_research_report(), leads=leads,

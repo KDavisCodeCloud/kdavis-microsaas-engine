@@ -190,7 +190,13 @@ class _FakeAnthropic:
 
 def _job_posting_lead():
     return {
-        "id": "lead-1", "company": "Acme Corp", "title": None,
+        "id": "lead-1", "company": "Acme Corp",
+        # A fit-accepted contact is now a PRECONDITION for drafting
+        # (contact-first gate, 2026-10-05): MKT-O2 parks company-only
+        # leads in the Find-the-Buyer lane instead of drafting to nobody.
+        # tests/test_mkt_o2_cold_dm_writer.py covers the parking itself.
+        "contact_status": "found", "first_name": "Dana", "last_name": "Reyes",
+        "title": "VP Engineering", "open_role_count": 4,
         "job_posting_title": "cloud architect", "job_posting_url": "https://boards.greenhouse.io/acme/jobs/1",
     }
 

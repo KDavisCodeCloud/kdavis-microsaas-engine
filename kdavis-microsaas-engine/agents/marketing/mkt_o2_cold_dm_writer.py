@@ -132,6 +132,74 @@ TOUCH_3_INFRA_MAX_CHARS = 300
 # carries the "Worth a 20-minute call?" ask, so the link belongs with it.
 CONSULTING_OFFER_URL = "https://thdagentic.com"
 
+# The three lead_source values whose leads live in mse_leads and therefore
+# carry contact_status / title / open_role_count.
+_MSE_LEADS_SOURCES = ("lead_finder", "job_posting_signal", "cloud_decoded_job_signal")
+
+
+_TERMINAL_SEQUENCE_STATUSES = ("rejected_hitl", "sequence_complete", "suppressed", "approval_expired")
+
+
+def _existing_sequences_by_lead(db, leads: list[dict]) -> dict[str, dict]:
+    """lead_id -> its most relevant live sequence, for the leads given.
+
+    Terminal statuses are excluded: a rejected or completed sequence must not
+    block a fresh draft later. An 'awaiting_contact' row is returned so the
+    caller can regenerate it in place instead of inserting a duplicate.
+    """
+    ids = [l.get("id") for l in leads if l.get("id")]
+    if not ids:
+        return {}
+    rows = (db.table("mse_dm_sequences")
+            .select("id,status,lead_finder_lead_id")
+            .in_("lead_finder_lead_id", ids).execute().data or [])
+    out: dict[str, dict] = {}
+    for r in rows:
+        if r.get("status") in _TERMINAL_SEQUENCE_STATUSES:
+            continue
+        lid = r.get("lead_finder_lead_id")
+        if not lid:
+            continue
+        # Prefer a non-awaiting row, so an existing live draft wins over a
+        # parked one and the lead is skipped rather than duplicated.
+        if lid not in out or (out[lid]["status"] == "awaiting_contact"
+                              and r["status"] != "awaiting_contact"):
+            out[lid] = {"id": r["id"], "status": r["status"]}
+    return out
+
+
+def contact_is_draftable(lead: dict) -> tuple[bool, str]:
+    """(ok, reason) -- may MKT-O2 spend a draft and a human's review on this?
+
+    TWO conditions, because 'found' was never strong enough on its own:
+    contact_status='found' only ever meant "a name was discovered", which is
+    why six sequences reached the approval queue addressed to a VP of
+    Marketing, two COOs, and a bare "Director". The title must ALSO clear
+    contact_fit -- the same rules already applied at discovery time, now
+    applied at draft time too.
+
+    A failure here is never a judgement about the company. Stage 1 already
+    qualified it; only the contact is wrong, so the lead returns to the
+    Find-the-Buyer lane rather than being dropped.
+    """
+    from agents.marketing.contact_fit import evaluate_contact_fit
+
+    status = (lead.get("contact_status") or "").strip()
+    if status != "found":
+        return False, f"contact_status={status or 'unset'!r}, need 'found'"
+
+    first = (lead.get("first_name") or "").strip()
+    title = (lead.get("title") or "").strip()
+    if not first:
+        return False, "no first name: the copy addresses the contact by first name"
+    if not title:
+        return False, "no title: contact fit cannot be assessed without one"
+
+    fit = evaluate_contact_fit(title, open_role_count=lead.get("open_role_count"))
+    if not fit.accepted:
+        return False, f"contact fit rejected -- {fit.reason}"
+    return True, f"ok: {fit.reason}"
+
 _INFRA_CONSULTING_SYSTEM_PROMPT = f"""You are writing a 3-touch LinkedIn cold outreach sequence for Kelvin \
 Davis, a senior cloud/platform engineer, targeting a CTO/VP Engineering/Engineering Director/Head of \
 Platform/Founder+CTO at a funded startup (20-200 employees) about infrastructure consulting work. Return \
@@ -422,6 +490,50 @@ def run_o2_cold_dm_writer(
         "proof_signals": research_report.get("proof_signals", []),
     })
 
+    # CONTACT-FIRST GATE (Kelvin's decision 2, 2026-10-05). A draft addressed
+    # to the wrong person wastes the only scarce thing in this pipeline -- a
+    # human's review attention -- and six of eleven pending sequences were
+    # exactly that. Company-only leads are NOT failures: they belong in the
+    # Find-the-Buyer lane until a buyer is named, and they come back here
+    # automatically afterwards.
+    draftable, parked = [], []
+    existing_seq = _existing_sequences_by_lead(db, leads) if lead_source in _MSE_LEADS_SOURCES else {}
+    regenerating: dict[str, str] = {}
+    for lead in leads:
+        if lead_source in _MSE_LEADS_SOURCES:
+            ok, reason = contact_is_draftable(lead)
+            if not ok:
+                parked.append((lead, reason))
+                continue
+            prior = existing_seq.get(lead.get("id"))
+            if prior and prior["status"] == "awaiting_contact":
+                # A buyer has since been named: regenerate this parked draft
+                # IN PLACE rather than inserting a second one.
+                regenerating[lead["id"]] = prior["id"]
+            elif prior:
+                # Any other live sequence already exists. Skipping is what
+                # stops the duplicate-draft bug that put TWO Clutch sequences
+                # (a2699e5d and 7059b489) in the queue for one lead.
+                parked.append((lead, f"a {prior['status']} sequence already exists"))
+                continue
+            draftable.append(lead)
+        else:
+            draftable.append(lead)
+
+    if parked:
+        _emit_event(db, "dm_sequence_parked_no_buyer", {
+            "product_id": product_id, "lead_source": lead_source,
+            "parked": [{"lead_id": l.get("id"), "company": l.get("company"), "reason": r}
+                       for l, r in parked],
+        })
+        _write_audit(db, "lose", product_id, {
+            "campaign_build_id": campaign_build_id, "lead_source": lead_source,
+            "skipped": "no_fit_accepted_contact", "parked_count": len(parked),
+        })
+        for l, r in parked:
+            _log.info("[MKT-O2] parked %s (%s): %s", l.get("company"), l.get("id"), r)
+    leads = draftable
+
     rows: list[dict] = []
     try:
         for lead in leads:
@@ -455,8 +567,30 @@ def run_o2_cold_dm_writer(
                 row["linkedin_lead_id"] = lead["id"]
             rows.append(row)
 
-        if rows:
-            insert_result = db.table("mse_dm_sequences").insert(rows).execute()
+        # Regenerated drafts UPDATE their parked row; genuinely new ones
+        # insert. Splitting here rather than deleting-and-reinserting keeps
+        # the sequence id stable, so anything already referencing it (a
+        # dashboard link, an audit entry) still resolves.
+        to_insert = []
+        for row in rows:
+            seq_id = regenerating.get(row.get("lead_finder_lead_id"))
+            if not seq_id:
+                to_insert.append(row)
+                continue
+            payload = {k: v for k, v in row.items()
+                       if k in ("touch_1", "touch_2", "touch_3")}
+            payload["status"] = "pending_hitl"
+            payload["rejection_reason"] = None
+            updated = db.table("mse_dm_sequences").update(payload).eq("id", seq_id).execute()
+            if not updated.data:
+                raise RuntimeError(f"Regenerating sequence {seq_id} returned no data")
+            _emit_event(db, "dm_sequence_regenerated", {
+                "sequence_id": seq_id, "lead_id": row.get("lead_finder_lead_id"),
+                "product_id": product_id,
+            })
+
+        if to_insert:
+            insert_result = db.table("mse_dm_sequences").insert(to_insert).execute()
             if not insert_result.data:
                 raise RuntimeError("Insert into mse_dm_sequences returned no data")
 

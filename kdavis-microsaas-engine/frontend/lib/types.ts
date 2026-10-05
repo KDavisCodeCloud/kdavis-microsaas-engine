@@ -167,6 +167,30 @@ export interface DmSequence {
   created_at: string;
   mse_apollo_leads: ApolloLead | null;
   mse_linkedin_leads: LinkedInLead | null;
+  // Scraper v2's lead table. Every job_posting_signal /
+  // cloud_decoded_job_signal sequence links here via lead_finder_lead_id,
+  // which is why leaving it out of the embed made every v2 card read
+  // "Unknown / no contact on file".
+  mse_leads: ScraperV2Lead | null;
+}
+
+// mse_leads (scraper v2). Deliberately NOT reusing ApolloLead: this table
+// carries the fit/intent scores, the email grade and the route decision that
+// Apollo leads never had, and conflating them is how the embed got missed.
+export interface ScraperV2Lead {
+  id: string;
+  first_name: string | null;
+  last_name: string | null;
+  company: string | null;
+  title: string | null;
+  email: string | null;
+  email_grade: "valid" | "risky" | "invalid" | "unknown" | null;
+  linkedin_url: string | null;
+  lead_route: "outbound_email" | "manual_linkedin" | "reject" | null;
+  contact_status: "pending" | "found" | "none_found" | "needs_review" | null;
+  job_posting_title: string | null;
+  fit_score: number | null;
+  intent_score: number | null;
 }
 
 // mse_research_reports.report_json shape — see
