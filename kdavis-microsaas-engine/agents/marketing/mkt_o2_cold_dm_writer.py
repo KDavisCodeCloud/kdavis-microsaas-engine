@@ -103,21 +103,43 @@ Rules, non-negotiable:
 # CTOs/VPs Eng evaluating infrastructure consulting aren't the same buyer
 # psychology as the dollar-value-prop framing was written for.
 #
-# Career-history grounding: Kelvin's real, documented background is Boeing,
-# Honeywell Aerospace, and currently CorVel (kdavis-agentic-platform's own
-# MKT-LI1 system prompt: "career history... is texture that proves pattern
-# recognition and real-world engineering depth... not his identity or his
-# headline"). No specific dollar figure, project, or quantified outcome at
-# any of these three companies is documented anywhere in this platform —
-# only the real fact that the work was aerospace-grade/regulated-industry
-# production infrastructure. The prompt below is deliberately worded to
-# reference THAT real credibility signal, not to invent a specific "outcome
-# delivered" the way Kelvin's task description phrased it — inventing one
-# would violate this platform's own repeated "never fabricate a metric or
-# outcome" rule (see e.g. kdavis-agentic-platform's Pillar 5 content rules).
-TOUCH_1_INFRA_MAX_CHARS = 300  # LinkedIn's own connection-note character cap
-TOUCH_2_INFRA_MAX_CHARS = 500
-TOUCH_3_INFRA_MAX_CHARS = 300
+# CAREER-HISTORY CORRECTION (Kelvin, 2026-10-05). The previous version of
+# this prompt instructed the model to claim "production infrastructure work in
+# aerospace and other regulated environments (Boeing, Honeywell Aerospace)".
+# That is NOT TRUE and was going out in live outreach. The real facts:
+#
+#   Boeing, Honeywell Aerospace -- NDT (non-destructive testing) INSPECTION
+#       roles, with cloud/sysadmin work alongside. Not production
+#       infrastructure or cloud engineering roles.
+#   CorVel (current)            -- the cloud engineering role.
+#
+# Misstating a verifiable employment history to a CTO is the fastest way to
+# lose the only thing cold outreach has, and it is the same fabrication this
+# codebase refuses everywhere else. The prompt now forbids the claim outright
+# rather than relying on careful wording, and tests/test_marketing_copy.py
+# fails the build if it reappears.
+#
+# It also no longer leads with employer names at all: credentials-first
+# openers are about the sender, and this ICP responds to a specific, accurate
+# observation about THEIR situation.
+# CAPS RAISED 2026-10-05. 300/500 came from LinkedIn's connection-note limit,
+# but scraper v2 routes these leads to outbound_email and MKT-O5 EMAILS them --
+# so a LinkedIn constraint was silently shortening emails. The visible cost:
+# the first regenerated Earnin touch_2 was trimmed at a sentence boundary and
+# lost its closing URL and ask entirely, i.e. the cap removed the one thing the
+# message existed to deliver.
+#
+# touch_1 stays at 300: it is a short opener on either channel, and a long
+# first cold email reads worse, not better. touch_2 carries the credibility
+# line, the observation AND the link, so it gets room for all three.
+#
+# NOTE: these two touches are still WRITTEN as a LinkedIn sequence ("connection
+# request note", "sent 3 days after the connection request is accepted") while
+# being DELIVERED as email. That mismatch is a copy decision for Kelvin, not
+# something to fix by guessing -- raising the cap only stops the truncation.
+TOUCH_1_INFRA_MAX_CHARS = 300
+TOUCH_2_INFRA_MAX_CHARS = 900
+TOUCH_3_INFRA_MAX_CHARS = 400
 
 # The live consulting site (verified 2026-10-02: HTTP 200 on Vercel, title
 # "Production AI & Agentic Systems Consulting | Kelvin Davis"). Outreach had
@@ -131,6 +153,11 @@ TOUCH_3_INFRA_MAX_CHARS = 300
 # sending domain is still in warmup under a 12/day cap. touch_2 already
 # carries the "Worth a 20-minute call?" ask, so the link belongs with it.
 CONSULTING_OFFER_URL = "https://thdagentic.com"
+
+# Cloud Decoded closes to the DEMO page, not the marketing root (Kelvin,
+# 2026-10-05). A cold reader who is interested wants to see the thing work;
+# the root page makes them hunt for that.
+CLOUD_DECODED_DEMO_URL = "https://theclouddecoded.com/demo"
 
 # The three lead_source values whose leads live in mse_leads and therefore
 # carry contact_status / title / open_role_count.
@@ -218,11 +245,10 @@ specific and real about their company or a real post they made (from the lead/si
 touch_2 = sent 3 days after the connection request is accepted, max {TOUCH_2_INFRA_MAX_CHARS} chars. Lead \
 with a specific observation about their infrastructure challenge, inferred ONLY from the real signal given \
 (a job posting they're running, their funding stage, or real LinkedIn content) — never invent a challenge \
-the signal doesn't support. Then exactly one sentence establishing credibility: Kelvin's background \
-includes production infrastructure work in aerospace and other regulated environments (Boeing, Honeywell \
-Aerospace) and currently at CorVel — reference this as real professional context, NEVER invent a specific \
-dollar figure, project name, or quantified outcome at any of these companies, since none is documented or \
-true to claim. End with exactly this soft ask, adapted naturally to fit the message: "Worth a 20-minute \
+the signal doesn't support. Then at most ONE short sentence of relevant credibility, written in \
+first person about the work itself ("I do cloud and platform engineering -- currently at CorVel") — do NOT \
+name Boeing or Honeywell, do NOT open with employer names or credentials, and NEVER invent a dollar \
+figure, project name, or quantified outcome anywhere. End with exactly this soft ask, adapted naturally to fit the message: "Worth a 20-minute \
 call?" — and include the URL {CONSULTING_OFFER_URL} exactly once, immediately before or after that ask, as \
 a bare URL with no tracking parameters and no link text. Do NOT put a URL in touch_1 or touch_3.
 
@@ -231,6 +257,18 @@ One line. A different angle than touch_2 — reference the specific pain point a
 final message in the sequence; no further follow-up happens after it, so the ask here is the last one.
 
 Rules, non-negotiable:
+- FACTUAL: never claim production-infrastructure, cloud, platform or DevOps work at Boeing or Honeywell. \
+Those were NDT inspection roles with cloud/sysadmin work alongside. CorVel is the cloud engineering role. \
+Do not name Boeing or Honeywell at all.
+- Do NOT lead with employer names, job titles or credentials. Open with the prospect's own situation, \
+taken from the signal given below.
+- FIRST PERSON ONLY. You are writing AS Kelvin. Never write "Kelvin" or refer to him in the third \
+person ("Kelvin has...", "he built...") — write "I".
+- Address the contact by FIRST NAME, taken from the lead context. Never "Hi {{company}} team", never "Hi \
+there", never a company name as the greeting.
+- State ONLY what the job posting actually says. Do not infer or name a compliance regime (FedRAMP, \
+IL2-IL6, SOC 2, HIPAA, ITAR, CMMC, PCI) unless the posting text given below names it explicitly. Do not \
+speculate about clearances, contracts or customers.
 - Never use dollar-amount/"make more money" framing — this ICP is not that buyer
 - Every specific claim about the company (their hiring, their funding, their content) must come from the \
 signal context given below — never invented
@@ -254,8 +292,12 @@ generic opener with nothing specific behind it
 # "job_posting_signal" (that value is hardcoded above to
 # _write_infra_consulting_dm_for_lead's copy) -- a new, separate
 # lead_source keeps this from ever silently picking up the wrong prompt.
-TOUCH_1_CD_JOB_SIGNAL_MAX_CHARS = 300
-TOUCH_2_CD_JOB_SIGNAL_MAX_CHARS = 500
+# Same correction as the consulting caps: this branch is explicitly a 2-touch
+# EMAIL sequence, so a 300-char opener was a LinkedIn limit applied to a
+# channel that has none. The first regenerated GoReel touch_1 ended "...from
+# day", losing "one." to the cap.
+TOUCH_1_CD_JOB_SIGNAL_MAX_CHARS = 450
+TOUCH_2_CD_JOB_SIGNAL_MAX_CHARS = 900
 
 _CLOUD_DECODED_JOB_SIGNAL_SYSTEM_PROMPT = f"""You are writing a 2-touch cold outreach EMAIL sequence for Cloud \
 Decoded (theclouddecoded.com), an 11-agent DevOps/platform automation product, to a company you found publicly \
@@ -276,17 +318,82 @@ the hire, and never imply they shouldn't hire. No pitch beyond one sentence on w
 touch_2 = follow-up sent 3 days later, max {TOUCH_2_CD_JOB_SIGNAL_MAX_CHARS} chars. One concrete detail about how \
 Cloud Decoded's agents (CI/CD triage, K8s alert remediation, IAM minimization, FinOps, drift detection — pick \
 whichever is most relevant to their stated stack, only from what's given below) helps a team like theirs. End \
-with a soft call to action pointing to theclouddecoded.com — a single low-friction next step (e.g. "worth a look \
-at theclouddecoded.com?"), never a hard meeting ask.
+with a soft call to action pointing to {CLOUD_DECODED_DEMO_URL} — a single low-friction next step (e.g. "worth a \
+look at {CLOUD_DECODED_DEMO_URL}?"), never a hard meeting ask. Include that URL exactly once, as a bare URL with \
+no tracking parameters.
 
 Rules, non-negotiable:
+- FACTUAL: never claim production-infrastructure, cloud, platform or DevOps work at Boeing or Honeywell. Those
+  were NDT inspection roles with cloud/sysadmin work alongside. CorVel is the cloud engineering role. Do not
+  name Boeing or Honeywell at all.
+- Do NOT lead with employer names, job titles or credentials. Open with the prospect's own situation.
+- FIRST PERSON ONLY. You are writing AS Kelvin. Never write "Kelvin" or refer to him in the third person —
+  write "I".
+- Address the contact by FIRST NAME, taken from the lead context. Never "Hi {{company}} team", never "Hi
+  there", never a company name as the greeting.
+- State ONLY what the job posting actually says. Do not infer or name a compliance regime (FedRAMP, IL2-IL6,
+  SOC 2, HIPAA, ITAR, CMMC, PCI) unless the posting text given below names it explicitly. Do not speculate
+  about clearances, contracts or customers.
 - Never frame Cloud Decoded as a substitute for hiring, or the posting/role as unnecessary — force-multiplication
   for the hire/team only
 - Every specific claim about their stack or the role must come from the job posting context given below — never
   invented
 - No hype words ("game-changing", "revolutionary"), no generic flattery, no "I noticed you..." as a generic
   opener with nothing specific behind it
-- End touch_2 with the soft CTA to theclouddecoded.com, not a meeting request"""
+- End touch_2 with the soft CTA to {CLOUD_DECODED_DEMO_URL}, not a meeting request"""
+
+
+def _trim_copy(text: Any, limit: int, *, label: str = "touch") -> str:
+    """Enforce a length cap WITHOUT cutting a word, sentence or URL in half.
+
+    The previous `str(x)[:limit]` produced prospect-facing copy ending
+    "...an experienced c" and "Worth a 20-minu" the moment the 2026-10-05
+    rules made drafts longer (the added first-person credibility line plus a
+    URL pushed consulting touch_2 past 500 chars). A draft that ends mid-word
+    reads as a broken system, which is worse than one that ends early.
+
+    Trims to the last sentence end inside the limit; falls back to the last
+    word boundary. Logs when it trims, because copy that regularly needs
+    trimming means the prompt and the cap disagree and a human should know.
+    """
+    text = (str(text) if text is not None else "").strip()
+    if len(text) <= limit:
+        return text
+
+    window = text[:limit]
+    cut = max(window.rfind(". "), window.rfind("! "), window.rfind("? "),
+              window.rfind("\n"))
+    if cut >= limit * 0.5:
+        trimmed = window[:cut + 1].strip()
+    else:
+        space = window.rfind(" ")
+        trimmed = (window[:space] if space > 0 else window).strip()
+    _log.warning("[MKT-O2] %s exceeded %d chars (%d); trimmed at a boundary",
+                 label, limit, len(text))
+    return trimmed
+
+
+def _ensure_close_url(text: str, url: str, limit: int) -> str:
+    """Guarantee the closing touch carries its destination.
+
+    The prompt asks for the URL, but a prompt is a request: across three
+    regenerations the model included it for consulting and then omitted it for
+    GoReel's Cloud Decoded touch_2, leaving a pitch with nowhere to go. The
+    link is the one element that must not depend on model compliance, so it is
+    appended deterministically when absent.
+
+    Appending respects the cap by trimming the BODY first, never the URL --
+    a half-written URL is worse than a shorter message.
+    """
+    if not url or not text:
+        return text
+    if url in text:
+        return text
+    suffix = f"\n\n{url}"
+    room = limit - len(suffix)
+    if room <= 0:
+        return text
+    return _trim_copy(text, room, label="close body").rstrip() + suffix
 
 
 def _write_cloud_decoded_job_signal_dm_for_lead(lead: dict, anthropic_client=None) -> dict:
@@ -295,6 +402,9 @@ def _write_cloud_decoded_job_signal_dm_for_lead(lead: dict, anthropic_client=Non
     signal (the job posting itself, plus any stack keywords extracted
     from its JD text) already lives on the lead row."""
     safe_lead = DataSanitizationShield.clean({
+        # See the consulting writer: the first-name greeting rule needs the
+        # name in context to be satisfiable at all.
+        "first_name": lead.get("first_name"),
         "company": lead.get("company"),
         "job_posting_title": lead.get("job_posting_title"),
         "job_posting_url": lead.get("job_posting_url"),
@@ -311,8 +421,10 @@ def _write_cloud_decoded_job_signal_dm_for_lead(lead: dict, anthropic_client=Non
         raise ValueError(f"MKT-O2 (cloud-decoded job signal) expected {{touch_1, touch_2}}, got: {raw[:200]}")
 
     return {
-        "touch_1": str(parsed["touch_1"])[:TOUCH_1_CD_JOB_SIGNAL_MAX_CHARS],
-        "touch_2": str(parsed["touch_2"])[:TOUCH_2_CD_JOB_SIGNAL_MAX_CHARS],
+        "touch_1": _trim_copy(parsed["touch_1"], TOUCH_1_CD_JOB_SIGNAL_MAX_CHARS, label="cd touch_1"),
+        "touch_2": _ensure_close_url(
+            _trim_copy(parsed["touch_2"], TOUCH_2_CD_JOB_SIGNAL_MAX_CHARS, label="cd touch_2"),
+            CLOUD_DECODED_DEMO_URL, TOUCH_2_CD_JOB_SIGNAL_MAX_CHARS),
     }
 
 
@@ -397,8 +509,8 @@ def _write_dm_for_lead(lead: dict, research_context: dict, lead_source: str = "a
         raise ValueError(f"MKT-O2 expected {{touch_1, touch_2}}, got: {raw[:200]}")
 
     return {
-        "touch_1": str(parsed["touch_1"])[:TOUCH_1_MAX_CHARS],
-        "touch_2": str(parsed["touch_2"])[:TOUCH_2_MAX_CHARS],
+        "touch_1": _trim_copy(parsed["touch_1"], TOUCH_1_MAX_CHARS, label="touch_1"),
+        "touch_2": _trim_copy(parsed["touch_2"], TOUCH_2_MAX_CHARS, label="touch_2"),
     }
 
 
@@ -411,6 +523,12 @@ def _write_infra_consulting_dm_for_lead(lead: dict, anthropic_client=None) -> di
     the lead row (job_posting_title/job_posting_url), unlike the dollar-
     value-prop sequence's dependency on a separate research_report."""
     safe_lead = DataSanitizationShield.clean({
+        # first_name is REQUIRED context, not optional: the prompt instructs
+        # the model to greet the contact by first name, and until 2026-10-05
+        # the name was never passed -- so the first regenerated batch opened
+        # with a bare "Hi —". An instruction the context cannot satisfy is
+        # worse than no instruction, because it reads as a broken template.
+        "first_name": lead.get("first_name"),
         "company": lead.get("company"),
         "title": lead.get("title"),
         "job_posting_title": lead.get("job_posting_title"),
@@ -427,9 +545,11 @@ def _write_infra_consulting_dm_for_lead(lead: dict, anthropic_client=None) -> di
         raise ValueError(f"MKT-O2 (infra consulting) expected {{touch_1, touch_2, touch_3}}, got: {raw[:200]}")
 
     return {
-        "touch_1": str(parsed["touch_1"])[:TOUCH_1_INFRA_MAX_CHARS],
-        "touch_2": str(parsed["touch_2"])[:TOUCH_2_INFRA_MAX_CHARS],
-        "touch_3": str(parsed["touch_3"])[:TOUCH_3_INFRA_MAX_CHARS],
+        "touch_1": _trim_copy(parsed["touch_1"], TOUCH_1_INFRA_MAX_CHARS, label="infra touch_1"),
+        "touch_2": _ensure_close_url(
+            _trim_copy(parsed["touch_2"], TOUCH_2_INFRA_MAX_CHARS, label="infra touch_2"),
+            CONSULTING_OFFER_URL, TOUCH_2_INFRA_MAX_CHARS),
+        "touch_3": _trim_copy(parsed["touch_3"], TOUCH_3_INFRA_MAX_CHARS, label="infra touch_3"),
     }
 
 
