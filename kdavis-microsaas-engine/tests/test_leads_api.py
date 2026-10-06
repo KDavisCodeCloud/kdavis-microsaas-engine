@@ -373,25 +373,47 @@ def test_outbound_products_only_lists_enabled_ones(fake_db, monkeypatch):
     assert any("outbound_enabled" in str(c.calls) for c in calls)
 
 
-def test_weekly_summary_reports_unmeasured_stages_as_null_not_zero(fake_db, monkeypatch):
-    """0 replies reads as 'nobody replied'. None reads as 'we do not measure
-    this'. Those are different claims and the dashboard must not conflate
-    them."""
+def test_weekly_funnel_reports_real_reply_and_call_counts(fake_db, monkeypatch):
+    """Decision 3 (2026-10-06): replies are marked by hand in the
+    Conversations lane, so they are MEASURED data. 0 now means zero replies,
+    not "we do not measure this"."""
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
     fake_db.responses["mse_lead_finder_runs"] = []
     fake_db.responses["mse_products"] = []
     fake_db.responses["mse_leads"] = []
     fake_db.responses["mse_dm_sequences"] = []
+    fake_db.responses["mse_outreach_conversations"] = []
 
-    resp = client.get("/marketing/leads/weekly-summary", headers=AUTH)
-    assert resp.status_code == 200
-    funnel = resp.json()["funnel"]
-    assert funnel["replies"] is None
-    assert funnel["calls_booked"] is None
-    assert funnel["qualified"] == 0 and funnel["sent"] == 0
-    assert "NOT MEASURED" in funnel["notes"]["replies"]
-    assert "NOT MEASURED" in funnel["notes"]["calls_booked"]
+    funnel = client.get("/marketing/leads/weekly-summary", headers=AUTH).json()["funnel"]
+    assert funnel["replies"] == 0, "a measured zero, not null"
+    assert funnel["calls_booked"] == 0
+    assert "NOT MEASURED" not in funnel["notes"]["replies"]
+    assert "marked by hand" in funnel["notes"]["replies"]
 
+
+def test_the_funnel_counts_each_stage_from_its_own_timestamp(fake_db, monkeypatch):
+    """A deal that replied Monday and booked a call Thursday must count in
+    BOTH columns. Counting by current stage would only ever show it in the
+    furthest one."""
+    from datetime import datetime, timedelta, timezone
+    monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    recent = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    old = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
+    fake_db.responses["mse_lead_finder_runs"] = []
+    fake_db.responses["mse_products"] = []
+    fake_db.responses["mse_leads"] = []
+    fake_db.responses["mse_dm_sequences"] = []
+    fake_db.responses["mse_outreach_conversations"] = [
+        {"replied_at": recent, "call_booked_at": recent, "proposal_sent_at": None,
+         "won_at": None, "lost_at": None},
+        # Outside the window: must not be counted.
+        {"replied_at": old, "call_booked_at": old, "proposal_sent_at": None,
+         "won_at": None, "lost_at": None},
+    ]
+    funnel = client.get("/marketing/leads/weekly-summary", headers=AUTH).json()["funnel"]
+    assert funnel["replies"] == 1
+    assert funnel["calls_booked"] == 1
+    assert funnel["proposals"] == 0
 
 # ── Pipeline default: v2, not the legacy keyword path (2026-10-02) ────────
 
@@ -476,13 +498,14 @@ def test_outreach_summary_counts_each_lane(fake_db, monkeypatch):
     assert body["daily_send_cap"] >= 1
 
 
-def test_outreach_summary_reports_replies_as_null(fake_db, monkeypatch):
+def test_outreach_summary_replies_is_a_real_count(fake_db, monkeypatch):
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
     fake_db.responses["mse_leads"] = []
     fake_db.responses["mse_dm_sequences"] = []
+    fake_db.responses["mse_outreach_conversations"] = []
     body = client.get("/marketing/outreach/summary", headers=AUTH).json()
-    assert body["replies_this_week"] is None
-    assert "NOT MEASURED" in body["notes"]["replies_this_week"]
+    assert body["replies_this_week"] == 0, "measured zero, not null"
+    assert "NOT MEASURED" not in body["notes"]["replies_this_week"]
 
 
 def test_outreach_summary_requires_auth():

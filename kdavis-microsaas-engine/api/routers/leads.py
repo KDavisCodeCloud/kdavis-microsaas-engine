@@ -282,6 +282,10 @@ async def get_outreach_summary_counters(authorization: Optional[str] = Header(de
     ready_to_paste = sum(1 for s in seqs if s.get("status") == "approved_manual")
     sends_today = sum(1 for s in seqs if (s.get("touch_1_sent_at") or "").startswith(today))
 
+    convs = (db.table("mse_outreach_conversations").select("replied_at").execute().data or [])
+    replies_this_week = sum(1 for c in convs
+                            if c.get("replied_at") and str(c["replied_at"]) >= week_ago)
+
     from core.email_compliance import daily_send_cap
     return {
         "awaiting_buyer": awaiting_buyer,
@@ -289,14 +293,16 @@ async def get_outreach_summary_counters(authorization: Optional[str] = Header(de
         "sends_today": sends_today,
         "daily_send_cap": daily_send_cap(),
         "ready_to_paste": ready_to_paste,
-        # Not measured -- see _outreach_funnel. null, never 0, so neither the
-        # header nor the digest can render "0 replies" as a finding.
-        "replies_this_week": None,
+        # A REAL count as of decision 3 (2026-10-06): replies are marked by
+        # hand in the Conversations lane, so this is measured data and 0 means
+        # zero replies, not "unmeasured". Counted from replied_at so it is a
+        # true 7-day window rather than a snapshot of current stages.
+        "replies_this_week": replies_this_week,
         "parked_awaiting_contact": sum(1 for s in seqs if s.get("status") == "awaiting_contact"),
         "window_start": week_ago,
         "notes": {
-            "replies_this_week": ("NOT MEASURED: no reply capture exists "
-                                  "(no replied_at column; Reply-To is a personal mailbox)"),
+            "replies_this_week": ("mse_outreach_conversations.replied_at within 7 days -- "
+                                  "marked by hand in the Conversations lane"),
         },
     }
 
@@ -383,26 +389,43 @@ def _outreach_funnel(db, since: str) -> dict:
                                            "touch_1_sent", "touch_2_sent", "replied"))
     sent = sum(1 for s in seqs if (s.get("touch_1_sent_at") or "") >= since)
 
+    # REPLIES AND CALLS ARE NOW REAL COUNTS (decision 3, 2026-10-06).
+    # mse_outreach_conversations is the source of truth: Kelvin marks replies
+    # by hand during his daily block, so the data exists and a count of it is a
+    # fact, not an estimate. They report 0 when 0 -- which is now a measured
+    # zero, not the "we do not measure this" null they used to be. Automated
+    # reply detection stays deferred until volume exceeds ~30 sends/day.
+    #
+    # Counted from the per-stage TIMESTAMP, not the current stage: a deal that
+    # replied on Monday and booked a call on Thursday must count in both
+    # columns for the week, and a current-stage count would only ever show it
+    # in the furthest one.
+    convs = (db.table("mse_outreach_conversations")
+             .select("replied_at,call_booked_at,proposal_sent_at,won_at,lost_at")
+             .execute().data or [])
+    in_window = lambda ts: bool(ts) and str(ts) >= since
+    replies = sum(1 for c in convs if in_window(c.get("replied_at")))
+    calls_booked = sum(1 for c in convs if in_window(c.get("call_booked_at")))
+    proposals = sum(1 for c in convs if in_window(c.get("proposal_sent_at")))
+    won = sum(1 for c in convs if in_window(c.get("won_at")))
+    lost = sum(1 for c in convs if in_window(c.get("lost_at")))
+
     return {
         "qualified": qualified,
         "approved": approved,
         "sent": sent,
-        # REPLIES AND CALLS ARE NOT MEASURED, and are reported as null rather
-        # than 0 so the dashboard cannot render "0 replies" as a result. There
-        # is no reply-capture path at all: mse_dm_sequences has no replied_at
-        # column (verified against information_schema), and Reply-To points at
-        # a personal Gmail mailbox, so a prospect's reply never reaches this
-        # system. Measuring it needs either Resend inbound parsing on a domain
-        # mailbox or IMAP against the reply inbox -- neither is wired.
-        "replies": None,
-        "calls_booked": None,
+        "replies": replies,
+        "calls_booked": calls_booked,
+        "proposals": proposals,
+        "won": won,
+        "lost": lost,
         "notes": {
             "qualified": "mse_leads created in the window that reached a qualified status",
             "approved": "mse_dm_sequences created in the window that cleared HITL",
             "sent": "counted from a real touch_1_sent_at timestamp, not a status string",
-            "replies": ("NOT MEASURED: no replied_at column and replies go to a personal "
-                        "mailbox; needs Resend inbound or IMAP capture"),
-            "calls_booked": "NOT MEASURED: no calendar/booking source is wired yet",
+            "replies": ("mse_outreach_conversations.replied_at in the window -- marked by hand "
+                        "during the daily block. Automated detection deferred until ~30 sends/day."),
+            "calls_booked": "mse_outreach_conversations.call_booked_at in the window",
         },
     }
 
