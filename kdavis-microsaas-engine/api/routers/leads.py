@@ -253,6 +253,54 @@ async def list_outbound_enabled_products(authorization: Optional[str] = Header(d
     return {"products": out, "count": len(out)}
 
 
+@router.get("/outreach/summary")
+async def get_outreach_summary_counters(authorization: Optional[str] = Header(default=None)):
+    """The five header counters for the CEO Decoded Outreach section, and the
+    same numbers the 8am digest leads with (decisions 3 and 5, 2026-10-05).
+
+    ONE source for both deliberately: the digest telling Kelvin "4 awaiting
+    approval" while the dashboard header says 5 is worse than either being
+    slightly stale, and two separate count queries drift the moment a status
+    value is added.
+    """
+    require_marketing_api_key(authorization)
+    db = get_supabase()
+
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    week_ago = (now - timedelta(days=7)).isoformat()
+    today = now.date().isoformat()
+
+    leads = (db.table("mse_leads").select("id,contact_status,lead_route,status").execute().data or [])
+    seqs = (db.table("mse_dm_sequences")
+            .select("id,status,touch_1_sent_at,lead_source").execute().data or [])
+
+    awaiting_buyer = sum(1 for l in leads
+                         if l.get("contact_status") in ("pending", "needs_review"))
+    awaiting_approval = sum(1 for s in seqs if s.get("status") == "pending_hitl")
+    # approved_manual is the LinkedIn track: approved copy a human pastes.
+    ready_to_paste = sum(1 for s in seqs if s.get("status") == "approved_manual")
+    sends_today = sum(1 for s in seqs if (s.get("touch_1_sent_at") or "").startswith(today))
+
+    from core.email_compliance import daily_send_cap
+    return {
+        "awaiting_buyer": awaiting_buyer,
+        "awaiting_approval": awaiting_approval,
+        "sends_today": sends_today,
+        "daily_send_cap": daily_send_cap(),
+        "ready_to_paste": ready_to_paste,
+        # Not measured -- see _outreach_funnel. null, never 0, so neither the
+        # header nor the digest can render "0 replies" as a finding.
+        "replies_this_week": None,
+        "parked_awaiting_contact": sum(1 for s in seqs if s.get("status") == "awaiting_contact"),
+        "window_start": week_ago,
+        "notes": {
+            "replies_this_week": ("NOT MEASURED: no reply capture exists "
+                                  "(no replied_at column; Reply-To is a personal mailbox)"),
+        },
+    }
+
+
 @router.get("/leads/weekly-summary")
 async def get_weekly_lead_summary(
     days: int = 7,

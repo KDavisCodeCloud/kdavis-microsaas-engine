@@ -65,7 +65,15 @@ async def tenant_context_middleware(request: Request, call_next):
     # two of those five have a dynamic path segment a PUBLIC_PATHS set
     # membership check can't match, so this is a prefix check like
     # /marketing/linkedin/ above.
-    if request.url.path.startswith("/marketing/leads") or request.url.path.startswith("/marketing/icp"):
+    # /marketing/outreach/summary (2026-10-05) is the same shape again: the
+    # Outreach header counters and the 8am digest's lead line, read by the CEO
+    # Decoded dashboard and by n8n with MARKETING_API_KEY. Added here because
+    # a route placed outside this list fails with the tenant middleware's own
+    # rejection, which looks nothing like an auth error and cost a debugging
+    # cycle to recognise.
+    if (request.url.path.startswith("/marketing/leads")
+            or request.url.path.startswith("/marketing/icp")
+            or request.url.path.startswith("/marketing/outreach")):
         return await call_next(request)
 
     # api/routers/brevo.py: same n8n/internal-triggered, MARKETING_API_KEY

@@ -448,3 +448,50 @@ def test_scraper_v2_adopts_an_existing_run_row_instead_of_inserting(fake_db, mon
                if c.table_name == "mse_lead_finder_runs" and c.calls[0][0] == "update"]
     assert not inserts, "must not insert a second run row when given run_id"
     assert updates, "must mark the adopted row as running"
+
+
+# ── Outreach header counters (decisions 3 + 5, 2026-10-05) ───────────────
+
+def test_outreach_summary_counts_each_lane(fake_db, monkeypatch):
+    monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    fake_db.responses["mse_leads"] = [
+        {"id": "a", "contact_status": "pending"},
+        {"id": "b", "contact_status": "needs_review"},
+        {"id": "c", "contact_status": "found"},
+    ]
+    fake_db.responses["mse_dm_sequences"] = [
+        {"id": "1", "status": "pending_hitl"},
+        {"id": "2", "status": "pending_hitl"},
+        {"id": "3", "status": "approved_manual"},
+        {"id": "4", "status": "awaiting_contact"},
+        {"id": "5", "status": "rejected_hitl"},
+    ]
+    body = client.get("/marketing/outreach/summary", headers=AUTH).json()
+    # needs_review counts as awaiting a buyer: a contact nobody has verified
+    # is not a buyer yet.
+    assert body["awaiting_buyer"] == 2
+    assert body["awaiting_approval"] == 2
+    assert body["ready_to_paste"] == 1
+    assert body["parked_awaiting_contact"] == 1
+    assert body["daily_send_cap"] >= 1
+
+
+def test_outreach_summary_reports_replies_as_null(fake_db, monkeypatch):
+    monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    fake_db.responses["mse_leads"] = []
+    fake_db.responses["mse_dm_sequences"] = []
+    body = client.get("/marketing/outreach/summary", headers=AUTH).json()
+    assert body["replies_this_week"] is None
+    assert "NOT MEASURED" in body["notes"]["replies_this_week"]
+
+
+def test_outreach_summary_requires_auth():
+    assert client.get("/marketing/outreach/summary").status_code == 401
+
+
+def test_outreach_summary_prefix_is_exempt_from_tenant_context():
+    """A route outside the exemption list fails with the tenant middleware's
+    own rejection, which looks nothing like an auth error."""
+    import inspect
+    source = inspect.getsource(tenant_context_middleware)
+    assert "/marketing/outreach" in source
