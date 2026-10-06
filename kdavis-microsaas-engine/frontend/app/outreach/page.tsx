@@ -9,6 +9,19 @@ import type { DmSequence, ApolloLead, LinkedInLead } from "@/lib/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
+// RETIRED 2026-10-05 (Kelvin's decision 3). Approval moved to the CEO
+// Decoded Marketing page's Outreach section, and there must be exactly ONE
+// approval queue: this page's own queue rendered "Unknown / no contact on
+// file" for all 11 drafts because its PostgREST embed never included
+// mse_leads, and approving here routed every scraper-v2 lead to a status
+// MKT-O5 never polls.
+//
+// Read-only rather than deleted: Kelvin wants a week of daily use on the new
+// surface before this page goes. Copy buttons stay enabled -- reading and
+// copying were never the problem.
+const READ_ONLY = true;
+const CEO_OUTREACH_URL = "https://ceo.thdecodedempire.com/dashboard/marketing#outreach";
+
 function leadDisplayName(seq: DmSequence): string {
   const lead = seq.mse_leads ?? seq.mse_apollo_leads ?? seq.mse_linkedin_leads;
   if (!lead) return "Unknown";
@@ -139,6 +152,10 @@ export default function OutreachPage() {
   }, [sequences]);
 
   async function handleApprove(id: string) {
+    if (READ_ONLY) {
+      setError('This page is read-only. Approve drafts in CEO Decoded → Marketing → Outreach.');
+      return;
+    }
     setBusyId(id);
     setError(null);
     try {
@@ -151,6 +168,10 @@ export default function OutreachPage() {
   }
 
   async function handleReject(id: string) {
+    if (READ_ONLY) {
+      setError('This page is read-only. Approve drafts in CEO Decoded → Marketing → Outreach.');
+      return;
+    }
     setBusyId(id);
     setError(null);
     try {
@@ -190,6 +211,8 @@ export default function OutreachPage() {
     await navigator.clipboard.writeText(text);
   }
 
+
+
   return (
     <DashboardShell>
       <TopBar title="Outreach">
@@ -197,6 +220,27 @@ export default function OutreachPage() {
           {sequences.length} pending approval · {readyToPaste.length} ready to paste · {linkedinLeads.length} LinkedIn queued
         </span>
       </TopBar>
+
+      <div
+        className="mx-6 mt-4 p-4 rounded-[14px]"
+        style={{ background: "#241a10", border: "1px solid #3d2e1f" }}
+      >
+        <div className="text-[13px] font-bold mb-1" style={{ color: "#e8963f" }}>
+          This page is read-only — approvals have moved
+        </div>
+        <div className="text-[12px] mb-2" style={{ color: "#aab4bd" }}>
+          Outreach now lives in one place, with the buyer lane, drafts, paste queue and
+          conversations together. Approving here is disabled so there is only ever one
+          approval queue.
+        </div>
+        <a
+          href={CEO_OUTREACH_URL}
+          className="text-[12px] font-mono"
+          style={{ color: "#5eead4" }}
+        >
+          Open CEO Decoded → Marketing → Outreach →
+        </a>
+      </div>
 
       <div className="flex-1 overflow-y-auto p-6 min-w-0">
         <div className="space-y-5">
