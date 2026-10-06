@@ -19,7 +19,6 @@ Same internal-secret auth as every other marketing router here
 """
 
 import logging
-import re
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
@@ -27,6 +26,7 @@ from pydantic import BaseModel, field_validator
 
 from agents.marketing.mkt_lead_finder import CLOUD_DECODED_PRODUCT_ID
 from api.middleware.auth import require_marketing_api_key
+from core.linkedin_urls import PROFILE_URL_HELP, is_profile_url
 from core.supabase_client import get_supabase
 
 log = logging.getLogger(__name__)
@@ -47,9 +47,9 @@ DEFAULT_TARGET_TITLES = [
     "Founder", "Co-Founder",
 ]
 
-_LINKEDIN_PROFILE_RE = re.compile(
-    r"^https?://(?:[a-z]{2,3}\.)?linkedin\.com/in/[A-Za-z0-9\-_%./]+/?$", re.IGNORECASE
-)
+# Moved to core/linkedin_urls.py 2026-10-06 so the Approve-Drafts card uses
+# the same check. Two copies would disagree the first time one learned about a
+# new URL shape.
 
 
 class SaveContactRequest(BaseModel):
@@ -65,13 +65,10 @@ class SaveContactRequest(BaseModel):
     @classmethod
     def _must_be_a_profile_url(cls, v: str) -> str:
         v = (v or "").strip()
-        if not _LINKEDIN_PROFILE_RE.match(v):
+        if not is_profile_url(v):
             # A company URL (/company/...) or a search URL is a common
             # paste mistake and would be stored as a person's profile.
-            raise ValueError(
-                "linkedin_url must be a personal profile URL of the form "
-                "https://www.linkedin.com/in/<slug>"
-            )
+            raise ValueError(PROFILE_URL_HELP)
         return v
 
     @field_validator("name", "title")

@@ -1,5 +1,6 @@
 """Outreach lanes b/c/d (Kelvin's decision 3, 2026-10-05)."""
 
+import pytest
 from fastapi.testclient import TestClient
 
 import api.routers.outreach_lanes as lanes
@@ -262,3 +263,123 @@ def test_every_lane_endpoint_requires_auth():
         fn = getattr(client, method)
         r = fn(path) if payload is None else fn(path, json=payload)
         assert r.status_code == 401, f"{method} {path} -> {r.status_code}"
+
+
+# ── LinkedIn URL gate (Kelvin's decision 1, 2026-10-06) ──────────────────
+#
+# A manual_linkedin draft is unapprovable without a profile URL: the lane is
+# paste-by-hand and there is no LinkedIn API to look the person up. Security
+# Risk Advisors reached the queue with a CTO and no URL.
+
+def test_a_linkedin_draft_without_a_url_is_blocked(fake_db, monkeypatch):
+    monkeypatch.setattr(lanes, "get_supabase", lambda: fake_db)
+    _seed(fake_db)
+    fake_db.responses["mse_leads"][0]["lead_route"] = "manual_linkedin"
+    fake_db.responses["mse_leads"][0]["linkedin_url"] = None
+    card = client.get("/marketing/outreach/drafts", headers=AUTH).json()["drafts"][0]
+    assert card["blocked_reason"]
+    assert "profile URL" in card["blocked_reason"]
+
+
+def test_a_linkedin_draft_with_a_url_is_not_blocked(fake_db, monkeypatch):
+    monkeypatch.setattr(lanes, "get_supabase", lambda: fake_db)
+    _seed(fake_db)
+    fake_db.responses["mse_leads"][0]["lead_route"] = "manual_linkedin"
+    fake_db.responses["mse_leads"][0]["linkedin_url"] = "https://www.linkedin.com/in/cory"
+    card = client.get("/marketing/outreach/drafts", headers=AUTH).json()["drafts"][0]
+    assert card["blocked_reason"] is None
+
+
+def test_an_email_draft_is_never_blocked_by_a_missing_url(fake_db, monkeypatch):
+    """MKT-O5 sends to an address; a LinkedIn URL is irrelevant to that."""
+    monkeypatch.setattr(lanes, "get_supabase", lambda: fake_db)
+    _seed(fake_db)
+    fake_db.responses["mse_leads"][0]["lead_route"] = "outbound_email"
+    fake_db.responses["mse_leads"][0]["linkedin_url"] = None
+    card = client.get("/marketing/outreach/drafts", headers=AUTH).json()["drafts"][0]
+    assert card["blocked_reason"] is None
+
+
+def test_a_company_url_is_rejected(fake_db, monkeypatch):
+    """The common paste mistake. Same rejection as Find the Buyer, from the
+    same shared validator."""
+    monkeypatch.setattr(lanes, "get_supabase", lambda: fake_db)
+    _seed(fake_db)
+    resp = client.post("/marketing/outreach/drafts/seq-1/linkedin-url",
+                       json={"linkedin_url": "https://www.linkedin.com/company/onebrief/"},
+                       headers=AUTH)
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("url", [
+    "https://www.linkedin.com/in/cory-ondrejka",
+    "https://linkedin.com/in/cory",
+    "http://fr.linkedin.com/in/cory",       # country subdomains are real
+    "https://www.linkedin.com/in/cory/",
+])
+def test_real_profile_urls_are_accepted(url, fake_db, monkeypatch):
+    monkeypatch.setattr(lanes, "get_supabase", lambda: fake_db)
+    _seed(fake_db)
+    resp = client.post("/marketing/outreach/drafts/seq-1/linkedin-url",
+                       json={"linkedin_url": url}, headers=AUTH)
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["blocked_reason"] is None
+
+
+def test_the_url_is_written_to_the_LEAD_not_the_sequence(fake_db, monkeypatch):
+    """It is a property of the person and must survive the draft being
+    regenerated."""
+    monkeypatch.setattr(lanes, "get_supabase", lambda: fake_db)
+    _seed(fake_db)
+    client.post("/marketing/outreach/drafts/seq-1/linkedin-url",
+                json={"linkedin_url": "https://www.linkedin.com/in/cory"}, headers=AUTH)
+    writes = [c for c in fake_db.executed
+              if c.table_name == "mse_leads" and c.calls[0][0] == "update"]
+    assert writes and writes[0]._payload == {"linkedin_url": "https://www.linkedin.com/in/cory"}
+    seq_writes = [c for c in fake_db.executed
+                  if c.table_name == "mse_dm_sequences" and c.calls[0][0] == "update"]
+    assert not seq_writes, "the URL must not be stored on the sequence"
+
+
+def test_saving_a_url_on_an_approved_draft_is_refused(fake_db, monkeypatch):
+    monkeypatch.setattr(lanes, "get_supabase", lambda: fake_db)
+    _seed(fake_db, seq_status="approved_manual")
+    resp = client.post("/marketing/outreach/drafts/seq-1/linkedin-url",
+                       json={"linkedin_url": "https://www.linkedin.com/in/cory"}, headers=AUTH)
+    assert resp.status_code == 409
+
+
+def test_a_duplicate_profile_names_the_other_company(fake_db, monkeypatch):
+    """linkedin_url carries a UNIQUE partial index; the raw DB error is
+    opaque."""
+    monkeypatch.setattr(lanes, "get_supabase", lambda: fake_db)
+    _seed(fake_db)
+    fake_db.responses["mse_leads"] = [
+        {"id": "other-lead", "company": "Acme", "lead_route": "manual_linkedin"},
+    ]
+    resp = client.post("/marketing/outreach/drafts/seq-1/linkedin-url",
+                       json={"linkedin_url": "https://www.linkedin.com/in/cory"}, headers=AUTH)
+    assert resp.status_code == 409
+    assert "Acme" in resp.json()["detail"]
+
+
+def test_the_approve_endpoint_enforces_the_gate_too():
+    """A disabled button is a UI convenience; this endpoint is reachable with
+    a session and curl."""
+    import inspect
+    import api.routers.outreach as outreach
+    src = inspect.getsource(outreach.approve_dm_sequence)
+    assert "_approval_block_reason" in src
+    assert "409" in src or "status_code=409" in src
+
+
+def test_both_lanes_share_one_url_validator():
+    """Two copies would disagree the first time one learned a new URL shape."""
+    import inspect
+    import api.routers.buyer_research as br
+    from core import linkedin_urls
+    assert "is_profile_url" in inspect.getsource(br)
+    assert "_LINKEDIN_PROFILE_RE" not in inspect.getsource(br), \
+        "buyer_research still has its own copy of the regex"
+    assert linkedin_urls.is_profile_url("https://www.linkedin.com/in/x")
+    assert not linkedin_urls.is_profile_url("https://www.linkedin.com/company/x")

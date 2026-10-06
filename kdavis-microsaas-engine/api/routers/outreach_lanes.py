@@ -29,6 +29,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, field_validator
 
 from api.middleware.auth import require_marketing_api_key
+from core.linkedin_urls import PROFILE_URL_HELP, is_profile_url
 from core.supabase_client import get_supabase
 
 log = logging.getLogger(__name__)
@@ -119,8 +120,34 @@ def _card(db, seq: dict, products: dict) -> dict:
         "scores": {"fit": lead.get("fit_score"), "intent": lead.get("intent_score")},
         "why": lead.get("score_reasons") or [],
         "touches": {k: seq.get(k) for k in ("touch_1", "touch_2", "touch_3") if seq.get(k)},
+        "subject": seq.get("subject"),
+        "drafted_for_route": seq.get("drafted_for_route"),
+        # APPROVAL GATE (decision 1, 2026-10-06). Computed server-side so the
+        # dashboard never re-derives the rule -- a client-side copy would drift
+        # the moment the rule changed, and this one gates a real send.
+        #
+        # A manual_linkedin draft is unapprovable without a profile URL: the
+        # whole lane is "open the profile, paste the note", and there is no
+        # LinkedIn API to look the person up. Security Risk Advisors reached
+        # the queue with a CTO and no URL, which would have left a human
+        # searching LinkedIn by name with no way to confirm the right person.
+        "blocked_reason": _approval_block_reason(lead),
         "created_at": seq.get("created_at"),
     }
+
+
+def _approval_block_reason(lead: dict) -> Optional[str]:
+    """Why this draft cannot be approved yet, or None.
+
+    Email-route drafts are unaffected: MKT-O5 sends those to an address, and a
+    LinkedIn URL is irrelevant to whether that works.
+    """
+    if (lead.get("lead_route") or "").strip() != "manual_linkedin":
+        return None
+    if not is_profile_url(lead.get("linkedin_url")):
+        return ("LinkedIn route needs the contact's profile URL before approval -- "
+                "this lane is paste-by-hand and there is no way to look them up")
+    return None
 
 
 def _products(db) -> dict:
@@ -193,6 +220,78 @@ async def edit_draft(
         )
     log.info("[Outreach] draft %s edited: %s", sequence_id, sorted(payload))
     return {"sequence_id": sequence_id, "edited": sorted(payload)}
+
+
+class LinkedInUrl(BaseModel):
+    """Only the URL. Name and title already exist on the lead by the time a
+    draft is in the approval queue (the contact-first gate guarantees it), so
+    accepting them here would let this endpoint silently overwrite a verified
+    contact with whatever was typed next to a URL."""
+
+    linkedin_url: str
+
+    @field_validator("linkedin_url")
+    @classmethod
+    def _must_be_a_profile(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not is_profile_url(v):
+            # /company/ URLs are the common paste mistake -- same rejection as
+            # the Find-the-Buyer lane, from the same validator.
+            raise ValueError(PROFILE_URL_HELP)
+        return v
+
+
+@router.post("/drafts/{sequence_id}/linkedin-url")
+async def save_linkedin_url(
+    sequence_id: str,
+    body: LinkedInUrl,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Attach a profile URL to the draft's contact, so it can be approved.
+
+    No Brave lookup and no enrichment: this is a human pasting a URL they
+    already have open. Writes to the LEAD, not the sequence -- the URL is a
+    property of the person and must survive the draft being regenerated.
+    """
+    require_marketing_api_key(authorization)
+    db = get_supabase()
+
+    seq = (db.table("mse_dm_sequences").select("id,status,lead_finder_lead_id")
+           .eq("id", sequence_id).maybe_single().execute())
+    seq = seq.data if seq else None
+    if not seq:
+        raise HTTPException(status_code=404, detail="Sequence not found")
+    if seq.get("status") != "pending_hitl":
+        raise HTTPException(
+            status_code=409,
+            detail="Only a draft awaiting approval can have its contact edited",
+        )
+    lead_id = seq.get("lead_finder_lead_id")
+    if not lead_id:
+        raise HTTPException(
+            status_code=409,
+            detail="This sequence has no mse_leads contact to attach a URL to",
+        )
+
+    # linkedin_url carries a UNIQUE partial index; a duplicate paste would 409
+    # at the database with an opaque message. Same guard, and same wording, as
+    # the Find-the-Buyer lane.
+    clash = (db.table("mse_leads").select("id,company")
+             .eq("linkedin_url", body.linkedin_url).execute().data or [])
+    other = [c for c in clash if c["id"] != lead_id]
+    if other:
+        raise HTTPException(
+            status_code=409,
+            detail=f"That LinkedIn profile is already on the lead for {other[0].get('company')!r}",
+        )
+
+    result = (db.table("mse_leads").update({"linkedin_url": body.linkedin_url})
+              .eq("id", lead_id).execute())
+    if not result.data:
+        raise HTTPException(status_code=500, detail="Failed to save the profile URL")
+    log.info("[Outreach] linkedin_url saved for lead %s via draft %s", lead_id, sequence_id)
+    return {"sequence_id": sequence_id, "lead_id": lead_id,
+            "linkedin_url": body.linkedin_url, "blocked_reason": None}
 
 
 @router.get("/ready-to-paste")

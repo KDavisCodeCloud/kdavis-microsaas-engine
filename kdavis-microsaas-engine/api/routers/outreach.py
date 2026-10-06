@@ -160,6 +160,22 @@ async def approve_dm_sequence(sequence_id: str, body: ResolveSequence, request: 
         raise HTTPException(status_code=404, detail="Sequence not found or already resolved")
 
     lead_source = existing.data.get("lead_source") or "apollo"
+
+    # LINKEDIN URL GATE (decision 1, 2026-10-06). Enforced HERE, not only in
+    # the dashboard: a disabled button is a UI convenience, and this endpoint
+    # is reachable with a session and curl. A manual_linkedin sequence
+    # approved without a profile URL lands in Ready-to-Paste with nobody to
+    # paste to, and there is no LinkedIn API to look the person up.
+    lf_id = existing.data.get("lead_finder_lead_id")
+    if lf_id:
+        from api.routers.outreach_lanes import _approval_block_reason
+        lead_row = (db.table("mse_leads")
+                    .select("lead_route,linkedin_url")
+                    .eq("id", lf_id).maybe_single().execute())
+        blocked = _approval_block_reason((lead_row.data if lead_row else None) or {})
+        if blocked:
+            raise HTTPException(status_code=409, detail=blocked)
+
     new_status = _approval_target_status(db, lead_source, existing.data.get("lead_finder_lead_id"))
     now = datetime.now(timezone.utc)
 
