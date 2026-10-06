@@ -100,7 +100,39 @@
       ],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// A QUEUED receipt, not a result. Each run takes hours; the Sunday 20:00\n// Weekly Digest reports what completed. Saying \"queued\" here keeps the two\n// claims from being confused.\nconst items = $input.all();\nconst lines = [];\nlet queued = 0, refused = 0, failed = 0;\nlet budgetLine = null;\n\nfor (const it of items) {\n  const j = it.json || {};\n  if (j.__none) {\n    lines.push('No products have outbound_enabled = true. Nothing was queued.');\n    continue;\n  }\n  // continueRegularOutput puts a failed request's payload under .error\n  const err = j.error || null;\n  const detail = (err && err.detail) || j.detail || null;\n\n  if (detail && detail.error === 'brave_budget_exhausted') {\n    refused++;\n    const b = detail.budget || {};\n    lines.push('REFUSED (Brave budget): ' + (b.reason || 'budget exhausted'));\n  } else if (j.run_id) {\n    queued++;\n    lines.push('queued run ' + j.run_id + ' (status ' + (j.status || '?') + ')');\n    if (j.brave_budget) budgetLine = j.brave_budget;\n  } else if (err) {\n    failed++;\n    lines.push('FAILED to queue: ' + (err.message || JSON.stringify(err)).slice(0, 180));\n  } else {\n    failed++;\n    lines.push('FAILED to queue: unrecognised response ' + JSON.stringify(j).slice(0, 180));\n  }\n}\n\nconst header = queued + ' run(s) queued, ' + refused + ' refused on budget, ' + failed + ' failed.';\nconst body = [header, ''].concat(lines);\nif (budgetLine) {\n  body.push('');\n  body.push('Brave budget: ' + budgetLine.used + '/' + budgetLine.cap +\n            ' used (' + budgetLine.percent_used + '%), stop threshold ' +\n            budgetLine.threshold + ', ' + budgetLine.remaining_to_threshold +\n            ' left before it.');\n}\nbody.push('');\nbody.push('These runs take hours. The Sunday 20:00 Weekly Digest reports what completed.');\n\nreturn [{ json: { subject: 'Lead Finder - runs queued', body: body.join('\\n') } }];\n"
+        "jsCode": "// Sends ONLY on a problem. A good Sunday morning produces no email: the runs\n// were queued, there is nothing to do, and the 20:00 Weekly Digest reports\n// what actually completed. A budget refusal or a failed queue IS actionable,\n// because waiting until 20:00 would cost the week.\nconst items = $input.all();\nconst problems = [];\nlet queued = 0;\n\nfor (const it of items) {\n  const j = it.json || {};\n  if (j.__none) { problems.push('No products have outbound_enabled = true \u2014 nothing was queued.'); continue; }\n  const err = j.error || null;\n  const detail = (err && err.detail) || j.detail || null;\n  if (detail && detail.error === 'brave_budget_exhausted') {\n    const b = detail.budget || {};\n    problems.push('REFUSED on Brave budget: ' + (b.reason || 'budget exhausted'));\n  } else if (j.run_id) {\n    queued++;\n  } else {\n    problems.push('FAILED to queue: ' + String((err && err.message) || JSON.stringify(j)).slice(0, 180));\n  }\n}\n\nif (!problems.length) {\n  // No email. The IF node downstream checks send=false.\n  return [{ json: { send: false, queued: queued } }];\n}\nconst body = ['Lead Finder could not queue this week\\'s runs cleanly.', '']\n  .concat(problems)\n  .concat(['', queued + ' run(s) did queue. The Sunday 20:00 digest reports what completed.']);\nreturn [{ json: { send: true, subject: 'Lead Finder \u2014 attention needed', body: body.join('\\n') } }];\n"
+      }
+    },
+    {
+      "id": "lf-gate",
+      "name": "Only If A Problem",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1230,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "send",
+              "leftValue": "={{ $json.send }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
       }
     },
     {
@@ -180,11 +212,23 @@
       "main": [
         [
           {
-            "node": "Send Digest via Resend",
+            "node": "Only If A Problem",
             "type": "main",
             "index": 0
           }
         ]
+      ]
+    },
+    "Only If A Problem": {
+      "main": [
+        [
+          {
+            "node": "Send Digest via Resend",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
       ]
     }
   },
