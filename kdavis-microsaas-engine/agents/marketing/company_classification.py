@@ -207,7 +207,24 @@ _PATTERNS: dict[str, list[re.Pattern]] = {
 # little), so these only fire alongside the prose patterns above -- except
 # the unambiguous ones, which are strong enough on their own.
 _NAME_PATTERNS: dict[str, re.Pattern] = {
-    CONSULTANCY: re.compile(r"\b(?:consulting|consultancy|consultants|advisory)\b", re.I),
+    # LEAK FIXED 2026-10-06. This matched "advisory" but not "advisors", so
+    # "Security Risk Advisors" -- a security consulting firm -- cleared the
+    # consultancy exclusion and reached the approval queue for the CONSULTING
+    # product, i.e. we drafted consulting outreach to a competitor.
+    #
+    # The prose patterns in _PATTERNS are the primary net and are what caught
+    # Caylent and Capco (neither matches by name either). This name check is
+    # the backstop for when the JD itself never says "consulting firm" -- which
+    # is common, because a Cloud Security Engineer posting describes the ROLE,
+    # not the business model. Missing a plural noun form made the backstop
+    # silently absent for a whole class of names.
+    #
+    # Agent-noun and plural forms included deliberately. "partners" is NOT:
+    # PDT Partners is a quantitative fund and Pdtpartners already appears in
+    # this pipeline's own lead list, so that word would exclude real
+    # prospects.
+    CONSULTANCY: re.compile(
+        r"\b(?:consult(?:ing|ancy|ancies|ants?)|advisor(?:y|s)?|advisers?)\b", re.I),
     MSP: re.compile(r"\bmanaged\s+(?:services?|IT)\b", re.I),
     STAFFING: re.compile(r"\b(?:staffing|recruit(?:ing|ment)|talent\s+group)\b", re.I),
 }

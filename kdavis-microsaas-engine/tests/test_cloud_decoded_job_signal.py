@@ -358,11 +358,16 @@ def test_company_already_in_consulting_pipeline_blocks_cloud_decoded_entry(monke
 
 # ── MKT-O2 Cloud Decoded job-signal sequence ────────────────────────────
 
+# The route-aware EMAIL channel asks for a subject and three touches
+# (decision 1, 2026-10-06). Deliberately free of LinkedIn vocabulary -- the
+# writer now REJECTS a generation that mixes channels.
 CD_SEQUENCE_JSON = json.dumps({
-    "touch_1": "Saw Acme Corp hiring a Platform Engineer with Kubernetes/Azure in the stack — Cloud Decoded "
-               "force-multiplies a team like that.",
+    "subject": "your platform engineer search",
+    "touch_1": "Dana — saw Acme Corp hiring a Platform Engineer with Kubernetes/Azure in the stack. "
+               "Cloud Decoded force-multiplies a team like that.",
     "touch_2": "Cloud Decoded's drift-detection and IAM-minimization agents cover exactly the gaps a new "
-               "platform hire spends their first months on. Worth a look at theclouddecoded.com?",
+               "platform hire spends their first months on. https://theclouddecoded.com/demo",
+    "touch_3": "Last note from me on this one.",
 })
 
 
@@ -386,6 +391,7 @@ def _cd_job_signal_lead():
         # (contact-first gate, 2026-10-05): MKT-O2 parks company-only
         # leads in the Find-the-Buyer lane instead of drafting to nobody.
         # tests/test_mkt_o2_cold_dm_writer.py covers the parking itself.
+        "lead_route": "outbound_email",
         "contact_status": "found", "first_name": "Dana", "last_name": "Reyes",
         "title": "VP Engineering", "open_role_count": 4,
         "job_posting_title": "Platform Engineer", "job_posting_url": "https://example.com/jobs/1",
@@ -393,7 +399,10 @@ def _cd_job_signal_lead():
     }
 
 
-def test_cloud_decoded_job_signal_writes_two_touches():
+def test_cloud_decoded_job_signal_writes_a_three_touch_email_sequence():
+    """Was 2-touch. Decision 1 (2026-10-06) gives BOTH routes three touches --
+    touch_2 at +3 days, touch_3 at +5 days only on no reply -- and the email
+    route also carries an approved subject line."""
     db = FakeSupabase(responses={
         "mse_icp_configs": [{"selling_stage": "active"}],
         "mse_dm_sequences": [{"id": "seq-1"}],
@@ -408,7 +417,10 @@ def test_cloud_decoded_job_signal_writes_two_touches():
     assert result["sequences_written"] == 1
     insert_calls = [q for q in db.executed if q.table_name == "mse_dm_sequences" and q.calls[0][0] == "insert"]
     row = insert_calls[0]._payload[0]
-    assert "touch_3" not in row  # 2-touch, unlike the consulting branch's 3-touch
+    assert row["touch_3"], "the email route now runs three touches"
+    assert row["subject"] == "your platform engineer search", \
+        "the subject must be written and stored with the body, not invented at send time"
+    assert row["drafted_for_route"] == "outbound_email"
     assert row["lead_finder_lead_id"] == "lead-1"
     assert row["lead_source"] == "cloud_decoded_job_signal"
     assert "theclouddecoded.com" in row["touch_2"]
@@ -442,7 +454,9 @@ def test_cloud_decoded_job_signal_missing_touch_2_raises():
         )
         assert False, "expected ValueError-wrapping RuntimeError"
     except RuntimeError as exc:
-        assert "touch_1, touch_2" in str(exc)
+        # The route-aware writer names the field that is MISSING, not the
+        # whole expected schema.
+        assert "missing" in str(exc) and "touch_2" in str(exc)
 
 
 def test_run_o2_for_linkedin_leads_includes_cloud_decoded_job_signal_source(monkeypatch):

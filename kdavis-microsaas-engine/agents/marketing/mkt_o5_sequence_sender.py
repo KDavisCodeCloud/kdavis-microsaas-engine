@@ -356,7 +356,14 @@ def run_send_touch_1(supabase_client: Optional[Any] = None, resend_client: Optio
 
             try:
                 first_name = lead.get("first_name") or ""
-                subject = f"Quick question, {first_name}".strip() if first_name else "Quick question"
+                # Prefer the APPROVED subject (decision 1, 2026-10-06). Until
+                # mse_dm_sequences.subject existed, this invented one at send
+                # time -- making the subject line the only prospect-facing text
+                # no human ever reviewed. The old default stays as a fallback
+                # for sequences drafted before the column existed.
+                subject = (seq.get("subject") or "").strip()
+                if not subject:
+                    subject = f"Quick question, {first_name}".strip() if first_name else "Quick question"
                 body = append_compliance_footer(DataSanitizationShield.clean(seq["touch_1"]), lead["email"])
                 _send_email(resend_client, lead["email"], subject, body)
                 if lead.get("email_grade") == "risky":

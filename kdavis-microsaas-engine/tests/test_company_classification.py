@@ -229,3 +229,66 @@ class TestSharedNameNormalisation:
 
     def test_a_name_of_only_stopwords_matches_nothing(self):
         assert text_mentions_company("anything at all", "Inc") is False
+
+
+# ── The "Advisors" leak (2026-10-06) ─────────────────────────────────────
+#
+# _NAME_PATTERNS matched "advisory" but not "advisors", so Security Risk
+# Advisors -- a security consulting firm -- cleared the consultancy exclusion
+# and reached the approval queue for the CONSULTING product. We drafted
+# consulting outreach to a competitor.
+#
+# The prose patterns are the primary net (they are what caught Caylent and
+# Capco, neither of which matches by name). This name check is the backstop
+# for when the JD never states the business model, which is normal: a Cloud
+# Security Engineer posting describes the ROLE.
+
+import pytest
+
+from agents.marketing.company_classification import (
+    CONSULTANCY,
+    CONSULTING_EXCLUSION_POLICY,
+    classify_company,
+)
+
+
+@pytest.mark.parametrize("name", [
+    "Security Risk Advisors",      # the real leak
+    "Security Risk Advisory",      # already worked; must keep working
+    "Acme Consulting",
+    "Bar Consultants",
+    "Foo Advisers",
+    "Risk Advisor LLC",
+    "Deloitte Consultancy",
+])
+def test_service_firm_names_are_tagged_as_consultancies(name):
+    """Tagged from the NAME ALONE, with a job description that says nothing
+    about the business model -- which is the situation that leaked."""
+    cls = classify_company(name, "Cloud Security Engineer")
+    assert CONSULTANCY in cls.tags, f"{name!r} was not tagged a consultancy"
+
+
+def test_security_risk_advisors_is_excluded_for_consulting():
+    cls = classify_company("Security Risk Advisors", "Cloud Security Engineer")
+    excluded, multiplier, reasons = CONSULTING_EXCLUSION_POLICY.decide(cls)
+    assert excluded is True, reasons
+    assert multiplier == 0.0
+    assert any("consultancy" in r for r in reasons), reasons
+    assert CONSULTANCY in cls.tags
+
+
+@pytest.mark.parametrize("name", [
+    "PDT Partners",      # quantitative fund; already in this pipeline's leads
+    "Pdtpartners",
+    "Advisor360",        # fintech PRODUCT company -- no word boundary before 360
+    "Onebrief",
+    "Earnin",
+    "GoReel",
+    "Vannevar Labs",
+    "SingleStore",
+])
+def test_real_prospects_are_not_tagged_by_name(name):
+    """The fix must not widen into "partners" or into names that merely
+    contain an advisor-ish substring -- that would exclude real buyers."""
+    cls = classify_company(name, "Senior Platform Engineer")
+    assert CONSULTANCY not in cls.tags, f"{name!r} was wrongly tagged a consultancy"

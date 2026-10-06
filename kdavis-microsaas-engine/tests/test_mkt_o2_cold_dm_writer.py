@@ -6,35 +6,6 @@ import pytest
 # prospect had nowhere to go but a reply. thdagentic.com already exists and
 # is live; the copy just never pointed at it.
 
-def test_consulting_prompt_carries_the_live_offer_url():
-    from agents.marketing.mkt_o2_cold_dm_writer import (
-        CONSULTING_OFFER_URL, _INFRA_CONSULTING_SYSTEM_PROMPT,
-    )
-    assert CONSULTING_OFFER_URL == "https://thdagentic.com"
-    assert CONSULTING_OFFER_URL in _INFRA_CONSULTING_SYSTEM_PROMPT
-
-
-def test_the_url_is_scoped_to_touch_2_only():
-    """touch_1's own spec is "no pitch, no ask", and a link in a first cold
-    email raises spam scoring while the domain is still in warmup."""
-    from agents.marketing.mkt_o2_cold_dm_writer import _INFRA_CONSULTING_SYSTEM_PROMPT as p
-    assert "Do NOT put a URL in touch_1 or touch_3" in p
-    # The instruction must sit in the touch_2 paragraph, not touch_1's.
-    t1 = p.index("touch_1 = LinkedIn CONNECTION REQUEST NOTE")
-    t2 = p.index("touch_2 = sent 3 days after")
-    t3 = p.index("touch_3 = sent 5 days after")
-    url_at = p.index("https://thdagentic.com")
-    assert t2 < url_at < t3, "the URL instruction must live in the touch_2 section"
-    assert not (t1 < url_at < t2)
-
-
-def test_no_tracking_parameters_are_requested():
-    """A bare URL: tracking params on a cold email are both a spam signal and
-    a consent problem we have not asked for."""
-    from agents.marketing.mkt_o2_cold_dm_writer import _INFRA_CONSULTING_SYSTEM_PROMPT as p
-    assert "no tracking parameters" in p
-    assert "utm_" not in p
-
 
 # ── Contact-first gate (Kelvin's decision 2, 2026-10-05) ─────────────────
 # Six of eleven pending sequences were addressed to people contact_fit
@@ -46,6 +17,8 @@ from agents.marketing.mkt_o2_cold_dm_writer import contact_is_draftable
 
 def _lead(**kw):
     base = {"id": "l1", "company": "Acme", "contact_status": "found",
+            # The channel now comes from the ROUTE (decision 1, 2026-10-06).
+            "lead_route": "manual_linkedin",
             "first_name": "Cory", "last_name": "Ondrejka",
             "title": "Chief Technology Officer", "open_role_count": 3}
     base.update(kw)
@@ -106,8 +79,9 @@ def test_the_writer_parks_instead_of_drafting(fake_db, monkeypatch):
     fake_db.responses["mse_icp_configs"] = [{"product_id": "p1", "selling_stage": "active"}]
     fake_db.responses["mse_dm_sequences"] = [{"id": "seq-new"}]
     calls = []
-    monkeypatch.setattr(o2, "_write_infra_consulting_dm_for_lead",
-                        lambda lead, **kw: calls.append(lead) or {"touch_1": "a", "touch_2": "b"})
+    monkeypatch.setattr(o2, "_write_route_aware_sequence",
+                        lambda lead, product_id, **kw: calls.append(lead) or
+                        {"touch_1": "a", "touch_2": "b", "drafted_for_route": "manual_linkedin"})
 
     result = o2.run_o2_cold_dm_writer(
         product_id="p1", research_report={}, campaign_build_id=None,
@@ -126,10 +100,12 @@ def test_a_parked_sequence_regenerates_in_place(fake_db, monkeypatch):
     import agents.marketing.mkt_o2_cold_dm_writer as o2
     fake_db.responses["mse_icp_configs"] = [{"product_id": "p1", "selling_stage": "active"}]
     fake_db.responses["mse_dm_sequences"] = [
-        {"id": "seq-parked", "status": "awaiting_contact", "lead_finder_lead_id": "l1"},
+        {"id": "seq-parked", "status": "awaiting_contact", "lead_finder_lead_id": "l1",
+         "drafted_for_route": "manual_linkedin"},
     ]
-    monkeypatch.setattr(o2, "_write_infra_consulting_dm_for_lead",
-                        lambda lead, **kw: {"touch_1": "new1", "touch_2": "new2"})
+    monkeypatch.setattr(o2, "_write_route_aware_sequence",
+                        lambda lead, product_id, **kw: {"touch_1": "new1", "touch_2": "new2",
+                                                        "drafted_for_route": "manual_linkedin"})
 
     o2.run_o2_cold_dm_writer(
         product_id="p1", research_report={}, campaign_build_id=None,
@@ -152,11 +128,13 @@ def test_a_lead_with_a_live_sequence_is_not_drafted_twice(fake_db, monkeypatch):
     import agents.marketing.mkt_o2_cold_dm_writer as o2
     fake_db.responses["mse_icp_configs"] = [{"product_id": "p1", "selling_stage": "active"}]
     fake_db.responses["mse_dm_sequences"] = [
-        {"id": "seq-live", "status": "pending_hitl", "lead_finder_lead_id": "l1"},
+        {"id": "seq-live", "status": "pending_hitl", "lead_finder_lead_id": "l1",
+         "drafted_for_route": "manual_linkedin"},
     ]
     calls = []
-    monkeypatch.setattr(o2, "_write_infra_consulting_dm_for_lead",
-                        lambda lead, **kw: calls.append(lead) or {"touch_1": "a", "touch_2": "b"})
+    monkeypatch.setattr(o2, "_write_route_aware_sequence",
+                        lambda lead, product_id, **kw: calls.append(lead) or
+                        {"touch_1": "a", "touch_2": "b", "drafted_for_route": "manual_linkedin"})
 
     result = o2.run_o2_cold_dm_writer(
         product_id="p1", research_report={}, campaign_build_id=None,
@@ -171,11 +149,13 @@ def test_a_rejected_sequence_does_not_block_a_fresh_draft(fake_db, monkeypatch):
     import agents.marketing.mkt_o2_cold_dm_writer as o2
     fake_db.responses["mse_icp_configs"] = [{"product_id": "p1", "selling_stage": "active"}]
     fake_db.responses["mse_dm_sequences"] = [
-        {"id": "seq-old", "status": "rejected_hitl", "lead_finder_lead_id": "l1"},
+        {"id": "seq-old", "status": "rejected_hitl", "lead_finder_lead_id": "l1",
+         "drafted_for_route": "manual_linkedin"},
     ]
     calls = []
-    monkeypatch.setattr(o2, "_write_infra_consulting_dm_for_lead",
-                        lambda lead, **kw: calls.append(lead) or {"touch_1": "a", "touch_2": "b"})
+    monkeypatch.setattr(o2, "_write_route_aware_sequence",
+                        lambda lead, product_id, **kw: calls.append(lead) or
+                        {"touch_1": "a", "touch_2": "b", "drafted_for_route": "manual_linkedin"})
     o2.run_o2_cold_dm_writer(
         product_id="p1", research_report={}, campaign_build_id=None,
         leads=[_lead(id="l1")], lead_source="job_posting_signal", supabase_client=fake_db,

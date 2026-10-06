@@ -94,70 +94,15 @@ Rules, non-negotiable:
 - touch_1 leads with the interaction reference then the pain signal; touch_2 leads with the specific
   dollar value prop"""
 
-# Infra-consulting ICP (mse_products.slug='thdagentic-consulting', see
-# thd_lead_scout.py's INFRA_CONSULTING_ICP), added 2026-09-16. Genuinely
-# different shape from the standard 2-touch sequence above: 3 touches,
-# shorter and more direct, a LinkedIn connection-request note as touch_1
-# (not a cold DM opener), and no "make more money + dollar amount" framing
-# — Kelvin's own spec for this ICP never asked for a dollar figure, and
-# CTOs/VPs Eng evaluating infrastructure consulting aren't the same buyer
-# psychology as the dollar-value-prop framing was written for.
-#
-# CAREER-HISTORY CORRECTION (Kelvin, 2026-10-05). The previous version of
-# this prompt instructed the model to claim "production infrastructure work in
-# aerospace and other regulated environments (Boeing, Honeywell Aerospace)".
-# That is NOT TRUE and was going out in live outreach. The real facts:
-#
-#   Boeing, Honeywell Aerospace -- NDT (non-destructive testing) INSPECTION
-#       roles, with cloud/sysadmin work alongside. Not production
-#       infrastructure or cloud engineering roles.
-#   CorVel (current)            -- the cloud engineering role.
-#
-# Misstating a verifiable employment history to a CTO is the fastest way to
-# lose the only thing cold outreach has, and it is the same fabrication this
-# codebase refuses everywhere else. The prompt now forbids the claim outright
-# rather than relying on careful wording, and tests/test_marketing_copy.py
-# fails the build if it reappears.
-#
-# It also no longer leads with employer names at all: credentials-first
-# openers are about the sender, and this ICP responds to a specific, accurate
-# observation about THEIR situation.
-# CAPS RAISED 2026-10-05. 300/500 came from LinkedIn's connection-note limit,
-# but scraper v2 routes these leads to outbound_email and MKT-O5 EMAILS them --
-# so a LinkedIn constraint was silently shortening emails. The visible cost:
-# the first regenerated Earnin touch_2 was trimmed at a sentence boundary and
-# lost its closing URL and ask entirely, i.e. the cap removed the one thing the
-# message existed to deliver.
-#
-# touch_1 stays at 300: it is a short opener on either channel, and a long
-# first cold email reads worse, not better. touch_2 carries the credibility
-# line, the observation AND the link, so it gets room for all three.
-#
-# NOTE: these two touches are still WRITTEN as a LinkedIn sequence ("connection
-# request note", "sent 3 days after the connection request is accepted") while
-# being DELIVERED as email. That mismatch is a copy decision for Kelvin, not
-# something to fix by guessing -- raising the cap only stops the truncation.
-TOUCH_1_INFRA_MAX_CHARS = 300
-TOUCH_2_INFRA_MAX_CHARS = 900
-TOUCH_3_INFRA_MAX_CHARS = 400
-
-# The live consulting site (verified 2026-10-02: HTTP 200 on Vercel, title
-# "Production AI & Agentic Systems Consulting | Kelvin Davis"). Outreach had
-# NO destination at all before this -- every stored touch_1/touch_2 for this
-# ICP contained no link, so a prospect who was interested could only reply or
-# drop it.
-#
-# It goes in touch_2, not touch_1, for two reasons: touch_1's own spec is "no
-# pitch, no ask" and a URL contradicts that, and a link in a first cold email
-# measurably raises spam scoring -- which matters more than usual while the
-# sending domain is still in warmup under a 12/day cap. touch_2 already
-# carries the "Worth a 20-minute call?" ask, so the link belongs with it.
-CONSULTING_OFFER_URL = "https://thdagentic.com"
-
-# Cloud Decoded closes to the DEMO page, not the marketing root (Kelvin,
-# 2026-10-05). A cold reader who is interested wants to see the thing work;
-# the root page makes them hunt for that.
-CLOUD_DECODED_DEMO_URL = "https://theclouddecoded.com/demo"
+# Channel/offer composition moved to agents/marketing/outreach_copy.py
+# (decision 1, 2026-10-06). The two prompts that used to live here were
+# selected by lead_source and had the channel welded in, which is how
+# LinkedIn-shaped copy ended up being emailed. The URLs are re-exported from
+# there so there is exactly ONE definition of each.
+from agents.marketing.outreach_copy import (  # noqa: E402
+    CLOUD_DECODED_DEMO_URL,
+    CONSULTING_OFFER_URL,
+)
 
 # The three lead_source values whose leads live in mse_leads and therefore
 # carry contact_status / title / open_role_count.
@@ -178,7 +123,7 @@ def _existing_sequences_by_lead(db, leads: list[dict]) -> dict[str, dict]:
     if not ids:
         return {}
     rows = (db.table("mse_dm_sequences")
-            .select("id,status,lead_finder_lead_id")
+            .select("id,status,lead_finder_lead_id,drafted_for_route")
             .in_("lead_finder_lead_id", ids).execute().data or [])
     out: dict[str, dict] = {}
     for r in rows:
@@ -191,7 +136,8 @@ def _existing_sequences_by_lead(db, leads: list[dict]) -> dict[str, dict]:
         # parked one and the lead is skipped rather than duplicated.
         if lid not in out or (out[lid]["status"] == "awaiting_contact"
                               and r["status"] != "awaiting_contact"):
-            out[lid] = {"id": r["id"], "status": r["status"]}
+            out[lid] = {"id": r["id"], "status": r["status"],
+                        "drafted_for_route": r.get("drafted_for_route")}
     return out
 
 
@@ -227,120 +173,6 @@ def contact_is_draftable(lead: dict) -> tuple[bool, str]:
         return False, f"contact fit rejected -- {fit.reason}"
     return True, f"ok: {fit.reason}"
 
-_INFRA_CONSULTING_SYSTEM_PROMPT = f"""You are writing a 3-touch LinkedIn cold outreach sequence for Kelvin \
-Davis, a senior cloud/platform engineer, targeting a CTO/VP Engineering/Engineering Director/Head of \
-Platform/Founder+CTO at a funded startup (20-200 employees) about infrastructure consulting work. Return \
-ONLY a single JSON object — no prose, no markdown fences — matching exactly this schema:
-
-{{
-  "touch_1": str,
-  "touch_2": str,
-  "touch_3": str
-}}
-
-touch_1 = LinkedIn CONNECTION REQUEST NOTE, max {TOUCH_1_INFRA_MAX_CHARS} chars. Reference something \
-specific and real about their company or a real post they made (from the lead/signal context given below \
-— never invent a detail not present in it). One sentence on what Kelvin does. No pitch, no ask.
-
-touch_2 = sent 3 days after the connection request is accepted, max {TOUCH_2_INFRA_MAX_CHARS} chars. Lead \
-with a specific observation about their infrastructure challenge, inferred ONLY from the real signal given \
-(a job posting they're running, their funding stage, or real LinkedIn content) — never invent a challenge \
-the signal doesn't support. Then at most ONE short sentence of relevant credibility, written in \
-first person about the work itself ("I do cloud and platform engineering -- currently at CorVel") — do NOT \
-name Boeing or Honeywell, do NOT open with employer names or credentials, and NEVER invent a dollar \
-figure, project name, or quantified outcome anywhere. End with exactly this soft ask, adapted naturally to fit the message: "Worth a 20-minute \
-call?" — and include the URL {CONSULTING_OFFER_URL} exactly once, immediately before or after that ask, as \
-a bare URL with no tracking parameters and no link text. Do NOT put a URL in touch_1 or touch_3.
-
-touch_3 = sent 5 days after touch_2 ONLY IF there has been no reply, max {TOUCH_3_INFRA_MAX_CHARS} chars. \
-One line. A different angle than touch_2 — reference the specific pain point again, briefly. This is the \
-final message in the sequence; no further follow-up happens after it, so the ask here is the last one.
-
-Rules, non-negotiable:
-- FACTUAL: never claim production-infrastructure, cloud, platform or DevOps work at Boeing or Honeywell. \
-Those were NDT inspection roles with cloud/sysadmin work alongside. CorVel is the cloud engineering role. \
-Do not name Boeing or Honeywell at all.
-- Do NOT lead with employer names, job titles or credentials. Open with the prospect's own situation, \
-taken from the signal given below.
-- FIRST PERSON ONLY. You are writing AS Kelvin. Never write "Kelvin" or refer to him in the third \
-person ("Kelvin has...", "he built...") — write "I".
-- Address the contact by FIRST NAME, taken from the lead context. Never "Hi {{company}} team", never "Hi \
-there", never a company name as the greeting.
-- State ONLY what the job posting actually says. Do not infer or name a compliance regime (FedRAMP, \
-IL2-IL6, SOC 2, HIPAA, ITAR, CMMC, PCI) unless the posting text given below names it explicitly. Do not \
-speculate about clearances, contracts or customers.
-- Never use dollar-amount/"make more money" framing — this ICP is not that buyer
-- Every specific claim about the company (their hiring, their funding, their content) must come from the \
-signal context given below — never invented
-- No hype words ("game-changing", "revolutionary"), no generic flattery, no "I noticed you..." as a \
-generic opener with nothing specific behind it
-- The sequence stops entirely if they reply at any point — touch_3 is only ever sent on zero reply"""
-
-
-# Cloud Decoded job-signal branch, added 2026-09-25 (agents/marketing/
-# mkt_lead_finder.py's run_combined_job_signal_scout /
-# thd_lead_scout.CLOUD_DECODED_JOB_SIGNAL_ICP). A company hiring an
-# ongoing DevOps/SRE/platform/cloud engineer is signal that Cloud
-# Decoded's 11-agent roster can force-multiply that team -- a
-# fundamentally different pitch from the infra-consulting sequence above
-# (one-off project work, sold as Kelvin's personal time): this is a
-# product, sold as a force MULTIPLIER for the hire/team, never framed as
-# a reason not to hire. 2-touch EMAIL sequence (not LinkedIn connection
-# notes) -- Cloud Decoded has a real signup funnel (theclouddecoded.com)
-# an email CTA links to naturally, unlike the consulting ICP's personal-
-# brand LinkedIn sale. Explicitly does NOT reuse lead_source=
-# "job_posting_signal" (that value is hardcoded above to
-# _write_infra_consulting_dm_for_lead's copy) -- a new, separate
-# lead_source keeps this from ever silently picking up the wrong prompt.
-# Same correction as the consulting caps: this branch is explicitly a 2-touch
-# EMAIL sequence, so a 300-char opener was a LinkedIn limit applied to a
-# channel that has none. The first regenerated GoReel touch_1 ended "...from
-# day", losing "one." to the cap.
-TOUCH_1_CD_JOB_SIGNAL_MAX_CHARS = 450
-TOUCH_2_CD_JOB_SIGNAL_MAX_CHARS = 900
-
-_CLOUD_DECODED_JOB_SIGNAL_SYSTEM_PROMPT = f"""You are writing a 2-touch cold outreach EMAIL sequence for Cloud \
-Decoded (theclouddecoded.com), an 11-agent DevOps/platform automation product, to a company you found publicly \
-hiring for an ongoing DevOps/SRE/platform/cloud engineer role. Return ONLY a single JSON object — no prose, no \
-markdown fences — matching exactly this schema:
-
-{{
-  "touch_1": str,
-  "touch_2": str
-}}
-
-touch_1 = opening email, max {TOUCH_1_CD_JOB_SIGNAL_MAX_CHARS} chars. Reference the SPECIFIC job posting given \
-below (the role title, and their stated stack keywords if any are present) — never invent a detail the posting \
-context doesn't support. Frame Cloud Decoded as force-multiplication for the team they're building/the person \
-they're hiring — it makes that hire (once made) faster and covers gaps day-to-day, NEVER a substitute for making \
-the hire, and never imply they shouldn't hire. No pitch beyond one sentence on what Cloud Decoded does.
-
-touch_2 = follow-up sent 3 days later, max {TOUCH_2_CD_JOB_SIGNAL_MAX_CHARS} chars. One concrete detail about how \
-Cloud Decoded's agents (CI/CD triage, K8s alert remediation, IAM minimization, FinOps, drift detection — pick \
-whichever is most relevant to their stated stack, only from what's given below) helps a team like theirs. End \
-with a soft call to action pointing to {CLOUD_DECODED_DEMO_URL} — a single low-friction next step (e.g. "worth a \
-look at {CLOUD_DECODED_DEMO_URL}?"), never a hard meeting ask. Include that URL exactly once, as a bare URL with \
-no tracking parameters.
-
-Rules, non-negotiable:
-- FACTUAL: never claim production-infrastructure, cloud, platform or DevOps work at Boeing or Honeywell. Those
-  were NDT inspection roles with cloud/sysadmin work alongside. CorVel is the cloud engineering role. Do not
-  name Boeing or Honeywell at all.
-- Do NOT lead with employer names, job titles or credentials. Open with the prospect's own situation.
-- FIRST PERSON ONLY. You are writing AS Kelvin. Never write "Kelvin" or refer to him in the third person —
-  write "I".
-- Address the contact by FIRST NAME, taken from the lead context. Never "Hi {{company}} team", never "Hi
-  there", never a company name as the greeting.
-- State ONLY what the job posting actually says. Do not infer or name a compliance regime (FedRAMP, IL2-IL6,
-  SOC 2, HIPAA, ITAR, CMMC, PCI) unless the posting text given below names it explicitly. Do not speculate
-  about clearances, contracts or customers.
-- Never frame Cloud Decoded as a substitute for hiring, or the posting/role as unnecessary — force-multiplication
-  for the hire/team only
-- Every specific claim about their stack or the role must come from the job posting context given below — never
-  invented
-- No hype words ("game-changing", "revolutionary"), no generic flattery, no "I noticed you..." as a generic
-  opener with nothing specific behind it
-- End touch_2 with the soft CTA to {CLOUD_DECODED_DEMO_URL}, not a meeting request"""
 
 
 def _trim_copy(text: Any, limit: int, *, label: str = "touch") -> str:
@@ -396,36 +228,79 @@ def _ensure_close_url(text: str, url: str, limit: int) -> str:
     return _trim_copy(text, room, label="close body").rstrip() + suffix
 
 
-def _write_cloud_decoded_job_signal_dm_for_lead(lead: dict, anthropic_client=None) -> dict:
-    """lead_source='cloud_decoded_job_signal' only. No research_context
-    argument, same reasoning as _write_infra_consulting_dm_for_lead: this
-    signal (the job posting itself, plus any stack keywords extracted
-    from its JD text) already lives on the lead row."""
+# ── Route-aware writer (Kelvin's decision 1, 2026-10-06) ─────────────────
+
+def _write_route_aware_sequence(lead: dict, product_id: str, anthropic_client=None) -> dict:
+    """Generate a sequence shaped by the lead's ROUTE, with the product's offer.
+
+    Replaces the two prompts that were selected by lead_source. lead_source is
+    provenance; the channel is lead_route, and the old coupling meant
+    consulting leads got a LinkedIn-shaped sequence that MKT-O5 then emailed
+    verbatim.
+
+    Returns the touches, plus `subject` on the email route and
+    `drafted_for_route` so a later route change is detectable.
+    """
+    from agents.marketing.mkt_lead_finder import CLOUD_DECODED_PRODUCT_ID
+    from agents.marketing.outreach_copy import (
+        CLOUD_DECODED_OFFER,
+        CONSULTING_OFFER,
+        build_system_prompt,
+        channel_for_route,
+        channel_violations,
+    )
+
+    route = (lead.get("lead_route") or "").strip()
+    channel = channel_for_route(route)
+    offer = CLOUD_DECODED_OFFER if product_id == CLOUD_DECODED_PRODUCT_ID else CONSULTING_OFFER
+    system = build_system_prompt(channel, offer)
+
     safe_lead = DataSanitizationShield.clean({
-        # See the consulting writer: the first-name greeting rule needs the
-        # name in context to be satisfiable at all.
+        # first_name is REQUIRED: the shared rules demand a first-name
+        # greeting, and an instruction the context cannot satisfy produces
+        # "Hi --".
         "first_name": lead.get("first_name"),
         "company": lead.get("company"),
+        "title": lead.get("title"),
         "job_posting_title": lead.get("job_posting_title"),
         "job_posting_url": lead.get("job_posting_url"),
         "job_posting_stack_keywords": lead.get("job_posting_stack_keywords") or [],
     })
-
     user_prompt = (
-        f"Lead + real job posting signal (never invent anything beyond this):\n{json.dumps(safe_lead, indent=2)}\n\n"
-        "Write the 2-touch email sequence now."
+        f"Lead + real signal context (never invent anything beyond this):\n"
+        f"{json.dumps(safe_lead, indent=2)}\n\n"
+        f"Write the sequence as the JSON object described."
     )
-    raw = _analyze(_CLOUD_DECODED_JOB_SIGNAL_SYSTEM_PROMPT, user_prompt, anthropic_client=anthropic_client, max_tokens=1024)
-    parsed = json.loads(_strip_fences(raw))
-    if not isinstance(parsed, dict) or "touch_1" not in parsed or "touch_2" not in parsed:
-        raise ValueError(f"MKT-O2 (cloud-decoded job signal) expected {{touch_1, touch_2}}, got: {raw[:200]}")
 
-    return {
-        "touch_1": _trim_copy(parsed["touch_1"], TOUCH_1_CD_JOB_SIGNAL_MAX_CHARS, label="cd touch_1"),
-        "touch_2": _ensure_close_url(
-            _trim_copy(parsed["touch_2"], TOUCH_2_CD_JOB_SIGNAL_MAX_CHARS, label="cd touch_2"),
-            CLOUD_DECODED_DEMO_URL, TOUCH_2_CD_JOB_SIGNAL_MAX_CHARS),
-    }
+    raw = _analyze(system, user_prompt, anthropic_client=anthropic_client, max_tokens=1600)
+    parsed = json.loads(_strip_fences(raw))
+    required = (["subject"] if channel.wants_subject else []) + list(channel.touches)
+    missing = [k for k in required if k not in parsed or not str(parsed.get(k) or "").strip()]
+    if missing:
+        raise ValueError(f"MKT-O2 ({channel.route}) missing {missing} -- got: {raw[:200]}")
+
+    out: dict = {"drafted_for_route": channel.route}
+    for key in required:
+        limit = channel.limits.get(key, 900)
+        value = _trim_copy(parsed[key], limit, label=f"{channel.route} {key}")
+        out[key] = value
+
+    # The close URL must survive on the touch that carries the ask.
+    out["touch_2"] = _ensure_close_url(
+        out["touch_2"], offer.close_url, channel.limits.get("touch_2", 900))
+
+    # A generation that drifted across channels is caught here, not shipped.
+    # Raising rather than scrubbing: the wrong channel's vocabulary usually
+    # means the whole message is framed for the wrong channel, and a
+    # find-and-replace would leave incoherent copy behind.
+    drift = []
+    for key in required:
+        drift += [f"{key}: {v}" for v in channel_violations(out[key], channel.route)]
+    if drift:
+        raise ValueError(
+            f"MKT-O2 produced {channel.route} copy with the other channel's phrasing: {drift}")
+
+    return out
 
 
 def _analyze(system: str, user: str, anthropic_client=None, max_tokens: int = 1024) -> str:
@@ -514,45 +389,6 @@ def _write_dm_for_lead(lead: dict, research_context: dict, lead_source: str = "a
     }
 
 
-def _write_infra_consulting_dm_for_lead(lead: dict, anthropic_client=None) -> dict:
-    """lead_source='job_posting_signal' only (mse_products.slug=
-    'thdagentic-consulting') — separate return shape (touch_1/2/3) from
-    _write_dm_for_lead's 2-touch contract above, so this never has to be
-    force-fit into the standard sequence's schema. No research_context
-    argument: this ICP's signal (the job posting itself) already lives on
-    the lead row (job_posting_title/job_posting_url), unlike the dollar-
-    value-prop sequence's dependency on a separate research_report."""
-    safe_lead = DataSanitizationShield.clean({
-        # first_name is REQUIRED context, not optional: the prompt instructs
-        # the model to greet the contact by first name, and until 2026-10-05
-        # the name was never passed -- so the first regenerated batch opened
-        # with a bare "Hi —". An instruction the context cannot satisfy is
-        # worse than no instruction, because it reads as a broken template.
-        "first_name": lead.get("first_name"),
-        "company": lead.get("company"),
-        "title": lead.get("title"),
-        "job_posting_title": lead.get("job_posting_title"),
-        "job_posting_url": lead.get("job_posting_url"),
-    })
-
-    user_prompt = (
-        f"Lead + real signal context (never invent anything beyond this):\n{json.dumps(safe_lead, indent=2)}\n\n"
-        "Write the 3-touch sequence now."
-    )
-    raw = _analyze(_INFRA_CONSULTING_SYSTEM_PROMPT, user_prompt, anthropic_client=anthropic_client, max_tokens=1024)
-    parsed = json.loads(_strip_fences(raw))
-    if not isinstance(parsed, dict) or not all(k in parsed for k in ("touch_1", "touch_2", "touch_3")):
-        raise ValueError(f"MKT-O2 (infra consulting) expected {{touch_1, touch_2, touch_3}}, got: {raw[:200]}")
-
-    return {
-        "touch_1": _trim_copy(parsed["touch_1"], TOUCH_1_INFRA_MAX_CHARS, label="infra touch_1"),
-        "touch_2": _ensure_close_url(
-            _trim_copy(parsed["touch_2"], TOUCH_2_INFRA_MAX_CHARS, label="infra touch_2"),
-            CONSULTING_OFFER_URL, TOUCH_2_INFRA_MAX_CHARS),
-        "touch_3": _trim_copy(parsed["touch_3"], TOUCH_3_INFRA_MAX_CHARS, label="infra touch_3"),
-    }
-
-
 def run_o2_cold_dm_writer(
     product_id: str,
     research_report: dict,
@@ -626,6 +462,18 @@ def run_o2_cold_dm_writer(
                 parked.append((lead, reason))
                 continue
             prior = existing_seq.get(lead.get("id"))
+            # A lead's route can change (an email grade improves, a catch-all
+            # becomes sendable). A draft written for the other channel is not
+            # "already done" -- it is wrong, and it would sit in the queue
+            # looking fine. Regenerate it in place.
+            if (prior and prior.get("drafted_for_route")
+                    and prior["drafted_for_route"] != (lead.get("lead_route") or "").strip()
+                    and prior["status"] in ("pending_hitl", "awaiting_contact")):
+                _log.info("[MKT-O2] %s route changed %s -> %s; regenerating draft",
+                          lead.get("company"), prior["drafted_for_route"], lead.get("lead_route"))
+                regenerating[lead["id"]] = prior["id"]
+                draftable.append(lead)
+                continue
             if prior and prior["status"] == "awaiting_contact":
                 # A buyer has since been named: regenerate this parked draft
                 # IN PLACE rather than inserting a second one.
@@ -657,14 +505,12 @@ def run_o2_cold_dm_writer(
     rows: list[dict] = []
     try:
         for lead in leads:
-            if lead_source == "job_posting_signal":
-                # Infra-consulting ICP -- 3-touch, no research_report dependency
-                # (see _write_infra_consulting_dm_for_lead's own docstring).
-                sequence = _write_infra_consulting_dm_for_lead(lead, anthropic_client=anthropic_client)
-            elif lead_source == "cloud_decoded_job_signal":
-                # Cloud Decoded job-signal ICP -- 2-touch email, force-
-                # multiplication framing (see _write_cloud_decoded_job_signal_dm_for_lead).
-                sequence = _write_cloud_decoded_job_signal_dm_for_lead(lead, anthropic_client=anthropic_client)
+            if lead_source in _MSE_LEADS_SOURCES:
+                # ROUTE decides the channel (decision 1, 2026-10-06). Selecting
+                # on lead_source is what produced LinkedIn-shaped copy that
+                # MKT-O5 emailed: provenance is not channel.
+                sequence = _write_route_aware_sequence(
+                    lead, product_id, anthropic_client=anthropic_client)
             else:
                 sequence = _write_dm_for_lead(lead, research_context, lead_source=lead_source, anthropic_client=anthropic_client)
             row = {
@@ -676,6 +522,13 @@ def run_o2_cold_dm_writer(
             }
             if "touch_3" in sequence:
                 row["touch_3"] = sequence["touch_3"]
+            # Email subject: written and reviewed WITH the body. MKT-O5 used
+            # to invent "Quick question, {first_name}" at send time, making the
+            # subject the only prospect-facing text nobody approved.
+            if sequence.get("subject"):
+                row["subject"] = sequence["subject"]
+            if sequence.get("drafted_for_route"):
+                row["drafted_for_route"] = sequence["drafted_for_route"]
             if lead_source == "apollo":
                 row["lead_id"] = lead["id"]
             elif lead_source in ("lead_finder", "job_posting_signal", "cloud_decoded_job_signal"):
@@ -698,7 +551,8 @@ def run_o2_cold_dm_writer(
                 to_insert.append(row)
                 continue
             payload = {k: v for k, v in row.items()
-                       if k in ("touch_1", "touch_2", "touch_3")}
+                       if k in ("touch_1", "touch_2", "touch_3", "subject",
+                                "drafted_for_route")}
             payload["status"] = "pending_hitl"
             payload["rejection_reason"] = None
             updated = db.table("mse_dm_sequences").update(payload).eq("id", seq_id).execute()

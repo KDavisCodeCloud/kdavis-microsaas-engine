@@ -21,16 +21,24 @@ import re
 
 import pytest
 
-from agents.marketing.mkt_o2_cold_dm_writer import (
+from agents.marketing.outreach_copy import (
     CLOUD_DECODED_DEMO_URL,
+    CLOUD_DECODED_OFFER,
+    CONSULTING_OFFER,
     CONSULTING_OFFER_URL,
-    _CLOUD_DECODED_JOB_SIGNAL_SYSTEM_PROMPT,
-    _INFRA_CONSULTING_SYSTEM_PROMPT,
+    EMAIL_CHANNEL,
+    LINKEDIN_CHANNEL,
+    build_system_prompt,
 )
 
+# The prompts are now COMPOSED from a channel and an offer (decision 1,
+# 2026-10-06), so the guards run against every combination rather than two
+# hand-written strings -- a rule fixed on one channel and left wrong on the
+# other is exactly what happened before.
 PROSPECT_FACING_PROMPTS = {
-    "consulting": _INFRA_CONSULTING_SYSTEM_PROMPT,
-    "cloud_decoded": _CLOUD_DECODED_JOB_SIGNAL_SYSTEM_PROMPT,
+    f"{ch.route}/{offer.name}": build_system_prompt(ch, offer)
+    for ch in (EMAIL_CHANNEL, LINKEDIN_CHANNEL)
+    for offer in (CONSULTING_OFFER, CLOUD_DECODED_OFFER)
 }
 
 # Compliance regimes the copy must never introduce on its own. Each one is a
@@ -141,11 +149,14 @@ def test_prompt_forbids_unsupported_compliance_claims(name):
 def test_each_product_closes_to_its_own_url():
     assert CONSULTING_OFFER_URL == "https://thdagentic.com"
     assert CLOUD_DECODED_DEMO_URL == "https://theclouddecoded.com/demo"
-    assert CONSULTING_OFFER_URL in _INFRA_CONSULTING_SYSTEM_PROMPT
-    assert CLOUD_DECODED_DEMO_URL in _CLOUD_DECODED_JOB_SIGNAL_SYSTEM_PROMPT
-    # Cross-contamination would send a consulting prospect to the product.
-    assert CLOUD_DECODED_DEMO_URL not in _INFRA_CONSULTING_SYSTEM_PROMPT
-    assert CONSULTING_OFFER_URL not in _CLOUD_DECODED_JOB_SIGNAL_SYSTEM_PROMPT
+    for ch in (EMAIL_CHANNEL, LINKEDIN_CHANNEL):
+        consulting = build_system_prompt(ch, CONSULTING_OFFER)
+        cloud = build_system_prompt(ch, CLOUD_DECODED_OFFER)
+        assert CONSULTING_OFFER_URL in consulting
+        assert CLOUD_DECODED_DEMO_URL in cloud
+        # Cross-contamination would send a consulting prospect to the product.
+        assert CLOUD_DECODED_DEMO_URL not in consulting
+        assert CONSULTING_OFFER_URL not in cloud
 
 
 # ── Layer 2: output guards ───────────────────────────────────────────────
@@ -269,31 +280,25 @@ def test_first_name_is_not_required_unless_asked():
     assert copy_violations(copy, first_name="Mike") == []
 
 
-def test_both_writers_pass_the_first_name_into_the_prompt():
+def test_the_route_aware_writer_passes_the_first_name_into_the_prompt():
     """The greeting rule is unsatisfiable unless the name is in context --
-    which is exactly why the first regenerated batch said "Hi —"."""
+    which is why the first regenerated batch said "Hi --"."""
     import inspect
     from agents.marketing import mkt_o2_cold_dm_writer as o2
-    for fn in (o2._write_infra_consulting_dm_for_lead,
-               o2._write_cloud_decoded_job_signal_dm_for_lead):
-        src = inspect.getsource(fn)
-        assert '"first_name": lead.get("first_name")' in src, \
-            f"{fn.__name__} does not pass first_name into the prompt context"
+    src = inspect.getsource(o2._write_route_aware_sequence)
+    assert '"first_name": lead.get("first_name")' in src
 
 
 def test_touch_2_has_room_for_the_closing_url():
-    """The cap must not be able to trim away the CTA. The first regenerated
-    Earnin touch_2 lost "https://thdagentic.com — worth a 20-minute call?"
-    because 500 chars (a LinkedIn limit) was applied to an email."""
-    from agents.marketing.mkt_o2_cold_dm_writer import (
-        CONSULTING_OFFER_URL, TOUCH_2_INFRA_MAX_CHARS, TOUCH_2_CD_JOB_SIGNAL_MAX_CHARS,
-    )
-    # An observation + a credibility line + the ask + the URL does not fit in
-    # 500; it does in 900.
+    """The cap must not be able to trim away the CTA. Earnin's touch_2 lost
+    "https://thdagentic.com — worth a 20-minute call?" because 500 chars (a
+    LinkedIn limit) was applied to an email. The caps now live on the CHANNEL,
+    so each one is sized for its own medium."""
     closing = f"{CONSULTING_OFFER_URL} — worth a 20-minute call?"
-    assert TOUCH_2_INFRA_MAX_CHARS >= 700 + len(closing) - 100
-    assert TOUCH_2_CD_JOB_SIGNAL_MAX_CHARS >= 700
-
+    assert EMAIL_CHANNEL.limits["touch_2"] >= 600 + len(closing)
+    # The LinkedIn DM is not a 300-char connection note either.
+    assert LINKEDIN_CHANNEL.limits["touch_2"] >= 600
+    assert LINKEDIN_CHANNEL.limits["touch_1"] == 300
 
 # ── The closing link must not depend on model compliance ─────────────────
 
@@ -327,11 +332,9 @@ def test_no_url_configured_leaves_the_text_alone():
     assert _ensure_close_url("body", "", 900) == "body"
 
 
-def test_both_closing_touches_guarantee_their_url():
+def test_the_closing_touch_guarantees_its_url():
     import inspect
     from agents.marketing import mkt_o2_cold_dm_writer as o2
-    for fn, url_const in ((o2._write_infra_consulting_dm_for_lead, "CONSULTING_OFFER_URL"),
-                          (o2._write_cloud_decoded_job_signal_dm_for_lead, "CLOUD_DECODED_DEMO_URL")):
-        src = inspect.getsource(fn)
-        assert "_ensure_close_url(" in src, f"{fn.__name__} does not guarantee its close URL"
-        assert url_const in src, f"{fn.__name__} uses the wrong URL constant"
+    src = inspect.getsource(o2._write_route_aware_sequence)
+    assert "_ensure_close_url(" in src, "the close URL is not guaranteed"
+    assert "offer.close_url" in src, "the URL must come from the OFFER"

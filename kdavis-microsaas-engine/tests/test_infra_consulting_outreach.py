@@ -168,9 +168,11 @@ def test_run_job_posting_signal_finder_raises_without_icp_config():
 
 INFRA_SEQUENCE_JSON = json.dumps({
     "touch_1": "Saw Acme Corp is hiring a cloud architect — I help startups like yours with exactly that.",
-    "touch_2": "Noticed the cloud architect req — that's usually a scaling-pains signal. I've built production "
-               "infra in aerospace and regulated environments (Boeing, Honeywell Aerospace) and currently at "
-               "CorVel. Worth a 20-minute call?",
+    # Boeing/Honeywell REMOVED 2026-10-05: this fixture encoded the false
+    # employment claim the prompts now forbid, so it contradicted the rules it
+    # was standing in for.
+    "touch_2": "Noticed the cloud architect req — that's usually a scaling-pains signal. I do cloud and "
+               "platform engineering, currently at CorVel. https://thdagentic.com — worth a 20-minute call?",
     "touch_3": "Still worth a quick call about that infra scaling gap?",
 })
 
@@ -195,6 +197,7 @@ def _job_posting_lead():
         # (contact-first gate, 2026-10-05): MKT-O2 parks company-only
         # leads in the Find-the-Buyer lane instead of drafting to nobody.
         # tests/test_mkt_o2_cold_dm_writer.py covers the parking itself.
+        "lead_route": "manual_linkedin",
         "contact_status": "found", "first_name": "Dana", "last_name": "Reyes",
         "title": "VP Engineering", "open_role_count": 4,
         "job_posting_title": "cloud architect", "job_posting_url": "https://boards.greenhouse.io/acme/jobs/1",
@@ -250,7 +253,7 @@ def test_job_posting_signal_missing_touch_3_raises():
         )
         assert False, "expected RuntimeError"
     except RuntimeError as exc:
-        assert "touch_1, touch_2, touch_3" in str(exc)
+        assert "missing" in str(exc) and "touch_3" in str(exc)
 
 
 def test_stage_gated_product_writes_nothing():

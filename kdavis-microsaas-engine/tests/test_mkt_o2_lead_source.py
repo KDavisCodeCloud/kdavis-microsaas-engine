@@ -129,17 +129,28 @@ def test_linkedin_engager_uses_engager_prompt_and_references_interaction():
     assert "AI agent guardrails" in user_prompt
 
 
-def test_lead_finder_source_uses_lead_finder_lead_id_and_standard_prompt():
+def test_lead_finder_source_uses_lead_finder_lead_id_and_the_route_aware_prompt():
+    """lead_finder leads live in mse_leads and carry a lead_route, so as of
+    2026-10-06 they take the ROUTE-AWARE path (3 touches, channel chosen from
+    the route) rather than the 2-touch "standard" prompt. The column this test
+    actually guards -- lead_finder_lead_id, not lead_id -- is unchanged."""
     fake_db = FakeSupabase(responses={
         "mse_dm_sequences": [{"id": "seq-1"}],
         "mse_leads": [{"id": "lf-lead-1"}],
         "mse_icp_configs": [{"selling_stage": "active"}],
     })
-    anthropic_client = FakeAnthropic(responses=[SEQUENCE_JSON])
+    # The route-aware LinkedIn channel asks for three touches and no subject.
+    anthropic_client = FakeAnthropic(responses=[
+        '{"touch_1": "Alex -- saw Sun Realty is hiring.", '
+        '"touch_2": "Following up -- worth 15 min? https://thdagentic.com", '
+        '"touch_3": "Last note from me."}'
+    ])
     # contact_status + a fit-accepted title are preconditions for drafting
     # as of the 2026-10-05 contact-first gate.
     leads = [{"id": "lf-lead-1", "first_name": "Alex", "title": "VP Engineering",
-              "company": "Sun Realty", "contact_status": "found", "open_role_count": 4}]
+              "company": "Sun Realty", "contact_status": "found", "open_role_count": 4,
+              # Channel comes from the route as of 2026-10-06.
+              "lead_route": "manual_linkedin"}]
 
     result = run_o2_cold_dm_writer(
         product_id="prod-1", research_report=_research_report(), leads=leads,
