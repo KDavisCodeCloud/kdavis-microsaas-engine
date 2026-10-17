@@ -71,9 +71,12 @@ async def tenant_context_middleware(request: Request, call_next):
     # a route placed outside this list fails with the tenant middleware's own
     # rejection, which looks nothing like an auth error and cost a debugging
     # cycle to recognise.
+    # /marketing/loop-map (2026-10-17): the CEO Decoded Loop Map tab, same
+    # MARKETING_API_KEY shape -- and it hit exactly that rejection in its tests.
     if (request.url.path.startswith("/marketing/leads")
             or request.url.path.startswith("/marketing/icp")
-            or request.url.path.startswith("/marketing/outreach")):
+            or request.url.path.startswith("/marketing/outreach")
+            or request.url.path.startswith("/marketing/loop-map")):
         return await call_next(request)
 
     # api/routers/brevo.py: same n8n/internal-triggered, MARKETING_API_KEY

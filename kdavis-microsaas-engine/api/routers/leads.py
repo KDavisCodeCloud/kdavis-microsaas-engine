@@ -266,40 +266,26 @@ async def get_outreach_summary_counters(authorization: Optional[str] = Header(de
     require_marketing_api_key(authorization)
     db = get_supabase()
 
-    from datetime import datetime, timedelta, timezone
-    now = datetime.now(timezone.utc)
-    week_ago = (now - timedelta(days=7)).isoformat()
-    today = now.date().isoformat()
-
-    leads = (db.table("mse_leads").select("id,contact_status,lead_route,status").execute().data or [])
+    leads = (db.table("mse_leads").select("id,product_id,contact_status,lead_route,status").execute().data or [])
     seqs = (db.table("mse_dm_sequences")
-            .select("id,status,touch_1_sent_at,lead_source").execute().data or [])
+            .select("id,product_id,status,touch_1_sent_at,lead_source").execute().data or [])
+    convs = (db.table("mse_outreach_conversations").select("product_id,replied_at").execute().data or [])
 
-    awaiting_buyer = sum(1 for l in leads
-                         if l.get("contact_status") in ("pending", "needs_review"))
-    awaiting_approval = sum(1 for s in seqs if s.get("status") == "pending_hitl")
-    # approved_manual is the LinkedIn track: approved copy a human pastes.
-    ready_to_paste = sum(1 for s in seqs if s.get("status") == "approved_manual")
-    sends_today = sum(1 for s in seqs if (s.get("touch_1_sent_at") or "").startswith(today))
-
-    convs = (db.table("mse_outreach_conversations").select("replied_at").execute().data or [])
-    replies_this_week = sum(1 for c in convs
-                            if c.get("replied_at") and str(c["replied_at"]) >= week_ago)
+    # core/outreach_counters.py is the one implementation: the Loop Map counts
+    # its desks with the same function, per product, so the three cannot drift.
+    from core.outreach_counters import count_outreach
+    c = count_outreach(leads, seqs, convs)
 
     from core.email_compliance import daily_send_cap
     return {
-        "awaiting_buyer": awaiting_buyer,
-        "awaiting_approval": awaiting_approval,
-        "sends_today": sends_today,
+        "awaiting_buyer": c["awaiting_buyer"],
+        "awaiting_approval": c["awaiting_approval"],
+        "sends_today": c["sends_today"],
         "daily_send_cap": daily_send_cap(),
-        "ready_to_paste": ready_to_paste,
-        # A REAL count as of decision 3 (2026-10-06): replies are marked by
-        # hand in the Conversations lane, so this is measured data and 0 means
-        # zero replies, not "unmeasured". Counted from replied_at so it is a
-        # true 7-day window rather than a snapshot of current stages.
-        "replies_this_week": replies_this_week,
-        "parked_awaiting_contact": sum(1 for s in seqs if s.get("status") == "awaiting_contact"),
-        "window_start": week_ago,
+        "ready_to_paste": c["ready_to_paste"],
+        "replies_this_week": c["replies_this_week"],
+        "parked_awaiting_contact": c["parked_awaiting_contact"],
+        "window_start": c["window_start"],
         "notes": {
             "replies_this_week": ("mse_outreach_conversations.replied_at within 7 days -- "
                                   "marked by hand in the Conversations lane"),

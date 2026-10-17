@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api.middleware.tenant_context import tenant_context_middleware
-from api.routers import buyer_research, events, milestones, digest, pipeline, mcp, reengagement, research, stripe, ceo, marketing, marketing_internal, outreach, outreach_lanes, factory, linkedin_intake, leads, brevo, product_marketing, dist_attribution, dist, thd_consulting
+from api.routers import buyer_research, events, milestones, digest, pipeline, mcp, reengagement, research, stripe, ceo, marketing, marketing_internal, outreach, outreach_lanes, factory, linkedin_intake, leads, brevo, product_marketing, dist_attribution, dist, thd_consulting, loop_map
 
 log = logging.getLogger(__name__)
 
@@ -25,7 +25,17 @@ async def lifespan(app: FastAPI):
     from core.migrate import run_pending_migrations
     await run_pending_migrations(database_url)
     log.info("[Startup] Migrations complete, serving traffic")
+    # Loop Map hourly status history (api/routers/loop_map.py's snapshot_loop
+    # docstring says why this lives here rather than in n8n). Started only
+    # after migrations, so its tables exist. LOOP_MAP_SNAPSHOT_DISABLED=1
+    # turns it off for an instance that should never write history.
+    import asyncio
+    snapshot_task = None
+    if os.environ.get("LOOP_MAP_SNAPSHOT_DISABLED") != "1":
+        snapshot_task = asyncio.create_task(loop_map.snapshot_loop())
     yield
+    if snapshot_task:
+        snapshot_task.cancel()
 
 
 app = FastAPI(title="Micro SaaS Engine API", version="0.1.0", lifespan=lifespan)
@@ -77,6 +87,7 @@ app.include_router(dist_attribution.router)
 app.include_router(dist.router)
 app.include_router(thd_consulting.router)
 app.include_router(buyer_research.router)
+app.include_router(loop_map.router)
 
 
 @app.get("/health")
