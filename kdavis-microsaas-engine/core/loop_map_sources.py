@@ -201,8 +201,13 @@ def load_sources(db, now: Optional[datetime] = None) -> dict:
         "demo_sessions": ("demo_sessions", "created_at", "created_at"),
         "linkedin": ("linkedin_content_queue", "status,published_at,scheduled_for", "created_at"),
     }
-    for name, (table, cols, order) in tables.items():
-        S[name] = _guard(name, lambda t=table, c=cols, o=order: _select(db, t, c, o))
+    # Independent reads, so in parallel: sequentially they took ~3.5s warm.
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {name: pool.submit(_guard, name, lambda t=table, c=cols, o=order: _select(db, t, c, o))
+                   for name, (table, cols, order) in tables.items()}
+    for name, fut in futures.items():
+        S[name] = fut.result()
 
     S["internal_workspace_ids"] = [w.strip() for w in os.environ.get(
         "LOOP_MAP_INTERNAL_WORKSPACE_IDS", ",".join(_DEFAULT_INTERNAL_WORKSPACES)).split(",") if w.strip()]
