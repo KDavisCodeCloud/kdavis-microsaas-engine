@@ -248,6 +248,25 @@ def find_vc_contacts(
     return rows, portfolios, stats
 
 
+UPSERT_BATCH = 200
+
+
+def _retry(fn: Callable[[], Any], *, attempts: int = 3, sleep=None) -> Any:
+    """Run a DB call, retrying transient connection drops. The first
+    production run (2026-10-18) died with "Server disconnected" after 769
+    single-row upserts; a dropped HTTP/2 connection is not a reason to lose
+    the whole run."""
+    _sleep = sleep if sleep is not None else time.sleep
+    for i in range(attempts):
+        try:
+            return fn()
+        except (httpx.TransportError, httpx.RemoteProtocolError) as exc:
+            if i == attempts - 1:
+                raise
+            log.warning("[VC] transient DB error (%s), retrying", exc)
+            _sleep(2 * (i + 1))
+
+
 def run_vc_scout(db, *, http_get=None, max_probes: int = 60, probe_budget_seconds: float = 600,
                  sleep=None, stats: Optional[VcStats] = None) -> tuple[list[dict], VcStats]:
     """Contacts + portfolio store + board probing + funded_by tagging.
@@ -286,16 +305,25 @@ def run_vc_scout(db, *, http_get=None, max_probes: int = 60, probe_budget_second
               (db.table("mse_vc_portfolio_companies").select("fund_id,domain,board_status")
                .limit(20000).execute().data or [])}
     to_probe: list[tuple[str, dict]] = []
+    # Grouped by column set: PostgREST batch upserts need uniform keys, and a
+    # row whose board was already probed must not have board_* overwritten.
+    groups: dict[tuple, list[dict]] = {}
     for fund_id, companies in portfolios.items():
         for c in companies:
             row = {"fund_id": fund_id, "company": c["company"], "domain": c["domain"], "last_seen_at": now_iso}
             board = known_boards.get(c["domain"])
+            prior = stored.get((fund_id, c["domain"]))
             if board:
                 row.update(board_key=board, board_status="ok")
-            elif (fund_id, c["domain"]) not in stored or not stored[(fund_id, c["domain"])].get("board_status"):
+            elif not prior or prior.get("board_status") in (None, "not_probed"):
                 to_probe.append((fund_id, c))
                 row["board_status"] = "not_probed"
-            db.table("mse_vc_portfolio_companies").upsert(row, on_conflict="fund_id,domain").execute()
+            groups.setdefault(tuple(sorted(row)), []).append(row)
+    for rows_ in groups.values():
+        for i in range(0, len(rows_), UPSERT_BATCH):
+            chunk = rows_[i:i + UPSERT_BATCH]
+            _retry(lambda chunk=chunk: db.table("mse_vc_portfolio_companies")
+                   .upsert(chunk, on_conflict="fund_id,domain").execute(), sleep=sleep)
 
     # Board probing, bounded by count and wall clock. Free: ATS JSON APIs.
     client = AtsBoardClient(sleep=sleep)
@@ -317,10 +345,10 @@ def run_vc_scout(db, *, http_get=None, max_probes: int = 60, probe_budget_second
                     new_refs[result["ref"].cache_key] = result["ref"]
                 if result["infra_roles"]:
                     stats.portfolio_with_infra_roles += 1
-        db.table("mse_vc_portfolio_companies").update({
+        _retry(lambda fund_id=fund_id, c=c, result=result: db.table("mse_vc_portfolio_companies").update({
             "board_key": result.get("board_key"), "board_status": result["board_status"],
             "infra_roles": result.get("infra_roles"),
-        }).eq("fund_id", fund_id).eq("domain", c["domain"]).execute()
+        }).eq("fund_id", fund_id).eq("domain", c["domain"]).execute(), sleep=sleep)
     if new_refs:
         queue_board_tokens(db, new_refs, None)
         for key, ref in new_refs.items():

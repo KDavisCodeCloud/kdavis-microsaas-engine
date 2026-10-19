@@ -117,6 +117,18 @@ _ANY_TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 
 # Page furniture that matches the name shape but is not a person.
+# Words that make a capitalised pair page furniture rather than a person.
+# Found live 2026-10-18: "Case Studies" was stored as a partner's founder.
+_FURNITURE_WORDS = frozenset({
+    # Deliberately no word that is also a common surname (Case, Read, Book,
+    # Call, Free): this check is shared with prospect contact discovery.
+    "studies", "study", "services", "solutions", "products", "pricing", "blog",
+    "news", "careers", "resources", "insights", "contact", "privacy", "terms",
+    "portfolio", "testimonials", "reviews", "industries", "partners", "company", "menu",
+    "demo", "started", "featured", "clients", "stories", "veteran",
+    "certified", "awards", "members", "leadership",
+})
+
 _NOT_A_NAME = frozenset({
     "our team", "the team", "about us", "contact us", "who we are",
     "leadership team", "meet the", "join us", "our people", "our story",
@@ -171,6 +183,8 @@ def _plausible_name(value: str) -> bool:
         return False
     words = v.split()
     if len(words) < 2:
+        return False
+    if any(w.lower().strip(".,") in _FURNITURE_WORDS for w in words):
         return False
     # Belt and braces alongside the case-sensitive regex: a prose word can
     # legitimately be capitalised at a sentence start, so "Tech Leads" and
@@ -237,6 +251,9 @@ def _contact_from_text(text: str, source: str,
 _BLOCK_RE = re.compile(r"<(?:script|style|noscript)[^>]*>.*?</(?:script|style|noscript)>", re.I | re.S)
 
 
+_HEADING_LEAD = re.compile(r"^\W*(?:from|by|about|meet|message|letter|note|our|the|a|an|ask|with)\b", re.I)
+
+
 def page_segments(page_html: str, max_len: int = 160) -> list[str]:
     """Visible text, one entry per tag-delimited run, in page order."""
     import html as _html
@@ -259,6 +276,10 @@ def adjacent_name_title_pairs(segments: list[str], title_re: re.Pattern,
     seen: set[str] = set()
     for i, seg in enumerate(segments):
         if len(seg) > max_title_len or " is " in seg or not title_re.search(seg):
+            continue
+        # A title element reads as a title: "From the President" or "Meet
+        # our CEO" is a heading about one, not the person's own title.
+        if _HEADING_LEAD.match(seg):
             continue
         for back in (1, 2):
             if i - back < 0:

@@ -106,6 +106,29 @@ SEGMENT_EVIDENCE: dict[str, re.Pattern] = {
         re.IGNORECASE),
 }
 
+# A firm that DOES the work for clients -- not a course on starting one, a
+# creator teaching it, or a software vendor selling a platform to such firms.
+# Each pattern below caught a real false positive in the 2026-10-18 run:
+# "Launch My AI Automation Agency" (sells the agency-in-a-box course),
+# Nate Herk (an educator), Cynomi (a vCISO SaaS platform sold to MSSPs).
+_NOT_A_SERVICE_FIRM = {
+    "course_or_educator": re.compile(
+        r"\b(?:online\s+course|masterclass|bootcamp|cohort|my\s+course|enroll(?:\s+now)?|"
+        r"start\s+(?:an|your\s+own)\s+(?:AI\s+)?(?:automation\s+)?agency|"
+        r"(?:educator|creator|youtuber)\b|teaches\s+(?:founders|operators|people)|"
+        r"join\s+(?:my|the)\s+(?:community|skool))", re.IGNORECASE),
+    "software_vendor": re.compile(
+        r"\b(?:start\s+(?:a|your)\s+free\s+trial|request\s+a\s+demo|book\s+a\s+demo|"
+        r"leverage\s+\w+(?:\u2019s|'s)?\s+[\w\s]{0,30}?platform|our\s+platform\s+(?:helps|enables|lets|automates))\b",
+        re.IGNORECASE),
+}
+
+# AI agencies need a second, shape-of-the-business signal: "Artificial
+# Intelligence ... Professional Services" alone matched a legal portfolio site.
+_AGENCY_SHAPE = re.compile(
+    r"\b(?:agency|studio|consultanc(?:y|ies)|development\s+(?:company|agency|partner|firm|services)|"
+    r"we\s+(?:build|design|develop|deliver)|software\s+development)\b", re.IGNORECASE)
+
 # And it must be a service business: someone who has clients.
 _SERVICE_EVIDENCE = re.compile(
     r"\bour\s+clients\b|\bclients?\b[^.]{0,30}\b(?:trust|rely|work|served)\b|\bwe\s+help\b"
@@ -133,7 +156,11 @@ def firm_name(page_html: str, host: str) -> str:
     """og:site_name, else the <title>'s brand segment, else the host stem."""
     m = _SITE_NAME_RE.search(page_html or "")
     if m and 1 < len(m.group(1).strip()) <= 60:
-        return html.unescape(m.group(1).strip())
+        # "Nate Herk · AI automation made easy", "Digital Reference: A
+        # Portfolio Platform..." -- the brand is the part before the tagline.
+        name = re.split(r"\s*[:·|]\s+|\s+[-–—]\s+", html.unescape(m.group(1).strip()))[0].strip()
+        if len(name) > 1:
+            return name[:60]
     m = _TITLE_RE.search(page_html or "")
     if m:
         segments = [html.unescape(x).strip() for x in re.split(r"\s+[|–—-]\s+|\s*\|\s*", m.group(1)) if x.strip()]
@@ -272,6 +299,13 @@ def find_partner_leads(
             continue
         if not _SERVICE_EVIDENCE.search(text):
             stats.drop("not_a_service_business")
+            continue
+        if segment == "ai_agency" and not _AGENCY_SHAPE.search(text):
+            stats.drop("not_an_agency")
+            continue
+        not_firm = next((reason for reason, pat in _NOT_A_SERVICE_FIRM.items() if pat.search(text)), None)
+        if not_firm:
+            stats.drop(not_firm)
             continue
         name = firm_name(page, host)
         excluded, _mult, reasons = PARTNER_EXCLUSION_POLICY.decide(classify_company(name, text))

@@ -40,6 +40,9 @@ from agents.marketing.partner_sourcing import (
 from agents.marketing.vc_partners import parse_portfolio_page, parse_team_page
 from scrapers.ats_boards import AtsPosting, BoardRef
 
+import time as _time
+NOW_TS = int(_time.time())
+
 SEED = ["ARM to Bicep", "Bicep migration", "Terraform migration", "tech debt",
         "pipeline modernization", "GitHub Actions migration", "Azure DevOps to GitHub",
         "Key Vault", "secrets management", "IaC standardization", "cloud cost reduction",
@@ -332,9 +335,9 @@ def test_find_hn_leads_end_to_end():
         f"{api}/user/whoishiring.json": Resp(200, payload={"submitted": [100]}),
         f"{api}/user/jon_north.json": Resp(200, payload={"submitted": [200]}),
         f"{api}/item/100.json": Resp(200, payload={"id": 100, "title": "Ask HN: Who is hiring? (October 2026)",
-                                                   "kids": [101, 102, 103, 104]}),
+                                                   "time": NOW_TS, "kids": [101, 102, 103, 104]}),
         f"{api}/item/200.json": Resp(200, payload={"id": 200, "title": "Ask HN: Freelancer? Seeking freelancer? (October 2026)",
-                                                   "kids": [201]}),
+                                                   "time": NOW_TS, "kids": [201]}),
         f"{api}/item/101.json": Resp(200, payload={"id": 101, "by": "cto_jane", "time": 1790866927,
                                                    "text": "Northwind | Senior SRE | Remote | https://northwind.io<p>Our ARM-to-Bicep migration needs help. Contract ok."}),
         f"{api}/item/102.json": Resp(200, payload={"id": 102, "text": "Sendery | iOS Engineer | Contract"}),
@@ -359,7 +362,7 @@ def test_hn_dedupes_against_existing_prospects():
     routes = {
         f"{api}/user/whoishiring.json": Resp(200, payload={"submitted": [100]}),
         f"{api}/user/jon_north.json": Resp(200, payload={"submitted": []}),
-        f"{api}/item/100.json": Resp(200, payload={"id": 100, "title": "Ask HN: Who is hiring? (October 2026)", "kids": [101]}),
+        f"{api}/item/100.json": Resp(200, payload={"id": 100, "title": "Ask HN: Who is hiring? (October 2026)", "time": NOW_TS, "kids": [101]}),
         f"{api}/item/101.json": Resp(200, payload={"id": 101, "text": "Northwind | SRE | Remote"}),
     }
     rows, stats = find_hn_leads("p", http_get=http(routes), existing_companies={"northwind"})
@@ -497,3 +500,133 @@ def test_buyer_research_is_reachable_with_the_marketing_key(monkeypatch):
                             headers={"Authorization": "Bearer test-marketing-api-key"})
     assert r.status_code == 200, r.text
     assert r.json() == {"tasks": [], "count": 0}
+
+
+# ── Regressions from the first production run (2026-10-18) ───────────────
+
+def test_hn_picks_the_newest_thread_across_posters_not_the_first_found():
+    """whoishiring still lists its October 2025 freelancer thread; jon_north
+    posts the current one. The first live run read the 2025 thread."""
+    from agents.marketing.hn_scout import find_threads
+    api = "hacker-news.firebaseio.com/v0"
+    year = 365 * 86400
+    routes = {
+        f"{api}/user/whoishiring.json": Resp(200, payload={"submitted": [100, 90]}),
+        f"{api}/user/jon_north.json": Resp(200, payload={"submitted": [200]}),
+        f"{api}/item/100.json": Resp(200, payload={"id": 100, "title": "Ask HN: Who is hiring? (October 2026)", "time": NOW_TS}),
+        f"{api}/item/90.json": Resp(200, payload={"id": 90, "title": "Ask HN: Freelancer? Seeking freelancer? (October 2025)", "time": NOW_TS - year}),
+        f"{api}/item/200.json": Resp(200, payload={"id": 200, "title": "Ask HN: Freelancer? Seeking freelancer? (October 2026)", "time": NOW_TS - 3600}),
+    }
+    assert [t["id"] for t in find_threads(http(routes))] == [100, 200]
+
+
+def test_a_stale_thread_is_never_read_as_current():
+    from agents.marketing.hn_scout import find_threads
+    api = "hacker-news.firebaseio.com/v0"
+    routes = {
+        f"{api}/user/whoishiring.json": Resp(200, payload={"submitted": [90]}),
+        f"{api}/user/jon_north.json": Resp(200, payload={"submitted": []}),
+        f"{api}/item/90.json": Resp(200, payload={"id": 90, "title": "Ask HN: Freelancer? Seeking freelancer? (October 2025)", "time": NOW_TS - 365 * 86400}),
+    }
+    assert find_threads(http(routes)) == []
+
+
+@pytest.mark.parametrize("name,ok", [("Case Studies", False), ("Army Veteran", False),
+                                     ("Steve Case", True), ("Dana Whitfield", True)])
+def test_page_furniture_is_not_a_person(name, ok):
+    from agents.marketing.contact_discovery import _plausible_name
+    assert _plausible_name(name) is ok
+
+
+def test_a_heading_about_a_title_is_not_a_title():
+    from agents.marketing.contact_discovery import adjacent_name_title_pairs
+    from agents.marketing.contact_fit import PARTNER_FIRM_TITLE_RE
+    segs = ["Case Studies", "From the President", "Rob Black", "Founder"]
+    assert adjacent_name_title_pairs(segs, PARTNER_FIRM_TITLE_RE) == [("Rob Black", "Founder")]
+
+
+COURSE_HOME = """<html><head><meta property="og:site_name" content="Launch My AI Automation Agency"></head><body>
+<p>Start an AI automation agency in 30 days. We build your site and playbook.</p><p>Our clients succeed.</p></body></html>"""
+VENDOR_HOME = """<html><head><title>Cynomi</title></head><body>
+<p>MSSPs leverage Cynomi’s Security Growth platform to deliver vCISO services. Our clients scale.</p></body></html>"""
+LEGAL_HOME = """<html><head><title>Digital Reference</title></head><body>
+<p>Artificial Intelligence Legal Professional Services. Our clients trust us.</p></body></html>"""
+
+
+@pytest.mark.parametrize("page,segment,reason", [
+    (COURSE_HOME, "ai_agency", "course_or_educator"),
+    (VENDOR_HOME, "fractional_ciso", "software_vendor"),
+    (LEGAL_HOME, "ai_agency", "not_an_agency"),
+])
+def test_live_false_positives_are_dropped(page, segment, reason):
+    scraper = FakeScraper({"q": [{"link": "https://firm.example/", "title": "", "snippet": ""}]})
+    rows, stats = find_partner_leads([{"segment": segment, "query": "q"}], scraper=scraper,
+                                     http_get=http({"firm.example/robots.txt": Resp(404), "firm.example/": page}),
+                                     sleep=lambda _s: None)
+    assert rows == [] and stats.dropped == {reason: 1}
+
+
+def test_firm_name_drops_the_tagline():
+    from agents.marketing.partner_sourcing import firm_name
+    page = '<meta property="og:site_name" content="Nate Herk · AI automation made easy">'
+    assert firm_name(page, "nateherk.com") == "Nate Herk"
+
+
+class _RecDb:
+    """Records writes; serves canned selects per table."""
+
+    def __init__(self, tables):
+        self.tables, self.writes, self.fail_next_upsert = tables, [], 0
+
+    def table(self, name):
+        db = self
+
+        class Q:
+            def __init__(self):
+                self.op = None
+
+            def select(self, *a, **k): return self
+            def eq(self, *a, **k): return self
+            def limit(self, *a, **k): return self
+            def order(self, *a, **k): return self
+
+            def upsert(self, payload, on_conflict=None):
+                self.op = ("upsert", payload); return self
+
+            def update(self, payload):
+                self.op = ("update", payload); return self
+
+            def insert(self, payload):
+                self.op = ("insert", payload); return self
+
+            def execute(self):
+                import httpx
+                if self.op and self.op[0] == "upsert" and db.fail_next_upsert:
+                    db.fail_next_upsert -= 1
+                    raise httpx.RemoteProtocolError("Server disconnected")
+                if self.op:
+                    db.writes.append((name,) + self.op)
+                    return type("R", (), {"data": [self.op[1]]})()
+                return type("R", (), {"data": db.tables.get(name, [])})()
+        return Q()
+
+
+def test_vc_scout_batches_portfolio_writes_keeps_probed_boards_and_retries(monkeypatch):
+    from agents.marketing import vc_partners
+    funds = [{"id": "f1", "name": "Craft Ventures", "domain": "craftventures.com",
+              "team_url": None, "portfolio_url": "https://craftventures.com/portfolio", "active": True}]
+    page = "".join(f'<a href="https://co{i}.com">Co{i}</a>' for i in range(250))
+    db = _RecDb({
+        "mse_vc_funds": funds,
+        "mse_vc_portfolio_companies": [{"fund_id": "f1", "domain": "co0.com", "board_status": "none_found"}],
+    })
+    db.fail_next_upsert = 1  # the first batch hits a dropped connection
+    monkeypatch.setattr(vc_partners, "_allowed", lambda *a, **k: True)
+    rows, stats = vc_partners.run_vc_scout(
+        db, http_get=http({"craftventures.com/portfolio": page}), max_probes=0, sleep=lambda _s: None)
+    upserts = [w for w in db.writes if w[0] == "mse_vc_portfolio_companies" and w[1] == "upsert"]
+    assert all(isinstance(u[2], list) and len(u[2]) <= vc_partners.UPSERT_BATCH for u in upserts)
+    written = [r for u in upserts for r in u[2]]
+    assert len(written) == 250 and stats.portfolio_companies == 250
+    # co0 was probed before: its board_status is not reset to not_probed.
+    assert "board_status" not in next(r for r in written if r["domain"] == "co0.com")

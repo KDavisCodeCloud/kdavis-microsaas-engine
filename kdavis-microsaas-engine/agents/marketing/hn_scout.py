@@ -65,6 +65,8 @@ THREAD_POSTERS = ("whoishiring", "jon_north")
 WHO_IS_HIRING = "who_is_hiring"
 FREELANCER = "freelancer"
 SIGNAL_TEXT_MAX = 4000
+# Threads are monthly; one older than this is last month's, not current.
+STALE_THREAD_DAYS = 40
 
 # The user's list: DevOps / SRE / platform / Azure / Terraform. "platform" is
 # narrowed to platform ENGINEERING -- bare "platform" appeared in 90 of 266
@@ -110,26 +112,44 @@ def thread_kind(title: Optional[str]) -> Optional[str]:
 
 
 def find_threads(http_get: Callable[..., Any], *, months: int = 1,
-                 posters: Iterable[str] = THREAD_POSTERS) -> list[dict]:
-    """The latest `months` thread(s) of each kind, newest first."""
-    found: dict[str, list[dict]] = {WHO_IS_HIRING: [], FREELANCER: []}
+                 posters: Iterable[str] = THREAD_POSTERS,
+                 now: Optional[datetime] = None) -> list[dict]:
+    """The latest `months` thread(s) of each kind, newest first, ACROSS
+    posters.
+
+    Picked by the thread's own timestamp, not by which poster is read first:
+    `whoishiring` still has its October 2025 freelancer thread among its
+    recent submissions, and taking the first match from the first poster read
+    that stale thread instead of jon_north's current one (live run,
+    2026-10-18). A thread older than STALE_THREAD_DAYS per month requested is
+    ignored rather than read as if it were current."""
+    now = now or datetime.now(timezone.utc)
+    candidates: dict[str, list[dict]] = {WHO_IS_HIRING: [], FREELANCER: []}
     for poster in posters:
         try:
             user = _get_json(f"{HN_API}/user/{poster}.json", http_get) or {}
         except Exception as exc:
             log.warning("[HN] user %s unreadable: %s", poster, exc)
             continue
+        per_poster = {WHO_IS_HIRING: 0, FREELANCER: 0}
         for item_id in (user.get("submitted") or [])[:40]:
-            if all(len(v) >= months for v in found.values()):
+            if all(n >= months for n in per_poster.values()):
                 break
             try:
                 item = _get_json(f"{HN_API}/item/{item_id}.json", http_get) or {}
             except Exception:
                 continue
             kind = thread_kind(item.get("title"))
-            if kind and len(found[kind]) < months and not item.get("dead"):
-                found[kind].append(item)
-    return [t for kind in (WHO_IS_HIRING, FREELANCER) for t in found[kind]]
+            if kind and per_poster[kind] < months and not item.get("dead"):
+                per_poster[kind] += 1
+                candidates[kind].append(item)
+    cutoff = now.timestamp() - STALE_THREAD_DAYS * 86400 * months
+    out: list[dict] = []
+    for kind in (WHO_IS_HIRING, FREELANCER):
+        fresh = sorted((t for t in candidates[kind] if (t.get("time") or 0) >= cutoff),
+                       key=lambda t: t.get("time") or 0, reverse=True)
+        out.extend(fresh[:months])
+    return out
 
 
 @dataclass
