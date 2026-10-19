@@ -797,3 +797,9 @@ def test_a_testimonial_agency_does_not_make_an_ai_agency():
 def test_practice_names_are_not_people():
     from agents.marketing.contact_discovery import _plausible_name
     assert _plausible_name("Technology Practice") is False
+
+
+def test_visit_website_is_not_a_company_name():
+    page = '<a href="https://gusto.com">Visit website</a><a href="https://supabase.com">Supabase</a>'
+    assert parse_portfolio_page(page, "unusual.vc") == [
+        {"company": "Gusto", "domain": "gusto.com"}, {"company": "Supabase", "domain": "supabase.com"}]

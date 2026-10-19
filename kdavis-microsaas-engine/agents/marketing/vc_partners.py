@@ -113,7 +113,9 @@ def parse_portfolio_page(page_html: str, fund_domain: str) -> list[dict]:
         if any(host == h or host.endswith("." + h) for h in _NOT_COMPANY):
             continue
         label = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", inner)).split())
-        if not label or len(label) > 40 or label.lower() in ("website", "visit", "visit site", "learn more", "read more"):
+        if (not label or len(label) > 40
+                or re.fullmatch(r"(?i)(?:visit|view|go\s+to)?\s*(?:the\s+)?(?:web)?site|visit|learn\s+more|read\s+more|"
+                                r"(?:visit|view)\s+(?:website|site|company)|website", label)):
             label = host.split(".")[0].replace("-", " ").title()
         out.setdefault(host, {"company": label, "domain": host})
     return list(out.values())
