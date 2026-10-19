@@ -483,3 +483,17 @@ def test_hn_runs_do_not_stand_in_for_the_weekly_sweep():
     ]
     st = evaluate("outbound.lead_run", {"runs": runs, "brave_budget": {}}, "c", now)
     assert st.status == "blocked" and "16 days" in st.evidence
+
+
+def test_buyer_research_is_reachable_with_the_marketing_key(monkeypatch):
+    """Found 2026-10-18: production answered 401 'Not enough segments' -- the
+    tenant middleware never exempted this prefix, so the lane never loaded."""
+    from fastapi.testclient import TestClient
+    import api.routers.buyer_research as br
+    from api.main import app
+    from tests.conftest import FakeSupabase
+    monkeypatch.setattr(br, "get_supabase", lambda: FakeSupabase({"mse_leads": []}))
+    r = TestClient(app).get("/marketing/buyer-research?lane=partners",
+                            headers={"Authorization": "Bearer test-marketing-api-key"})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"tasks": [], "count": 0}

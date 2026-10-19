@@ -78,7 +78,13 @@ async def tenant_context_middleware(request: Request, call_next):
             or request.url.path.startswith("/marketing/outreach")
             or request.url.path.startswith("/marketing/loop-map")
             # /marketing/lead-sources (2026-10-18): HN, partner and VC scouts.
-            or request.url.path.startswith("/marketing/lead-sources")):
+            or request.url.path.startswith("/marketing/lead-sources")
+            # /marketing/buyer-research (2026-10-18): the Find-the-Buyer lane.
+            # Every route in api/routers/buyer_research.py already requires
+            # MARKETING_API_KEY, but the prefix was never listed here, so the
+            # tenant middleware rejected it ("Not enough segments") in
+            # production and the dashboard lane could not load.
+            or request.url.path.startswith("/marketing/buyer-research")):
         return await call_next(request)
 
     # api/routers/brevo.py: same n8n/internal-triggered, MARKETING_API_KEY
