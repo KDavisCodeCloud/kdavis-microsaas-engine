@@ -1082,6 +1082,12 @@ def _fetch_job_posting_text(url: str, http_get=None) -> Optional[str]:
         return None
 
 
+# Every source whose leads are PROSPECT companies, for "one company, one
+# pipeline, ever". hn_thread joined 2026-10-18: a company found on Hacker News
+# and again on its ATS board is still one company.
+PROSPECT_SIGNAL_SOURCES = ("job_posting_signal", "cloud_decoded_job_signal", "hn_thread")
+
+
 def _existing_job_signal_companies(db) -> set:
     """Normalised company NAMES already in either job-signal pipeline.
 
@@ -1098,7 +1104,7 @@ def _existing_job_signal_companies(db) -> set:
     from agents.marketing.company_first_sourcing import _normalise_company
 
     names: set = set()
-    for source in ("job_posting_signal", "cloud_decoded_job_signal"):
+    for source in PROSPECT_SIGNAL_SOURCES:
         rows = db.table("mse_leads").select("company").eq("source", source).execute().data or []
         names |= {_normalise_company(r["company"]) for r in rows if r.get("company")}
     return {n for n in names if n}
@@ -1115,7 +1121,7 @@ def _existing_job_signal_domains(db) -> set:
     get_pipeline_summary) for a table this size, and keeps this callable
     against tests/conftest.py's FakeSupabase, which has no .in_()."""
     domains: set = set()
-    for source in ("job_posting_signal", "cloud_decoded_job_signal"):
+    for source in PROSPECT_SIGNAL_SOURCES:
         rows = db.table("mse_leads").select("domain").eq("source", source).execute().data or []
         domains |= {r["domain"] for r in rows if r.get("domain")}
     return domains
@@ -1805,9 +1811,11 @@ def run_scraper_v2_scout(
     from agents.marketing.company_classification import policy_for_product
     from agents.marketing.company_first_sourcing import (
         FunnelStats,
+        PortfolioIndex,
         find_company_first_signals,
         to_mse_lead_row,
     )
+    from agents.marketing.pain_phrases import PainConfig
     from agents.marketing.role_taxonomy import (
         CLOUD_DECODED_FRESHNESS,
         CONSULTING_FRESHNESS,
@@ -1867,6 +1875,11 @@ def run_scraper_v2_scout(
         email_sink: dict = {}
         email_resolver = _make_email_resolver(db, email_sink)
 
+        # 2026-10-18: pain phrases come from this product's ICP row (data, not
+        # code), and the VC portfolio index from the curated funds' own pages.
+        pain = PainConfig.from_icp(icp)
+        portfolio_index = PortfolioIndex.load(db)
+
         qualified, stats = find_company_first_signals(
             product_id, keywords, stats=stats,
             policy=policy, taxonomy=taxonomy, freshness=freshness,
@@ -1876,6 +1889,7 @@ def run_scraper_v2_scout(
             existing_companies=_existing_job_signal_companies(db),
             existing_linkedin_urls=existing_linkedin_urls,
             lookup_decision_makers=lookup_decision_makers,
+            pain=pain, portfolio_index=portfolio_index,
         )
 
         # Retry contacts for companies qualified by a PREVIOUS run before

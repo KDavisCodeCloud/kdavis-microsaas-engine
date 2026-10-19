@@ -80,6 +80,7 @@ from agents.marketing.company_classification import (
     text_mentions_company,
 )
 from agents.marketing.contact_fit import evaluate_contact_fit
+from agents.marketing.pain_phrases import PainConfig, boost_intent, match_pain_phrases
 from agents.marketing.contact_discovery import (
     ContactDiscoveryStats,
     discover_contact_free,
@@ -163,6 +164,11 @@ def _pace(sleep: Optional[Callable[[float], None]]) -> None:
 # neither step may consume the whole budget.
 DECISION_MAKER_BUDGET_SHARE = 0.35
 
+# Intent added when a curated VC fund's own portfolio page lists the company
+# (2026-10-18). A recent institutional round means budget, and the fund's
+# platform team is a second, warm route in.
+VC_FUNDED_INTENT_BOOST = 0.10
+
 
 @dataclass
 class FunnelStats:
@@ -208,6 +214,10 @@ class FunnelStats:
     routed_manual_linkedin: int = 0
     decision_makers_found: int = 0
     ats_client_stats: dict = field(default_factory=dict)
+    # 2026-10-18: pain-phrase and VC-portfolio signals.
+    pain_phrase_leads: int = 0
+    pain_phrase_hits: dict[str, int] = field(default_factory=dict)
+    vc_funded_leads: int = 0
 
     def as_dict(self) -> dict:
         d = {k: v for k, v in self.__dict__.items()}
@@ -254,8 +264,14 @@ def load_cached_board_refs(
         # routing step, not by who happened to find the board first.
         # product_id is kept on the row as provenance ("who discovered
         # this"), and the caller still scopes leads per product.
+        # Least-recently-fetched first, never-fetched before anything: the
+        # cache holds more boards than one run reads (`limit`), and with no
+        # order the same arbitrary 200 came back every week while the rest --
+        # including every token queue_board_tokens queued as "fetch next
+        # run" -- were never read. Found 2026-10-18: 392 cached, 200 loaded.
         rows = (db.table(BOARD_TOKEN_TABLE)
                 .select("provider,board_token,consecutive_failures")
+                .order("last_fetched_at", desc=False, nullsfirst=True)
                 .limit(limit).execute().data or [])
     except Exception as exc:
         # The cache is an optimisation. A missing table or a transient
@@ -736,6 +752,8 @@ def qualify_candidate(
     email: Optional[str] = None,
     config: Optional[ScoringConfig] = None,
     today: Optional[date] = None,
+    pain: Optional[PainConfig] = None,
+    funded_by: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """
     Scores and routes ONE company candidate that has already PASSED Stage 1.
@@ -782,6 +800,23 @@ def qualify_candidate(
         config=cfg,
     )
 
+    # Pain phrases (2026-10-18): the posting naming the exact problem the
+    # offer solves is a stronger intent signal than the role title alone.
+    # Scanned across the matching roles first, then the rest of the board --
+    # a company's pain is the company's, whichever posting states it.
+    intent_value = intent.value
+    intent_reasons = list(intent.reasons)
+    pain_match = match_pain_phrases(
+        " \n".join(t for t in (jd, candidate.jd_text_all) if t), (pain or PainConfig()).phrases)
+    intent_value, pain_reason = boost_intent(intent_value, pain_match, pain or PainConfig())
+    if pain_reason:
+        intent_reasons.append(pain_reason)
+    # A curated fund's own portfolio page lists this company (2026-10-18).
+    funded_by = sorted(set(funded_by or []))
+    if funded_by:
+        intent_value = round(min(1.0, intent_value + VC_FUNDED_INTENT_BOOST), 3)
+        intent_reasons.append(f"VC-backed per portfolio page (+{VC_FUNDED_INTENT_BOOST:.2f}): {', '.join(funded_by)}")
+
     grade = email_grade or grade_email(None)
 
     # Two gates on the contact, in order of cost. A wrong contact never
@@ -820,7 +855,7 @@ def qualify_candidate(
     status = "pending_dm" if has_contact else "company_qualified"
     contact_status = "found" if has_contact else "pending"
 
-    reasons = list(fit.reasons) + list(intent.reasons)
+    reasons = list(fit.reasons) + intent_reasons
     if stage1:
         reasons = list(stage1.reasons) + reasons
 
@@ -845,8 +880,11 @@ def qualify_candidate(
         "email": email,
         "email_grade": grade,
         "fit_score": fit.value,
-        "intent_score": intent.value,
+        "intent_score": intent_value,
         "score_reasons": reasons,
+        "pain_phrases": pain_match.phrases,
+        "pain_evidence": pain_match.evidence,
+        "funded_by": funded_by,
         "company_tags": sorted(stage1.classification.tags) if (stage1 and stage1.classification) else [],
         "stage1_reasons": list(stage1.reasons) if stage1 else [],
         "lead_route": route,
@@ -858,6 +896,65 @@ def qualify_candidate(
         "ats_provider": candidate.ref.provider,
         "ats_board_token": candidate.ref.token,
     }
+
+
+# ── VC portfolio index (2026-10-18) ──────────────────────────────────────
+
+@dataclass
+class PortfolioIndex:
+    """Which curated funds list a company on their own portfolio page.
+
+    Keyed by domain first (exact, the reliable key) and by distinctive
+    company name second -- portfolio pages link the company's site, while an
+    ATS board only gives its display name."""
+
+    by_domain: dict[str, set[str]] = field(default_factory=dict)
+    by_name: dict[str, set[str]] = field(default_factory=dict)
+
+    @staticmethod
+    def _host(domain: Optional[str]) -> str:
+        d = (domain or "").strip().lower()
+        return d[4:] if d.startswith("www.") else d
+
+    def add(self, fund: str, company: Optional[str], domain: Optional[str]) -> None:
+        host = self._host(domain)
+        if host:
+            self.by_domain.setdefault(host, set()).add(fund)
+        from agents.marketing.company_classification import distinctive_company_name
+        key = distinctive_company_name(company)
+        # A name that reduces to one or two letters would match half the list.
+        if key and len(key) >= 4:
+            self.by_name.setdefault(key, set()).add(fund)
+
+    def funds_for(self, company: Optional[str], domain: Optional[str]) -> list[str]:
+        from agents.marketing.company_classification import distinctive_company_name
+        funds = set(self.by_domain.get(self._host(domain), set()))
+        key = distinctive_company_name(company)
+        if key and len(key) >= 4:
+            funds |= self.by_name.get(key, set())
+        return sorted(funds)
+
+    def __len__(self) -> int:
+        return len(self.by_domain)
+
+    @classmethod
+    def load(cls, db) -> "PortfolioIndex":
+        """From mse_vc_portfolio_companies. An unreadable table is an empty
+        index (logged), never an aborted scout run."""
+        index = cls()
+        try:
+            funds = {f["id"]: f["name"] for f in
+                     (db.table("mse_vc_funds").select("id,name").execute().data or [])}
+            rows = (db.table("mse_vc_portfolio_companies").select("fund_id,company,domain")
+                    .limit(20000).execute().data or [])
+        except Exception as exc:
+            log.warning("[CompanyFirst] VC portfolio index unavailable (%s) -- no funded_by tags this run", exc)
+            return index
+        for r in rows:
+            fund = funds.get(r.get("fund_id"))
+            if fund:
+                index.add(fund, r.get("company"), r.get("domain"))
+        return index
 
 
 # ── Orchestrator ─────────────────────────────────────────────────────────
@@ -890,6 +987,8 @@ def find_company_first_signals(
     today: Optional[date] = None,
     sleep: Optional[Callable[[float], None]] = None,
     stats: Optional[FunnelStats] = None,
+    pain: Optional[PainConfig] = None,
+    portfolio_index: Optional["PortfolioIndex"] = None,
 ) -> tuple[list[dict], FunnelStats]:
     """
     The whole v2 pipeline for one product. Returns (qualified rows,
@@ -1109,10 +1208,18 @@ def find_company_first_signals(
                             contact.get("name"), resolved_domain, exc)
         stats.email_grades[grade] = stats.email_grades.get(grade, 0) + 1
 
+        funded = portfolio_index.funds_for(candidate.company, resolved_domain) if portfolio_index else []
         qualified = qualify_candidate(
             candidate, freshness=freshness, stage1=stage1, contact=contact,
             email_grade=grade, email=email_value, config=cfg, today=today,
+            pain=pain, funded_by=funded,
         )
+        if qualified["pain_phrases"]:
+            stats.pain_phrase_leads += 1
+            for phrase in qualified["pain_phrases"]:
+                stats.pain_phrase_hits[phrase] = stats.pain_phrase_hits.get(phrase, 0) + 1
+        if qualified["funded_by"]:
+            stats.vc_funded_leads += 1
 
         if qualified["contact_status"] == "found":
             stats.contact_found += 1
@@ -1158,6 +1265,8 @@ MSE_LEADS_WRITABLE_COLUMNS = frozenset({
     # migration 059
     "contact_status", "contact_attempts", "company_tags", "stage1_reasons",
     "domain_source", "size_proxy_open_roles",
+    # migration 066
+    "pain_phrases", "pain_evidence", "funded_by", "partner_type", "signal_text",
 })
 
 
@@ -1217,6 +1326,9 @@ def to_mse_lead_row(qualified: dict, *, source: str) -> dict:
         "lead_route": qualified.get("lead_route"),
         "seniority": qualified.get("seniority"),
         "confidence_score": qualified.get("fit_score"),
+        "pain_phrases": qualified.get("pain_phrases") or None,
+        "pain_evidence": qualified.get("pain_evidence") or None,
+        "funded_by": qualified.get("funded_by") or None,
     }
     unknown = set(row) - MSE_LEADS_WRITABLE_COLUMNS
     if unknown:

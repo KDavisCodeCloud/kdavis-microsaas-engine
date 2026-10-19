@@ -191,14 +191,28 @@ def _plausible_name(value: str) -> bool:
     return classify_seniority(v) == "unknown"
 
 
-def _contact_from_text(text: str, source: str) -> Optional[DiscoveredContact]:
-    """First (name, buyer title) pair in `text`, or None."""
-    for pattern, name_first in ((_NAME_THEN_TITLE_RE, True), (_TITLE_THEN_NAME_RE, False)):
+def _patterns_for(title_re: re.Pattern) -> tuple[re.Pattern, re.Pattern]:
+    """The name/title pair patterns for a given title vocabulary. The buyer
+    vocabulary is the default; the partner lane (2026-10-18) passes its own
+    -- founders and managing partners of service firms -- without a second
+    copy of the name logic."""
+    if title_re is _BUYER_TITLE_RE:
+        return _NAME_THEN_TITLE_RE, _TITLE_THEN_NAME_RE
+    title_i = f"(?i:{title_re.pattern})"
+    return (re.compile(rf"({_NAME_RE})\s*(?:,|-|–|—|\||·)\s*({title_i})"),
+            re.compile(rf"({title_i})\s*(?:,|-|–|—|:)?\s+({_NAME_RE})"))
+
+
+def _contact_from_text(text: str, source: str,
+                       title_re: re.Pattern = _BUYER_TITLE_RE) -> Optional[DiscoveredContact]:
+    """First (name, title) pair in `text`, or None."""
+    name_then_title, title_then_name = _patterns_for(title_re)
+    for pattern, name_first in ((name_then_title, True), (title_then_name, False)):
         for match in pattern.finditer(text):
             name = match.group(1) if name_first else match.group(match.lastindex)
             title_raw = match.group(match.lastindex) if name_first else match.group(1)
             # The title group can be the whole alternation; normalise it.
-            title_match = _BUYER_TITLE_RE.search(title_raw or "")
+            title_match = title_re.search(title_raw or "")
             title = title_match.group(0).strip() if title_match else None
             if not (name and title) or not _plausible_name(name):
                 continue
@@ -210,6 +224,52 @@ def _contact_from_text(text: str, source: str) -> Optional[DiscoveredContact]:
                 evidence=match.group(0).strip()[:120],
             )
     return None
+
+
+# ── Adjacent-element pairs (2026-10-18) ──────────────────────────────────
+#
+# Team pages usually put the name and the title in SEPARATE elements
+# ("<h3>Dana Whitfield</h3><p>Managing Partner</p>"). Flattened to text, that
+# is "Dana Whitfield Managing Partner" with no separator, which the
+# name/title patterns above correctly refuse to split. Reading the page as a
+# list of element texts keeps the boundary the page itself drew.
+
+_BLOCK_RE = re.compile(r"<(?:script|style|noscript)[^>]*>.*?</(?:script|style|noscript)>", re.I | re.S)
+
+
+def page_segments(page_html: str, max_len: int = 160) -> list[str]:
+    """Visible text, one entry per tag-delimited run, in page order."""
+    import html as _html
+    body = _BLOCK_RE.sub(" ", page_html or "")
+    out = []
+    for part in re.split(r"<[^>]+>", body):
+        t = " ".join(_html.unescape(part).split())
+        if t and len(t) <= max_len:
+            out.append(t)
+    return out
+
+
+def adjacent_name_title_pairs(segments: list[str], title_re: re.Pattern,
+                              *, max_title_len: int = 80) -> list[tuple[str, str]]:
+    """(name, title) where a title element directly follows (within two
+    elements) a plausible person name. A title with no name beside it, or a
+    sentence that merely contains a title ("X is a partner and Head of
+    Talent"), yields nothing -- never paired with a distant name."""
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for i, seg in enumerate(segments):
+        if len(seg) > max_title_len or " is " in seg or not title_re.search(seg):
+            continue
+        for back in (1, 2):
+            if i - back < 0:
+                break
+            cand = segments[i - back]
+            if _plausible_name(cand) and not title_re.search(cand):
+                if cand not in seen:
+                    seen.add(cand)
+                    pairs.append((cand, seg))
+                break
+    return pairs
 
 
 # ── 1. From the JD text (free, no request) ───────────────────────────────
@@ -263,6 +323,19 @@ def _allowed(domain: str, path: str, http_get: Callable[..., Any]) -> bool:
         return True
 
 
+def _contact_from_segments(page_html: str, source: str, title_re: re.Pattern) -> Optional[DiscoveredContact]:
+    for name, title_text in adjacent_name_title_pairs(page_segments(page_html), title_re):
+        m = title_re.search(title_text)
+        title = title_text.strip() if len(title_text) <= 60 else (m.group(0).strip() if m else None)
+        if not title:
+            continue
+        rejected, _ = is_negative_title(title)
+        if rejected:
+            continue
+        return DiscoveredContact(name=name, title=title, source=source, evidence=f"{name} | {title_text}"[:120])
+    return None
+
+
 def from_company_pages(
     domain: Optional[str],
     *,
@@ -270,6 +343,7 @@ def from_company_pages(
     paths: Iterable[str] = TEAM_PAGE_PATHS,
     stats: Optional[ContactDiscoveryStats] = None,
     max_pages: int = 4,
+    title_re: Optional[re.Pattern] = None,
 ) -> Optional[DiscoveredContact]:
     """Walk a few well-known team/about paths on a domain we have already
     verified, stopping at the first usable contact.
@@ -304,8 +378,10 @@ def from_company_pages(
             stats.failures[f"http_{status}"] = stats.failures.get(f"http_{status}", 0) + 1
             continue
         stats.pages_fetched += 1
-        contact = _contact_from_text(_clean_text(getattr(response, "text", "") or ""),
-                                    f"company_page:{path}")
+        page = getattr(response, "text", "") or ""
+        contact = _contact_from_text(_clean_text(page), f"company_page:{path}", title_re or _BUYER_TITLE_RE)
+        if not (contact and contact.is_usable):
+            contact = _contact_from_segments(page, f"company_page:{path}", title_re or _BUYER_TITLE_RE)
         if contact and contact.is_usable:
             stats.page_hits += 1
             return contact

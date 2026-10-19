@@ -271,10 +271,13 @@ def test_run_o2_for_linkedin_leads_pulls_lead_finder_leads_filtered_to_verified_
     # enforce-.eq()-filters limitation this test's own comment already
     # documents for lead_finder above -- all three queries hit the same
     # seeded "mse_leads" response.
-    assert calls == ["lead_finder", "job_posting_signal", "cloud_decoded_job_signal"]
+    # hn_thread / partner_signal / vc_operating_partner joined 2026-10-18.
+    assert calls == ["lead_finder", "job_posting_signal", "cloud_decoded_job_signal",
+                     "hn_thread", "partner_signal", "vc_operating_partner"]
     assert result["by_source"] == {
         "linkedin_engager": 0, "linkedin_manual": 0, "lead_finder": 1,
         "job_posting_signal": 1, "cloud_decoded_job_signal": 1,
+        "hn_thread": 1, "partner_signal": 1, "vc_operating_partner": 1,
     }
 
     # Pick the query by its filters, not by position: run_o2_for_linkedin_leads
@@ -321,4 +324,5 @@ def test_run_o2_for_linkedin_leads_processes_engagers_before_manual(monkeypatch)
     assert result["by_source"] == {
         "linkedin_engager": 1, "linkedin_manual": 1, "lead_finder": 0,
         "job_posting_signal": 0, "cloud_decoded_job_signal": 0,
+        "hn_thread": 0, "partner_signal": 0, "vc_operating_partner": 0,
     }

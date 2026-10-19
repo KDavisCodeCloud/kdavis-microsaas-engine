@@ -93,8 +93,19 @@ def _day(ts: Optional[str]) -> str:
 LEAD_RUN_WINDOW_DAYS = 8  # weekly Sunday run, plus a day of slack
 
 
+# Runs that are not the desk's own sweep. The Hacker News scout records its
+# runs under the consulting product (2026-10-18) but is monthly and separate;
+# letting it stand in for the weekly ATS run would hide a missed Sunday.
+SIDE_SOURCES = ("hn_thread",)
+
+
+def _desk_runs(S, pid) -> list[dict]:
+    return [r for r in _rows(S, "runs", pid)
+            if not set(r.get("sources_used") or []) & set(SIDE_SOURCES)]
+
+
 def outbound_lead_run(S, pid, now) -> Status:
-    runs = sorted(_rows(S, "runs", pid), key=lambda r: str(r.get("started_at") or ""), reverse=True)
+    runs = sorted(_desk_runs(S, pid), key=lambda r: str(r.get("started_at") or ""), reverse=True)
     if not runs:
         return Status("not_proven", "No lead-finder run has ever been recorded for this product.")
     last = runs[0]
@@ -129,7 +140,7 @@ def outbound_lead_run(S, pid, now) -> Status:
 
 
 def outbound_qualify(S, pid, now) -> Status:
-    runs = [r for r in _rows(S, "runs", pid) if r.get("status") in RUN_DONE and r.get("completed_at")]
+    runs = [r for r in _desk_runs(S, pid) if r.get("status") in RUN_DONE and r.get("completed_at")]
     runs.sort(key=lambda r: str(r["completed_at"]), reverse=True)
     if not runs:
         return Status("not_proven", "No completed run to qualify companies from.")
@@ -261,6 +272,25 @@ def outbound_calls_booked(S, pid, now) -> Status:
 
 def outbound_proposals(S, pid, now) -> Status:
     return _conv_stage(S, pid, "proposal_sent_at", "proposals sent", now)
+
+
+def partner_sent(S, pid, now) -> Status:
+    """Partner notes go out by hand on LinkedIn, so the email blockers (DMARC,
+    Resend) are irrelevant here. Sent means a human marked touch 1 sent."""
+    seqs = _rows(S, "seqs", pid)
+    sent = [str(s["touch_1_sent_at"]) for s in seqs if s.get("touch_1_sent_at")]
+    ready = sum(1 for s in seqs if s.get("status") == "approved_manual" and not s.get("touch_1_sent_at"))
+    if ready:
+        return Status("waiting_on_you", f"{ready} approved partner note(s) waiting to be pasted on LinkedIn; "
+                                        f"{len(sent)} sent ever.", count=ready)
+    if sent:
+        return Status("working", f"{len(sent)} partner note(s) sent; latest {_day(max(sent))}.",
+                      count=len(sent), evidence_at=max(sent))
+    return Status("not_proven", "No partner note has been sent yet.", count=0)
+
+
+def partner_agreed(S, pid, now) -> Status:
+    return _conv_stage(S, pid, "won_at", "referral agreements", now)
 
 
 def outbound_icp_configured(S, pid, now) -> Status:
@@ -557,6 +587,8 @@ RULES: dict[str, Callable] = {
     "outbound.calls_booked": outbound_calls_booked,
     "outbound.proposals": outbound_proposals,
     "outbound.icp_configured": outbound_icp_configured,
+    "partner.sent": partner_sent,
+    "partner.agreed": partner_agreed,
     "cd.demo_sessions": cd_demo_sessions,
     "cd.signup_pay": cd_signup_pay,
     "cd.cloud_connected": cd_cloud_connected,

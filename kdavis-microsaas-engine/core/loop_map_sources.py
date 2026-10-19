@@ -187,7 +187,7 @@ def load_sources(db, now: Optional[datetime] = None) -> dict:
         "convs": ("mse_outreach_conversations", "product_id,stage,replied_at,call_booked_at,"
                                                 "proposal_sent_at,won_at,lost_at", None),
         "runs": ("mse_lead_finder_runs", "id,product_id,status,started_at,completed_at,leads_found,"
-                                         "error_message,funnel_stats", "started_at"),
+                                         "error_message,funnel_stats,sources_used", "started_at"),
         "icp": ("mse_icp_configs", "product_id,outbound_enabled", None),
         "positioning": ("mse_positioning", "product_id,version,status,approved_at", None),
         "surfaces": ("mse_content_surfaces", "product_id,status,published_at,created_at", None),

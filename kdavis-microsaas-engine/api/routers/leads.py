@@ -274,7 +274,12 @@ async def get_outreach_summary_counters(authorization: Optional[str] = Header(de
     # core/outreach_counters.py is the one implementation: the Loop Map counts
     # its desks with the same function, per product, so the three cannot drift.
     from core.outreach_counters import count_outreach
-    c = count_outreach(leads, seqs, convs)
+    from agents.marketing.partner_sourcing import PARTNERS_PRODUCT_ID
+    # The partner lane (2026-10-18) is counted separately: a referral partner
+    # awaiting a founder name is not a prospect awaiting a buyer, and folding
+    # them together would change what the digest's headline numbers mean.
+    c = count_outreach(leads, seqs, convs, exclude_product_ids=(PARTNERS_PRODUCT_ID,))
+    pc = count_outreach(leads, seqs, convs, product_id=PARTNERS_PRODUCT_ID)
 
     from core.email_compliance import daily_send_cap
     return {
@@ -286,6 +291,8 @@ async def get_outreach_summary_counters(authorization: Optional[str] = Header(de
         "replies_this_week": c["replies_this_week"],
         "parked_awaiting_contact": c["parked_awaiting_contact"],
         "window_start": c["window_start"],
+        "partners": {k: pc[k] for k in ("awaiting_buyer", "awaiting_approval", "ready_to_paste",
+                                         "replies_this_week", "parked_awaiting_contact")},
         "notes": {
             "replies_this_week": ("mse_outreach_conversations.replied_at within 7 days -- "
                                   "marked by hand in the Conversations lane"),

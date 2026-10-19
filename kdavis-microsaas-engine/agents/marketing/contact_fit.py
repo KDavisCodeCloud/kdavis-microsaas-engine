@@ -150,3 +150,41 @@ def evaluate_contact_fit(
         )
 
     return ContactFit(False, f"not a buyer title: {t!r}", None)
+
+
+# ── Partner lane (2026-10-18) ─────────────────────────────────────────────
+#
+# A referral partner is a different person from a buyer: the founder or
+# managing partner of a service firm, or a VC fund's operating / platform /
+# talent partner. Buyer rules would reject every one of them -- "Talent
+# Partner" is a recruiting title and a founder at a firm of unknown size fails
+# the size gate -- so the partner lane has its own vocabulary rather than an
+# exemption carved into the buyer rules.
+
+PARTNER_FIRM_TITLE_RE = re.compile(
+    r"\b(?:co-?founder|founder|founding\s+partner|managing\s+(?:partner|director)|"
+    r"CEO|chief\s+executive|president|principal|owner)\b",
+    re.IGNORECASE,
+)
+
+VC_PLATFORM_TITLE_RE = re.compile(
+    r"\boperating\s+partner\b|\btalent\s+partner\b|\bplatform\s+(?:partner|director|lead)\b"
+    r"|\bchief\s+platform\s+officer\b"
+    r"|\b(?:head|director|vp|vice\s+president)\s+of\s+(?:talent|platform|portfolio(?:\s+(?:success|operations))?)\b"
+    r"|\bportfolio\s+(?:success|operations)\b",
+    re.IGNORECASE,
+)
+
+
+def evaluate_partner_contact_fit(title: Optional[str], partner_type: Optional[str]) -> ContactFit:
+    """Is this the person a partnership note should go to?"""
+    if not title or not title.strip():
+        return ContactFit(False, "no title", None)
+    t = title.strip()
+    if partner_type == "vc_operating_partner":
+        if VC_PLATFORM_TITLE_RE.search(t):
+            return ContactFit(True, f"VC platform/talent/operating role: {t!r}", "vc_platform")
+        return ContactFit(False, f"not an operating, platform or talent role: {t!r}", None)
+    if PARTNER_FIRM_TITLE_RE.search(t):
+        return ContactFit(True, f"firm leadership: {t!r}", "partner_leader")
+    return ContactFit(False, f"not a founder or managing partner: {t!r}", None)

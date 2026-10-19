@@ -18,8 +18,12 @@ from typing import Iterable, Optional
 AWAITING_BUYER_CONTACT_STATUSES = ("pending", "needs_review")
 
 
-def _for_product(rows: Iterable[dict], product_id: Optional[str]) -> list[dict]:
+def _for_product(rows: Iterable[dict], product_id: Optional[str],
+                 exclude: Iterable[str] = ()) -> list[dict]:
     rows = list(rows or [])
+    exclude = set(exclude or ())
+    if exclude:
+        rows = [r for r in rows if r.get("product_id") not in exclude]
     if product_id is None:
         return rows
     return [r for r in rows if r.get("product_id") == product_id]
@@ -27,6 +31,7 @@ def _for_product(rows: Iterable[dict], product_id: Optional[str]) -> list[dict]:
 
 def count_outreach(leads: Iterable[dict], seqs: Iterable[dict], convs: Iterable[dict],
                    *, product_id: Optional[str] = None,
+                   exclude_product_ids: Iterable[str] = (),
                    now: Optional[datetime] = None) -> dict:
     """The five header counters, optionally scoped to one product.
 
@@ -37,9 +42,9 @@ def count_outreach(leads: Iterable[dict], seqs: Iterable[dict], convs: Iterable[
     week_ago = (now - timedelta(days=7)).isoformat()
     today = now.date().isoformat()
 
-    leads = _for_product(leads, product_id)
-    seqs = _for_product(seqs, product_id)
-    convs = _for_product(convs, product_id)
+    leads = _for_product(leads, product_id, exclude_product_ids)
+    seqs = _for_product(seqs, product_id, exclude_product_ids)
+    convs = _for_product(convs, product_id, exclude_product_ids)
 
     return {
         "awaiting_buyer": sum(1 for l in leads

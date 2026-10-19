@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 from api.middleware.auth import require_marketing_api_key
 from core.loop_map_rules import SEVERITY, evaluate
 from core.loop_map_sources import load_sources
+from agents.marketing.partner_sourcing import PARTNERS_PRODUCT_ID
 from core.outreach_counters import count_outreach
 from core.supabase_client import get_supabase
 
@@ -186,12 +187,14 @@ def build_map(db, now: Optional[datetime] = None) -> dict:
             "last_lap_at": p_laps[-1]["completed_at"] if p_laps else None,
             "stations": desks,
             "notes": [n for n in notes if n["product_id"] == pid],
-            "funnel": _funnel_trend(S, pid, now) if p["playbook"] == "signal_outbound" else None,
+            "funnel": _funnel_trend(S, pid, now) if p["playbook"] in ("signal_outbound", "partner") else None,
         })
 
     counters = count_outreach(S.get("leads") if isinstance(S.get("leads"), list) else [],
                               S.get("seqs") if isinstance(S.get("seqs"), list) else [],
-                              S.get("convs") if isinstance(S.get("convs"), list) else [], now=now)
+                              S.get("convs") if isinstance(S.get("convs"), list) else [], now=now,
+                              # Same prospect-only scope as the digest header.
+                              exclude_product_ids=(PARTNERS_PRODUCT_ID,))
     return {"generated_at": now.isoformat(), "products": out,
             "counters": {k: counters[k] for k in ("awaiting_buyer", "awaiting_approval", "ready_to_paste")}}
 
@@ -307,7 +310,7 @@ async def resolve_note(note_id: str, body: ResolveIn, authorization: Optional[st
 
 
 class PlaybookIn(BaseModel):
-    playbook: str = Field(pattern="^(signal_outbound|community_search|content|distributor)$")
+    playbook: str = Field(pattern="^(signal_outbound|community_search|content|distributor|partner)$")
 
 
 @router.post("/products/{product_id}/playbook")

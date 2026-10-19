@@ -209,8 +209,9 @@ def channel_for_route(route: Optional[str]) -> ChannelSpec:
     return CHANNELS.get((route or "").strip(), LINKEDIN_CHANNEL)
 
 
-def build_system_prompt(channel: ChannelSpec, offer: Offer) -> str:
-    """CHANNEL + OFFER + shared rules, in that order."""
+def build_system_prompt(channel: ChannelSpec, offer: Offer, *, extra_rules: str = "") -> str:
+    """CHANNEL + OFFER + shared rules, in that order. `extra_rules` are
+    per-lead rules (the pain-phrase rule) appended to the shared ones."""
     schema_keys = (["subject"] if channel.wants_subject else []) + list(channel.touches)
     schema = "{\n" + ",\n".join(f'  "{k}": str' for k in schema_keys) + "\n}"
     return (
@@ -222,7 +223,8 @@ def build_system_prompt(channel: ChannelSpec, offer: Offer) -> str:
         f"Return ONLY a single JSON object -- no prose, no markdown fences -- matching exactly:\n\n"
         f"{schema}\n\n"
         f"{SHARED_COPY_RULES}\n"
-        f"- The sequence stops entirely if they reply at any point; touch_3 is only ever sent on "
+        + (f"{extra_rules}\n" if extra_rules else "")
+        + f"- The sequence stops entirely if they reply at any point; touch_3 is only ever sent on "
         f"zero reply."
     )
 
@@ -247,3 +249,76 @@ def channel_violations(text: Optional[str], route: Optional[str]) -> list[str]:
         if re.search(rf"(?<![a-z]){re.escape(phrase)}(?![a-z])", low):
             problems.append(f"uses {other}-only phrasing on the {route} route: {phrase!r}")
     return problems
+
+
+# ── Pain phrases in touch 1 (2026-10-18) ─────────────────────────────────
+
+PAIN_RULE = """\
+- PAIN FROM THEIR POSTING: the context includes `pain_evidence` -- sentences copied verbatim from \
+their own job posting. touch_1 MUST name that exact pain in the posting's own words (for example "the \
+ARM-to-Bicep migration your posting mentions"). Use the phrase as written; do not paraphrase it into \
+something broader, and do not add pains the posting does not state."""
+
+
+def pain_phrase_missing(touch_1: Optional[str], phrases: list[str]) -> bool:
+    """True when the lead has pain phrases and touch_1 names none of them.
+    Whitespace- and hyphen-tolerant, like the matcher that found them."""
+    if not phrases:
+        return False
+    from agents.marketing.pain_phrases import match_pain_phrases
+    return not match_pain_phrases(touch_1 or "", phrases)
+
+
+# ── Partner lane (2026-10-18) ────────────────────────────────────────────
+#
+# A partnership note is not a sales sequence: no pain-of-the-week, no demo
+# link, no ask to buy. One firm that refers twice a year is the goal.
+
+PARTNER_ANGLES = {
+    "compliance_firm": (
+        "the implementation partner their clients need AFTER an audit: when a SOC 2, HIPAA or ISO "
+        "assessment finds gaps in cloud infrastructure, IAM, secrets management or CI/CD, Kelvin is the "
+        "engineer who closes them, so the firm's client passes the next audit and the firm stays the advisor"),
+    "fractional_ciso": (
+        "the hands-on cloud and IAM engineer behind a fractional CISO: the CISO sets the policy, Kelvin "
+        "implements it in Azure/AWS -- least-privilege IAM, Key Vault and secrets, landing zones, pipeline "
+        "controls -- white-label if they prefer"),
+    "ai_agency": (
+        "their white-label cloud and infrastructure arm: AI agencies ship agents and apps, and their clients "
+        "then need the production side -- cloud environments, IAM, secrets, CI/CD, cost control. Kelvin "
+        "takes that work so the agency does not have to staff it"),
+    "vc_operating_partner": (
+        "a vetted contract cloud/platform engineer for portfolio companies that are hiring for DevOps or "
+        "platform roles and cannot wait for the hire -- someone the operating or talent partner can "
+        "introduce when a founder asks 'who do you know?'"),
+}
+
+PARTNER_COPY_RULES = """\
+Rules, non-negotiable:
+- This is a PARTNERSHIP note to a peer, not a sales pitch. Never ask them to buy anything. The ask is a \
+short conversation about working together or referring work.
+- FIRST PERSON ONLY. You are writing AS Kelvin. Never write "Kelvin" or refer to him in the third person.
+- Address the contact by FIRST NAME from the context. Never a company name as the greeting.
+- Every claim about their firm comes from the signal context given below (their own site's words or \
+the team page that lists them) -- never invented. Do not claim to know their clients.
+- FACTUAL: Kelvin is a senior cloud and platform engineer, currently at CorVel, taking contract work on \
+his own time. Never claim production infrastructure work at Boeing or Honeywell, and do not name them.
+- No hype words, no flattery, no dollar amounts, no "I noticed you..." with nothing specific behind it."""
+
+
+def build_partner_prompt(partner_type: Optional[str]) -> str:
+    """LinkedIn channel + partner angle + partner rules. Always the manual
+    LinkedIn channel: partner notes are pasted by hand."""
+    angle = PARTNER_ANGLES.get((partner_type or "").strip(), PARTNER_ANGLES["ai_agency"])
+    channel = LINKEDIN_CHANNEL
+    schema = "{\n" + ",\n".join(f'  "{k}": str' for k in channel.touches) + "\n}"
+    return (
+        "You are writing a short LinkedIn PARTNERSHIP note sequence for Kelvin Davis to a possible "
+        "referral partner.\n\n"
+        f"THE PARTNERSHIP\nKelvin would be {angle}.\n\n"
+        f"{channel.instructions}\n\n"
+        f"If a URL is used at all, it is {CONSULTING_OFFER_URL} and no other.\n\n"
+        f"Return ONLY a single JSON object -- no prose, no markdown fences -- matching exactly:\n\n{schema}\n\n"
+        f"{PARTNER_COPY_RULES}\n"
+        "- The sequence stops entirely if they reply at any point; touch_3 is only ever sent on zero reply."
+    )

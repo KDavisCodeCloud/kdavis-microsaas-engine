@@ -106,7 +106,14 @@ from agents.marketing.outreach_copy import (  # noqa: E402
 
 # The three lead_source values whose leads live in mse_leads and therefore
 # carry contact_status / title / open_role_count.
-_MSE_LEADS_SOURCES = ("lead_finder", "job_posting_signal", "cloud_decoded_job_signal")
+_MSE_LEADS_SOURCES = ("lead_finder", "job_posting_signal", "cloud_decoded_job_signal",
+                      "hn_thread", "partner_signal", "vc_operating_partner")
+
+# mse_leads sources drafted WITHOUT the verified-email filter: their leads are
+# manual-track by design and usually have no email at all (2026-10-18 added
+# the HN and partner sources to the two job-signal ones).
+_NO_EMAIL_FILTER_SOURCES = ("job_posting_signal", "cloud_decoded_job_signal",
+                            "hn_thread", "partner_signal", "vc_operating_partner")
 
 
 _TERMINAL_SEQUENCE_STATUSES = ("rejected_hitl", "sequence_complete", "suppressed", "approval_expired")
@@ -155,7 +162,7 @@ def contact_is_draftable(lead: dict) -> tuple[bool, str]:
     qualified it; only the contact is wrong, so the lead returns to the
     Find-the-Buyer lane rather than being dropped.
     """
-    from agents.marketing.contact_fit import evaluate_contact_fit
+    from agents.marketing.contact_fit import evaluate_contact_fit, evaluate_partner_contact_fit
 
     status = (lead.get("contact_status") or "").strip()
     if status != "found":
@@ -168,7 +175,12 @@ def contact_is_draftable(lead: dict) -> tuple[bool, str]:
     if not title:
         return False, "no title: contact fit cannot be assessed without one"
 
-    fit = evaluate_contact_fit(title, open_role_count=lead.get("open_role_count"))
+    # A referral partner is not a buyer: founders of service firms and VC
+    # platform/talent partners would all fail the buyer rules.
+    if lead.get("partner_type"):
+        fit = evaluate_partner_contact_fit(title, lead.get("partner_type"))
+    else:
+        fit = evaluate_contact_fit(title, open_role_count=lead.get("open_role_count"))
     if not fit.accepted:
         return False, f"contact fit rejected -- {fit.reason}"
     return True, f"ok: {fit.reason}"
@@ -245,17 +257,30 @@ def _write_route_aware_sequence(lead: dict, product_id: str, anthropic_client=No
     from agents.marketing.outreach_copy import (
         CLOUD_DECODED_OFFER,
         CONSULTING_OFFER,
+        LINKEDIN_CHANNEL,
+        PAIN_RULE,
+        build_partner_prompt,
         build_system_prompt,
         channel_for_route,
         channel_violations,
+        pain_phrase_missing,
     )
 
+    partner_type = (lead.get("partner_type") or "").strip() or None
+    pain_phrases = [p for p in (lead.get("pain_phrases") or []) if p]
     route = (lead.get("lead_route") or "").strip()
-    channel = channel_for_route(route)
-    offer = CLOUD_DECODED_OFFER if product_id == CLOUD_DECODED_PRODUCT_ID else CONSULTING_OFFER
-    system = build_system_prompt(channel, offer)
+    if partner_type:
+        # Partner notes are always pasted by hand (manual LinkedIn), whatever
+        # the stored route says.
+        channel = LINKEDIN_CHANNEL
+        offer = CONSULTING_OFFER
+        system = build_partner_prompt(partner_type)
+    else:
+        channel = channel_for_route(route)
+        offer = CLOUD_DECODED_OFFER if product_id == CLOUD_DECODED_PRODUCT_ID else CONSULTING_OFFER
+        system = build_system_prompt(channel, offer, extra_rules=PAIN_RULE if pain_phrases else "")
 
-    safe_lead = DataSanitizationShield.clean({
+    context = {
         # first_name is REQUIRED: the shared rules demand a first-name
         # greeting, and an instruction the context cannot satisfy produces
         # "Hi --".
@@ -265,7 +290,21 @@ def _write_route_aware_sequence(lead: dict, product_id: str, anthropic_client=No
         "job_posting_title": lead.get("job_posting_title"),
         "job_posting_url": lead.get("job_posting_url"),
         "job_posting_stack_keywords": lead.get("job_posting_stack_keywords") or [],
-    })
+    }
+    # 2026-10-18 signals. Only present keys are sent, so a lead without them
+    # gets exactly the context it got before.
+    if pain_phrases:
+        context["pain_phrases"] = pain_phrases
+        context["pain_evidence"] = lead.get("pain_evidence") or []
+    if lead.get("funded_by"):
+        context["funded_by"] = lead["funded_by"]
+    if partner_type:
+        context["partner_type"] = partner_type
+    if lead.get("signal_text"):
+        # The HN post or the partner firm's own words. Capped: it is context,
+        # not something to paraphrase at length.
+        context["signal_text"] = str(lead["signal_text"])[:1500]
+    safe_lead = DataSanitizationShield.clean(context)
     user_prompt = (
         f"Lead + real signal context (never invent anything beyond this):\n"
         f"{json.dumps(safe_lead, indent=2)}\n\n"
@@ -274,6 +313,19 @@ def _write_route_aware_sequence(lead: dict, product_id: str, anthropic_client=No
 
     raw = _analyze(system, user_prompt, anthropic_client=anthropic_client, max_tokens=1600)
     parsed = json.loads(_strip_fences(raw))
+    if pain_phrases and pain_phrase_missing(parsed.get("touch_1"), pain_phrases):
+        # The rule says touch 1 names the posting's own pain. One retry with
+        # the miss stated; a second miss is logged and kept for the human
+        # reviewer rather than failing the whole batch.
+        _log.warning("[MKT-O2] %s touch_1 omitted pain phrases %s; regenerating once",
+                     lead.get("company"), pain_phrases)
+        retry_prompt = user_prompt + (
+            f"\n\nYour previous touch_1 did not name the pain from their posting. touch_1 MUST contain "
+            f"one of these phrases exactly as written: {json.dumps(pain_phrases)}.")
+        raw = _analyze(system, retry_prompt, anthropic_client=anthropic_client, max_tokens=1600)
+        parsed = json.loads(_strip_fences(raw))
+        if pain_phrase_missing(parsed.get("touch_1"), pain_phrases):
+            _log.warning("[MKT-O2] %s touch_1 still omits pain phrases after retry", lead.get("company"))
     required = (["subject"] if channel.wants_subject else []) + list(channel.touches)
     missing = [k for k in required if k not in parsed or not str(parsed.get(k) or "").strip()]
     if missing:
@@ -285,9 +337,11 @@ def _write_route_aware_sequence(lead: dict, product_id: str, anthropic_client=No
         value = _trim_copy(parsed[key], limit, label=f"{channel.route} {key}")
         out[key] = value
 
-    # The close URL must survive on the touch that carries the ask.
-    out["touch_2"] = _ensure_close_url(
-        out["touch_2"], offer.close_url, channel.limits.get("touch_2", 900))
+    # The close URL must survive on the touch that carries the ask. A partner
+    # note carries no sales close.
+    if not partner_type:
+        out["touch_2"] = _ensure_close_url(
+            out["touch_2"], offer.close_url, channel.limits.get("touch_2", 900))
 
     # A generation that drifted across channels is caught here, not shipped.
     # Raising rather than scrubbing: the wrong channel's vocabulary usually
@@ -531,8 +585,8 @@ def run_o2_cold_dm_writer(
                 row["drafted_for_route"] = sequence["drafted_for_route"]
             if lead_source == "apollo":
                 row["lead_id"] = lead["id"]
-            elif lead_source in ("lead_finder", "job_posting_signal", "cloud_decoded_job_signal"):
-                # All three sources live in mse_leads -- same lead-reference
+            elif lead_source in _MSE_LEADS_SOURCES:
+                # All of these sources live in mse_leads -- same lead-reference
                 # column, migrations 20260916000045/20260925000054 didn't
                 # need a new one.
                 row["lead_finder_lead_id"] = lead["id"]
@@ -568,7 +622,7 @@ def run_o2_cold_dm_writer(
             if not insert_result.data:
                 raise RuntimeError("Insert into mse_dm_sequences returned no data")
 
-        if lead_source in ("lead_finder", "job_posting_signal", "cloud_decoded_job_signal"):
+        if lead_source in _MSE_LEADS_SOURCES:
             # Two-stage lifecycle unique to mse_leads (see module
             # docstring): a sequence now exists for each of these leads,
             # advance them out of "nothing drafted yet" so MKT-O2's own
@@ -762,6 +816,32 @@ def run_o2_for_linkedin_leads(
     else:
         by_source["cloud_decoded_job_signal"] = 0
 
+    # 2026-10-18: Hacker News leads (prospects) and the partner lane's two
+    # sources. Same reasoning as the job-signal blocks above -- manual-track
+    # leads with no email, so no verified-email filter.
+    for extra_source in ("hn_thread", "partner_signal", "vc_operating_partner"):
+        extra_leads = (
+            db.table("mse_leads")
+            .select("*")
+            .eq("product_id", product_id)
+            .eq("status", "pending_dm")
+            .eq("source", extra_source)
+            .order("created_at")
+            .execute()
+            .data
+            or []
+        )
+        if extra_leads:
+            result = run_o2_cold_dm_writer(
+                product_id=product_id, research_report=research_report, leads=extra_leads,
+                campaign_build_id=None, lead_source=extra_source,
+                supabase_client=db, anthropic_client=anthropic_client,
+            )
+            total_written += result["sequences_written"]
+            by_source[extra_source] = result["sequences_written"]
+        else:
+            by_source[extra_source] = 0
+
     # Reconcile: every pending_dm lead must be either written or skipped
     # with a named reason. An unexplained gap is the exact silent-failure
     # shape that kept this engine inert -- surface it loudly rather than
@@ -769,7 +849,7 @@ def run_o2_for_linkedin_leads(
     pending_total = len(_all_pending)
     _skip("lead_finder_email_not_verified",
           sum(1 for r in _all_pending
-              if r.get("source") not in ("job_posting_signal", "cloud_decoded_job_signal")
+              if r.get("source") not in _NO_EMAIL_FILTER_SOURCES
               and r.get("email_status") != "verified"))
     accounted = total_written + sum(skip_reasons.values())
     unexplained = max(pending_total - accounted, 0)

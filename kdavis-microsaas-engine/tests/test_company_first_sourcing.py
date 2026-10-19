@@ -118,6 +118,9 @@ class FakeQuery:
     def limit(self, *_a, **_k):
         return self
 
+    def order(self, *_a, **_k):
+        return self
+
     def upsert(self, row, **_k):
         self.upserts.append(row)
         return self

@@ -55,7 +55,8 @@ def _lead_for(db, seq: dict) -> dict:
             "id,company,domain,first_name,last_name,title,email,email_grade,"
             "linkedin_url,lead_route,contact_status,job_posting_title,"
             "job_posting_url,job_posting_date,open_role_count,fit_score,"
-            "intent_score,score_reasons,stack_tags"
+            "intent_score,score_reasons,stack_tags,source,pain_phrases,pain_evidence,"
+            "funded_by,partner_type,signal_text"
         ).eq("id", lfid).maybe_single().execute()
         return (r.data if r else None) or {}
     lid = seq.get("lead_id")
@@ -119,6 +120,13 @@ def _card(db, seq: dict, products: dict) -> dict:
         },
         "scores": {"fit": lead.get("fit_score"), "intent": lead.get("intent_score")},
         "why": lead.get("score_reasons") or [],
+        # 2026-10-18 signals, shown on the card so the reviewer can check the
+        # draft against what the posting / post / firm actually said.
+        "pain_phrases": lead.get("pain_phrases") or [],
+        "pain_evidence": lead.get("pain_evidence") or [],
+        "funded_by": lead.get("funded_by") or [],
+        "partner_type": lead.get("partner_type"),
+        "signal_text": (lead.get("signal_text") or "")[:1500] or None,
         "touches": {k: seq.get(k) for k in ("touch_1", "touch_2", "touch_3") if seq.get(k)},
         "subject": seq.get("subject"),
         "drafted_for_route": seq.get("drafted_for_route"),
@@ -150,6 +158,18 @@ def _approval_block_reason(lead: dict) -> Optional[str]:
     return None
 
 
+def in_lane(product_id: Optional[str], lane: Optional[str]) -> bool:
+    """The Outreach page has two separate surfaces since 2026-10-18:
+    'prospects' (every product but the partner lane) and 'partners'. No lane
+    means everything, which is what every caller got before."""
+    from agents.marketing.partner_sourcing import PARTNERS_PRODUCT_ID
+    if lane == "partners":
+        return product_id == PARTNERS_PRODUCT_ID
+    if lane == "prospects":
+        return product_id != PARTNERS_PRODUCT_ID
+    return True
+
+
 def _products(db) -> dict:
     return {p["id"]: p for p in
             (db.table("mse_products").select("id,name").execute().data or [])}
@@ -158,6 +178,7 @@ def _products(db) -> dict:
 @router.get("/drafts")
 async def list_drafts(
     product_id: Optional[str] = None,
+    lane: Optional[str] = None,
     limit: int = 50,
     authorization: Optional[str] = Header(default=None),
 ):
@@ -168,6 +189,7 @@ async def list_drafts(
     if product_id:
         q = q.eq("product_id", product_id)
     seqs = q.order("created_at", desc=True).limit(limit).execute().data or []
+    seqs = [x for x in seqs if in_lane(x.get("product_id"), lane)]
     products = _products(db)
     return {"drafts": [_card(db, s, products) for s in seqs], "count": len(seqs)}
 
@@ -297,6 +319,7 @@ async def save_linkedin_url(
 @router.get("/ready-to-paste")
 async def list_ready_to_paste(
     limit: int = 50,
+    lane: Optional[str] = None,
     authorization: Optional[str] = Header(default=None),
 ):
     """Lane (c): approved copy on the manual/LinkedIn track.
@@ -310,6 +333,7 @@ async def list_ready_to_paste(
     seqs = (db.table("mse_dm_sequences").select("*")
             .eq("status", "approved_manual")
             .order("hitl_approved_at", desc=True).limit(limit).execute().data or [])
+    seqs = [x for x in seqs if in_lane(x.get("product_id"), lane)]
     products = _products(db)
     return {"ready": [_card(db, s, products) for s in seqs], "count": len(seqs)}
 

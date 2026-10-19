@@ -42,6 +42,7 @@ TARGET_TITLES_BY_PRODUCT: dict[str, list[str]] = {
         "Head of Infrastructure", "VP Infrastructure", "CTO",
     ],
 }
+PARTNER_TARGET_TITLES = ["Founder", "Co-Founder", "Managing Partner", "CEO", "Principal"]
 DEFAULT_TARGET_TITLES = [
     "CTO", "VP Engineering", "Head of Platform", "Director of Engineering",
     "Founder", "Co-Founder",
@@ -83,6 +84,7 @@ class SaveContactRequest(BaseModel):
 @router.get("")
 async def list_buyer_research_tasks(
     product_id: Optional[str] = None,
+    lane: Optional[str] = None,
     limit: int = 50,
     authorization: Optional[str] = Header(default=None),
 ):
@@ -96,20 +98,31 @@ async def list_buyer_research_tasks(
              .select("id,product_id,company,domain,domain_source,job_posting_title,"
                      "job_posting_url,open_role_count,size_proxy_open_roles,stack_tags,"
                      "company_tags,fit_score,intent_score,score_reasons,contact_attempts,"
-                     "location,status,contact_status")
+                     "location,status,contact_status,source,signal_text,pain_phrases,"
+                     "funded_by,partner_type")
              .eq("contact_status", "pending"))
     if product_id:
         query = query.eq("product_id", product_id)
     rows = (query.order("fit_score", desc=True)
             .order("intent_score", desc=True)
             .limit(limit).execute().data or [])
+    from api.routers.outreach_lanes import in_lane
+    rows = [r for r in rows if in_lane(r.get("product_id"), lane)]
 
     tasks = []
     for r in rows:
+        partner = bool(r.get("partner_type"))
         tasks.append({
             "lead_id": r["id"],
             "product_id": r.get("product_id"),
-            "headline": f"Find the buyer at {r.get('company')}",
+            "headline": (f"Find the founder at {r.get('company')}" if partner
+                         else f"Find the buyer at {r.get('company')}"),
+            "source": r.get("source"),
+            "partner_type": r.get("partner_type"),
+            # The HN post, or the partner firm's own words about itself.
+            "signal_text": (r.get("signal_text") or "")[:1500] or None,
+            "pain_phrases": r.get("pain_phrases") or [],
+            "funded_by": r.get("funded_by") or [],
             "company": r.get("company"),
             "domain": r.get("domain"),
             "domain_source": r.get("domain_source"),
@@ -122,8 +135,8 @@ async def list_buyer_research_tasks(
                 "open_roles_on_board": r.get("size_proxy_open_roles"),
                 "stack": r.get("stack_tags") or [],
             },
-            "target_titles": TARGET_TITLES_BY_PRODUCT.get(
-                r.get("product_id") or "", DEFAULT_TARGET_TITLES),
+            "target_titles": (PARTNER_TARGET_TITLES if partner else TARGET_TITLES_BY_PRODUCT.get(
+                r.get("product_id") or "", DEFAULT_TARGET_TITLES)),
             "scores": {"fit": r.get("fit_score"), "intent": r.get("intent_score")},
             "why_qualified": r.get("score_reasons") or [],
             "company_tags": r.get("company_tags") or [],
