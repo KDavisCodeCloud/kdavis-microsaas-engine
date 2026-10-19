@@ -248,6 +248,7 @@ def find_partner_leads(
     existing_linkedin_urls: Optional[set] = None,
     stats: Optional[PartnerStats] = None,
     sleep: Optional[Callable[[float], None]] = None,
+    page_offset: int = 0,
 ) -> tuple[list[dict], PartnerStats]:
     """Qualified partner rows (not yet written) and the funnel.
 
@@ -271,7 +272,7 @@ def find_partner_leads(
             continue
         if stats.queries:
             _pace(sleep)
-        items = scraper._search(query)
+        items = scraper._search(query, offset=page_offset) if page_offset else scraper._search(query)
         stats.queries += 1
         for item in items or []:
             stats.results_seen += 1
@@ -285,10 +286,12 @@ def find_partner_leads(
     # 2-4. Qualify each firm on its own site.
     rows: list[dict] = []
     contact_stats = ContactDiscoveryStats()
-    for host, segment in list(firms.items())[:max_firms]:
-        if host in existing_domains:
-            stats.duplicates += 1
-            continue
+    # Known firms are dropped BEFORE the max_firms cut: a monthly rerun of the
+    # same queries returns mostly firms already in the lane, and slicing first
+    # spent the whole cap on them (new firms only, 2026-10-19).
+    fresh = [(h, seg) for h, seg in firms.items() if h not in existing_domains]
+    stats.duplicates += len(firms) - len(fresh)
+    for host, segment in fresh[:max_firms]:
         if not _allowed(host, "/", http_get):
             stats.drop("robots_disallowed")
             continue

@@ -105,11 +105,11 @@ async def list_buyer_research_tasks(
     query = scope_to_lane(query, lane)
     if product_id:
         query = query.eq("product_id", product_id)
+    from api.routers.outreach_lanes import _read_limit, in_lane, order_partner_lane
     rows = (query.order("fit_score", desc=True)
             .order("intent_score", desc=True)
-            .limit(limit).execute().data or [])
-    from api.routers.outreach_lanes import in_lane
-    rows = [r for r in rows if in_lane(r.get("product_id"), lane)]
+            .limit(_read_limit(lane, limit)).execute().data or [])
+    rows = order_partner_lane([r for r in rows if in_lane(r.get("product_id"), lane)], lane, limit)
 
     tasks = []
     for r in rows:

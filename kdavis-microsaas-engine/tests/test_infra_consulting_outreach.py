@@ -262,7 +262,9 @@ def test_stage_gated_product_writes_nothing():
         product_id="prod-1", research_report={}, leads=[_job_posting_lead()],
         lead_source="job_posting_signal", supabase_client=db, anthropic_client=_FakeAnthropic([]),
     )
-    assert result == {"status": "stage_gated", "sequences_written": 0}
+    assert result["status"] == "stage_gated" and result["sequences_written"] == 0
+    # Every gated lead is reported as skipped, for mse_dm_enrollment_skips.
+    assert {p["code"] for p in result["parked"]} <= {"selling_stage_not_active"}
 
 
 def test_run_o2_for_linkedin_leads_includes_job_posting_signal_source(monkeypatch):

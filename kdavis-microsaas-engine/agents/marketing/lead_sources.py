@@ -13,6 +13,7 @@ read the weekly ATS run.
   run_vc_scout         curated funds' own pages      -> partners, source=vc_operating_partner
                                                        (+ portfolio store, funded_by tags)
   run_pain_backfill    pain phrases on leads that predate them (free: ATS JSON APIs)
+  run_pain_rescan      weekly: every lead re-read against the current phrase list
 """
 
 from __future__ import annotations
@@ -157,7 +158,8 @@ def run_hn_scout(supabase_client: Optional[Any] = None, *, months: int = 1,
 
 def run_partner_scout(supabase_client: Optional[Any] = None, *, max_queries: int = 30,
                       max_firms: int = 25, run_id: Optional[str] = None, http_get=None,
-                      scraper=None, sleep=None, segments: Optional[list[str]] = None) -> dict:
+                      scraper=None, sleep=None, segments: Optional[list[str]] = None,
+                      page_offset: int = 0) -> dict:
     from agents.marketing.company_classification import normalise_company_name
     from agents.marketing.mkt_lead_finder import _get_icp_config, _this_months_brave_query_count
     from agents.marketing.partner_sourcing import PARTNERS_PRODUCT_ID, PartnerStats, find_partner_leads
@@ -184,7 +186,7 @@ def run_partner_scout(supabase_client: Optional[Any] = None, *, max_queries: int
                 templates, scraper=brave, http_get=http_get, max_queries=max_queries, max_firms=max_firms,
                 existing_domains={r["domain"] for r in existing if r.get("domain")},
                 existing_companies={normalise_company_name(r["company"]) for r in existing if r.get("company")},
-                existing_linkedin_urls=all_urls, stats=stats, sleep=sleep,
+                existing_linkedin_urls=all_urls, stats=stats, sleep=sleep, page_offset=page_offset,
             )
         finally:
             _record_brave(db, stats.queries + stats.queries_contact)
@@ -209,73 +211,155 @@ def run_vc_scout_entry(supabase_client: Optional[Any] = None, *, max_probes: int
     return _run(db, PARTNERS_PRODUCT_ID, "vc_operating_partner", run_id, work)
 
 
-# ── Pain-phrase backfill ─────────────────────────────────────────────────
+# ── Pain-phrase backfill / rescan ────────────────────────────────────────
+
+def _job_id(url: str) -> str:
+    """The last path segment of a posting URL: greenhouse's numeric id,
+    ashby's uuid, lever's uuid. Enough to find a lead's own posting on its
+    board without caring which host spelling the URL used."""
+    return (url or "").split("?")[0].rstrip("/").rsplit("/", 1)[-1]
+
+
+def _lead_text(lead: dict, client, cache: dict, out: dict, max_boards: int) -> Optional[str]:
+    """The text a lead's pain phrases are read from, or None when nothing
+    could be read (the row is then left alone and retried next time).
+
+    HN leads: the stored post. Job-signal leads: their own posting when it is
+    still on the board, else the whole board -- the posting text was never
+    stored, and a closed posting's sibling roles are still this company."""
+    from scrapers.ats_boards import board_ref_from_url
+
+    if lead.get("source") == "hn_thread":
+        return lead.get("signal_text") or None
+    ref = board_ref_from_url(lead.get("job_posting_url") or "")
+    if ref is None:
+        out["no_board"] += 1
+        return None
+    if ref.cache_key not in cache:
+        if out["boards_read"] + out["boards_failed"] >= max_boards:
+            return None
+        postings = client.fetch_board(ref)
+        if client.board_status.get(ref.cache_key) == "failed":
+            out["boards_failed"] += 1
+            cache[ref.cache_key] = []
+        else:
+            out["boards_read"] += 1
+            cache[ref.cache_key] = postings
+    postings = cache[ref.cache_key]
+    if not postings:
+        return None
+    want = _job_id(lead.get("job_posting_url") or "")
+    own = [p for p in postings if want and _job_id(p.url or "") == want]
+    if own:
+        out["own_posting"] += 1
+        return own[0].description_text or None
+    out["whole_board"] += 1
+    return " \n".join(p.description_text or "" for p in postings) or None
+
+
+def _pain_update(lead: dict, match, pain, *, label: str) -> Optional[dict]:
+    """The mse_leads update for one scanned lead, or None if nothing changed.
+
+    Only phrases the lead does not already carry are added, and intent rises
+    by exactly the boost those new phrases add under the cap -- a rescan
+    after the list grows never boosts the same phrase twice."""
+    old = list(lead.get("pain_phrases") or [])
+    new = [p for p in match.phrases if p not in old]
+    if not new:
+        return None if lead.get("pain_phrases") is not None else {"pain_phrases": []}
+    applied = min(pain.max_boost, pain.per_match * len(old))
+    total = min(pain.max_boost, pain.per_match * (len(old) + len(new)))
+    delta = round(total - applied, 3)
+    evidence = list(lead.get("pain_evidence") or []) + [e for e in match.evidence if e["phrase"] in new]
+    update: dict = {"pain_phrases": old + new, "pain_evidence": evidence}
+    if lead.get("intent_score") is not None and delta > 0:
+        update["intent_score"] = round(min(1.0, float(lead["intent_score"]) + delta), 3)
+    reason = f"pain phrases in JD (+{delta:.2f}): {', '.join(new)} ({label})" if delta else \
+        f"pain phrases in JD (boost already at cap): {', '.join(new)} ({label})"
+    update["score_reasons"] = list(lead.get("score_reasons") or []) + [reason]
+    return update
+
+
+def scan_pain_phrases(db, product_id: str, *, rescan: bool, client=None, http_get=None, sleep=None,
+                      max_boards: int = 150, cache: Optional[dict] = None) -> dict:
+    """Match the product's pain phrases against its leads and write what is new.
+
+    rescan=False touches only leads never scanned (pain_phrases IS NULL).
+    rescan=True re-reads every lead, so phrases added to the ICP since a lead
+    was scanned are found too."""
+    from agents.marketing.mkt_lead_finder import _get_icp_config
+    from agents.marketing.pain_phrases import PainConfig, match_pain_phrases
+    from scrapers.ats_boards import AtsBoardClient
+
+    client = client or AtsBoardClient(http_get=http_get, sleep=sleep)
+    cache = cache if cache is not None else {}
+    out = {"scanned": 0, "matched": 0, "newly_matched_leads": 0, "boards_read": 0, "boards_failed": 0,
+           "no_board": 0, "own_posting": 0, "whole_board": 0, "phrases_configured": 0, "by_phrase": {},
+           "new_by_phrase": {}, "updated_lead_ids": []}
+    pain = PainConfig.from_icp(_get_icp_config(db, product_id))
+    out["phrases_configured"] = len(pain.phrases)
+    if not pain.phrases:
+        return out
+    q = (db.table("mse_leads")
+         .select("id,company,source,job_posting_url,signal_text,intent_score,score_reasons,"
+                 "pain_phrases,pain_evidence")
+         .eq("product_id", product_id))
+    if not rescan:
+        q = q.is_("pain_phrases", "null")
+    for lead in q.execute().data or []:
+        text = _lead_text(lead, client, cache, out, max_boards)
+        if not text:
+            continue
+        out["scanned"] += 1
+        match = match_pain_phrases(text, pain.phrases)
+        for ph in match.phrases:
+            out["by_phrase"][ph] = out["by_phrase"].get(ph, 0) + 1
+        if match:
+            out["matched"] += 1
+        update = _pain_update(lead, match, pain, label="rescan" if rescan else "backfill")
+        if update is None:
+            continue
+        added = [p for p in update.get("pain_phrases") or [] if p not in (lead.get("pain_phrases") or [])]
+        if added:
+            out["newly_matched_leads"] += 1
+            out["updated_lead_ids"].append(lead["id"])
+            for ph in added:
+                out["new_by_phrase"][ph] = out["new_by_phrase"].get(ph, 0) + 1
+        db.table("mse_leads").update(update).eq("id", lead["id"]).execute()
+    return out
+
 
 def run_pain_backfill(supabase_client: Optional[Any] = None, *, http_get=None, sleep=None,
                       max_boards: int = 150) -> dict:
-    """Scan leads that predate the pain-phrase list. Only rows with
-    pain_phrases IS NULL are touched; a scanned row is set to [] when nothing
-    matched, so a rerun never boosts the same lead twice.
-
-    Job-signal leads: their own ATS board is re-read through the public JSON
-    API (free) -- the posting text was never stored. HN leads: the stored
-    post text."""
-    from agents.marketing.mkt_lead_finder import (
-        CLOUD_DECODED_PRODUCT_ID,
-        THDAGENTIC_CONSULTING_PRODUCT_ID,
-        _get_icp_config,
-    )
-    from agents.marketing.pain_phrases import PainConfig, boost_intent, match_pain_phrases
-    from scrapers.ats_boards import AtsBoardClient, board_ref_from_url
+    """Scan leads that predate the pain-phrase list (pain_phrases IS NULL)."""
+    from agents.marketing.mkt_lead_finder import CLOUD_DECODED_PRODUCT_ID, THDAGENTIC_CONSULTING_PRODUCT_ID
+    from scrapers.ats_boards import AtsBoardClient
 
     db = supabase_client if supabase_client is not None else get_supabase_for_job()
-    client = AtsBoardClient(http_get=http_get, sleep=sleep)
-    out = {"scanned": 0, "matched": 0, "boards_read": 0, "boards_failed": 0, "no_board": 0, "by_phrase": {}}
-    board_text: dict[str, str] = {}
+    client, cache = AtsBoardClient(http_get=http_get, sleep=sleep), {}
+    per = {pid: scan_pain_phrases(db, pid, rescan=False, client=client, cache=cache, max_boards=max_boards)
+           for pid in (THDAGENTIC_CONSULTING_PRODUCT_ID, CLOUD_DECODED_PRODUCT_ID)}
+    _audit(db, "win", THDAGENTIC_CONSULTING_PRODUCT_ID, "pain_phrase_backfill", per)
+    return per
 
-    for product_id in (THDAGENTIC_CONSULTING_PRODUCT_ID, CLOUD_DECODED_PRODUCT_ID):
-        pain = PainConfig.from_icp(_get_icp_config(db, product_id))
-        if not pain.phrases:
-            continue
-        leads = (db.table("mse_leads")
-                 .select("id,source,job_posting_url,signal_text,intent_score,score_reasons,pain_phrases")
-                 .eq("product_id", product_id).is_("pain_phrases", "null").execute().data or [])
-        for lead in leads:
-            text = None
-            if lead.get("source") == "hn_thread":
-                text = lead.get("signal_text")
-            else:
-                ref = board_ref_from_url(lead.get("job_posting_url") or "")
-                if ref is None:
-                    out["no_board"] += 1
-                    continue
-                if ref.cache_key not in board_text:
-                    if out["boards_read"] + out["boards_failed"] >= max_boards:
-                        continue
-                    postings = client.fetch_board(ref)
-                    if client.board_status.get(ref.cache_key) == "failed":
-                        out["boards_failed"] += 1
-                        board_text[ref.cache_key] = ""
-                    else:
-                        out["boards_read"] += 1
-                        board_text[ref.cache_key] = " \n".join(p.description_text or "" for p in postings)
-                text = board_text[ref.cache_key]
-                if not text:
-                    # Board gone or empty: nothing was learned, so the row
-                    # stays NULL and is retried next time.
-                    continue
-            out["scanned"] += 1
-            match = match_pain_phrases(text, pain.phrases)
-            update: dict = {"pain_phrases": match.phrases, "pain_evidence": match.evidence or None}
-            if match:
-                out["matched"] += 1
-                for ph in match.phrases:
-                    out["by_phrase"][ph] = out["by_phrase"].get(ph, 0) + 1
-                new_intent, reason = boost_intent(float(lead.get("intent_score") or 0), match, pain)
-                if lead.get("intent_score") is not None:
-                    update["intent_score"] = new_intent
-                update["score_reasons"] = list(lead.get("score_reasons") or []) + [reason + " (backfill)"]
-            db.table("mse_leads").update(update).eq("id", lead["id"]).execute()
 
-    _audit(db, "win", THDAGENTIC_CONSULTING_PRODUCT_ID, "pain_phrase_backfill", out)
-    return out
+def run_pain_rescan(supabase_client: Optional[Any] = None, *, product_id: str,
+                    run_id: Optional[str] = None, http_get=None, sleep=None, max_boards: int = 300) -> dict:
+    """Weekly rescan of one product's leads (runs after the Sunday scout).
+
+    Records an mse_lead_finder_runs row (sources_used=['pain_rescan'],
+    leads_found=0 -- it finds no companies) so the Loop Map's Qualify desk can
+    show it, plus audit_log win or lose."""
+    db = supabase_client if supabase_client is not None else get_supabase_for_job()
+    run_id = _start_run(db, product_id, "pain_rescan", run_id)
+    try:
+        out = scan_pain_phrases(db, product_id, rescan=True, http_get=http_get, sleep=sleep,
+                                max_boards=max_boards)
+    except Exception as exc:
+        _finish_run(db, run_id, written=0, funnel={"error": str(exc)[:500]}, error=str(exc))
+        _audit(db, "lose", product_id, "pain_rescan_run", {"run_id": run_id, "error": str(exc)})
+        raise RuntimeError(f"pain rescan failed for product {product_id}: {exc}") from exc
+    funnel = {k: v for k, v in out.items() if k != "updated_lead_ids"}
+    _finish_run(db, run_id, written=0, funnel=funnel)
+    _audit(db, "win", product_id, "pain_rescan_run", {"run_id": run_id, **out})
+    return {"run_id": run_id, "status": "complete", "product_id": product_id, **out}

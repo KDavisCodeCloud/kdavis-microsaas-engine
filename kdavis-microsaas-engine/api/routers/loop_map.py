@@ -35,7 +35,7 @@ from core.loop_map_rules import SEVERITY, evaluate
 from core.loop_map_sources import load_sources
 from agents.marketing.partner_sourcing import PARTNERS_PRODUCT_ID
 from core.outreach_counters import count_outreach
-from core.supabase_client import get_supabase
+from core.supabase_client import get_supabase, get_supabase_for_job
 
 log = logging.getLogger(__name__)
 
@@ -116,7 +116,11 @@ def _funnel_trend(S: dict, product_id: str, now: datetime) -> list[dict]:
             if w in out:
                 out[w][key] += 1
 
-    rows = lambda name: [r for r in (S.get(name) or []) if r.get("product_id") == product_id]  # noqa: E731
+    # An unreadable source is stored as {"_error": ...}; iterating that dict
+    # yielded its key strings and 500'd the whole map (prod, 2026-10-19).
+    # The desks already show the source as unknown; the trend just skips it.
+    rows = lambda name: [r for r in (S.get(name) if isinstance(S.get(name), list) else [])  # noqa: E731
+                         if r.get("product_id") == product_id]
     for l in rows("leads"):
         if l.get("status") in QUALIFIED:
             bump(l.get("created_at"), "qualified")
@@ -202,7 +206,9 @@ def build_map(db, now: Optional[datetime] = None) -> dict:
 @router.get("")
 async def get_loop_map(authorization: Optional[str] = Header(default=None)):
     require_marketing_api_key(authorization)
-    return await asyncio.to_thread(build_map, get_supabase())
+    # Reconnecting client: a source read that hits a connection the server
+    # already dropped is replayed instead of rendering that source unknown.
+    return await asyncio.to_thread(build_map, get_supabase_for_job())
 
 
 # ----------------------------------------------------------------- writes
@@ -357,7 +363,7 @@ def _audit(db, outcome: str, metadata: dict) -> None:
 
 
 def run_snapshot(force: bool = False) -> dict:
-    db = get_supabase()
+    db = get_supabase_for_job()
     try:
         result = snapshot(db, force=force)
     except Exception as exc:

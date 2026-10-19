@@ -48,7 +48,7 @@ class TestDiscoveryNoLongerRequiresVerifiedEmail:
             "mse_research_reports": [{"report_json": {"pain_language": ["x"]}}],
         })
 
-        with patch.object(li, "get_supabase", return_value=db), \
+        with patch.object(li, "get_supabase_for_job", return_value=db), \
              patch("agents.marketing.mkt_o2_cold_dm_writer.run_o2_for_linkedin_leads") as mock_o2:
             li._run_linkedin_dm_sequences()
 
@@ -70,7 +70,7 @@ class TestDiscoveryNoLongerRequiresVerifiedEmail:
             "mse_research_reports": [{"report_json": {}}],
         })
 
-        with patch.object(li, "get_supabase", return_value=db), \
+        with patch.object(li, "get_supabase_for_job", return_value=db), \
              patch("agents.marketing.mkt_o2_cold_dm_writer.run_o2_for_linkedin_leads") as mock_o2:
             li._run_linkedin_dm_sequences()
 
@@ -88,7 +88,7 @@ class TestMissingResearchReportNoLongerSkips:
             "mse_research_reports": [],  # none exists
         })
 
-        with patch.object(li, "get_supabase", return_value=db), \
+        with patch.object(li, "get_supabase_for_job", return_value=db), \
              patch("agents.marketing.mkt_o2_cold_dm_writer.run_o2_for_linkedin_leads") as mock_o2:
             li._run_linkedin_dm_sequences()
 
@@ -104,7 +104,7 @@ class TestMissingResearchReportNoLongerSkips:
             "mse_research_reports": [{"report_json": report}],
         })
 
-        with patch.object(li, "get_supabase", return_value=db), \
+        with patch.object(li, "get_supabase_for_job", return_value=db), \
              patch("agents.marketing.mkt_o2_cold_dm_writer.run_o2_for_linkedin_leads") as mock_o2:
             li._run_linkedin_dm_sequences()
 
@@ -119,7 +119,7 @@ class TestDiscoveryUnionUnchanged:
             "mse_research_reports": [],
         })
 
-        with patch.object(li, "get_supabase", return_value=db), \
+        with patch.object(li, "get_supabase_for_job", return_value=db), \
              patch("agents.marketing.mkt_o2_cold_dm_writer.run_o2_for_linkedin_leads") as mock_o2:
             li._run_linkedin_dm_sequences()
 
@@ -133,7 +133,7 @@ class TestDiscoveryUnionUnchanged:
             "mse_research_reports": [{"report_json": {}}],
         })
 
-        with patch.object(li, "get_supabase", return_value=db), \
+        with patch.object(li, "get_supabase_for_job", return_value=db), \
              patch("agents.marketing.mkt_o2_cold_dm_writer.run_o2_for_linkedin_leads") as mock_o2:
             li._run_linkedin_dm_sequences()
 

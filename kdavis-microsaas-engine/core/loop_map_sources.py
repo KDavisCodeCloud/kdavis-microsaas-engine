@@ -162,11 +162,16 @@ def decodedsix_stats(now: datetime) -> dict:
     _, hitl_last = c("hitl_queue", {"resolved_at": "not.is.null", "_order": "resolved_at"})
     pageviews_7d, _ = c("analytics_pageviews", {"created_at": f"gte.{week}"})
     _, pageviews_latest = c("analytics_pageviews", {})
+    # Discovery's heartbeat: every cycle writes a discovery_items batch, even
+    # one that proposes no topic. topic_candidates alone let one manual run
+    # keep the desk green for a week over a dead scheduler (2026-10-19).
+    _, discovery_latest = c("discovery_items", {"_order": "fetched_at"})
     return {"slug": "decodedsix", "topics_latest": topics_latest, "topics_7d": topics_7d, "articles_latest": articles_latest,
             "articles_created_7d": articles_7d, "published_total": published_total,
             "published_latest": published_latest, "published_7d": published_7d,
             "hitl_pending": hitl_pending, "hitl_last_resolved": hitl_last,
-            "pageviews_7d": pageviews_7d, "pageviews_latest": pageviews_latest}
+            "pageviews_7d": pageviews_7d, "pageviews_latest": pageviews_latest,
+            "discovery_latest": discovery_latest}
 
 
 def sph_accounts() -> dict:
@@ -208,6 +213,19 @@ def load_sources(db, now: Optional[datetime] = None) -> dict:
                    for name, (table, cols, order) in tables.items()}
     for name, fut in futures.items():
         S[name] = fut.result()
+
+    week_ago = (now - timedelta(days=7)).isoformat()
+
+    def _dm_runs():
+        return (db.table("audit_log").select("created_at,outcome,metadata")
+                .eq("action", "linkedin_dm_sequences_run").gte("created_at", week_ago)
+                .order("created_at", desc=True).limit(50).execute().data or [])
+    S["dm_runs"] = _guard("dm_runs", _dm_runs)
+
+    def _skips():
+        return (db.table("mse_dm_enrollment_skips").select("product_id,lead_id,run_at,reason,detail")
+                .gte("run_at", week_ago).order("run_at", desc=True).limit(2000).execute().data or [])
+    S["dm_skips"] = _guard("dm_skips", _skips)
 
     S["internal_workspace_ids"] = [w.strip() for w in os.environ.get(
         "LOOP_MAP_INTERNAL_WORKSPACE_IDS", ",".join(_DEFAULT_INTERNAL_WORKSPACES)).split(",") if w.strip()]

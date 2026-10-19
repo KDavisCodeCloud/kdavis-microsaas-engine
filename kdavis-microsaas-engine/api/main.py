@@ -33,9 +33,18 @@ async def lifespan(app: FastAPI):
     snapshot_task = None
     if os.environ.get("LOOP_MAP_SNAPSHOT_DISABLED") != "1":
         snapshot_task = asyncio.create_task(loop_map.snapshot_loop())
+    # Lead-source schedules (agents/marketing/lead_schedule.py): pain rescan
+    # after the Sunday scout, HN on the 3rd, partners + VC on the 1st. The DB
+    # claim row makes a second replica stand down; LEAD_SCHEDULE_DISABLED=1
+    # keeps an instance (staging) from ever running them.
+    schedule_task = None
+    if os.environ.get("LEAD_SCHEDULE_DISABLED") != "1":
+        from agents.marketing.lead_schedule import schedule_loop
+        schedule_task = asyncio.create_task(schedule_loop())
     yield
-    if snapshot_task:
-        snapshot_task.cancel()
+    for task in (snapshot_task, schedule_task):
+        if task:
+            task.cancel()
 
 
 app = FastAPI(title="Micro SaaS Engine API", version="0.1.0", lifespan=lifespan)

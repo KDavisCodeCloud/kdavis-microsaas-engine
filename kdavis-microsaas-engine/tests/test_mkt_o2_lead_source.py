@@ -52,7 +52,7 @@ def test_apollo_lead_source_unchanged_behavior():
         supabase_client=fake_db, anthropic_client=anthropic_client,
     )
 
-    assert result == {"status": "ready_for_hitl", "sequences_written": 1}
+    assert {k: v for k, v in result.items() if k != "parked"} == {"status": "ready_for_hitl", "sequences_written": 1}
     inserts = [c for c in fake_db.executed if c.table_name == "mse_dm_sequences" and c.calls[0][0] == "insert"]
     row = inserts[0]._payload[0]
     assert row["lead_id"] == "lead-1"
@@ -83,7 +83,7 @@ def test_linkedin_manual_uses_standard_prompt_no_campaign_build():
         supabase_client=fake_db, anthropic_client=anthropic_client,
     )
 
-    assert result == {"status": "ready_for_hitl", "sequences_written": 1}
+    assert {k: v for k, v in result.items() if k != "parked"} == {"status": "ready_for_hitl", "sequences_written": 1}
     inserts = [c for c in fake_db.executed if c.table_name == "mse_dm_sequences" and c.calls[0][0] == "insert"]
     row = inserts[0]._payload[0]
     assert row["linkedin_lead_id"] == "li-lead-1"
@@ -116,7 +116,7 @@ def test_linkedin_engager_uses_engager_prompt_and_references_interaction():
         supabase_client=fake_db, anthropic_client=anthropic_client,
     )
 
-    assert result == {"status": "ready_for_hitl", "sequences_written": 1}
+    assert {k: v for k, v in result.items() if k != "parked"} == {"status": "ready_for_hitl", "sequences_written": 1}
     inserts = [c for c in fake_db.executed if c.table_name == "mse_dm_sequences" and c.calls[0][0] == "insert"]
     row = inserts[0]._payload[0]
     assert row["linkedin_lead_id"] == "li-lead-2"
@@ -158,7 +158,7 @@ def test_lead_finder_source_uses_lead_finder_lead_id_and_the_route_aware_prompt(
         supabase_client=fake_db, anthropic_client=anthropic_client,
     )
 
-    assert result == {"status": "ready_for_hitl", "sequences_written": 1}
+    assert {k: v for k, v in result.items() if k != "parked"} == {"status": "ready_for_hitl", "sequences_written": 1}
     inserts = [c for c in fake_db.executed if c.table_name == "mse_dm_sequences" and c.calls[0][0] == "insert"]
     row = inserts[0]._payload[0]
     assert row["lead_finder_lead_id"] == "lf-lead-1"
@@ -194,7 +194,7 @@ class TestSellingStageGate:
             supabase_client=fake_db, anthropic_client=anthropic_client,
         )
 
-        assert result == {"status": "stage_gated", "sequences_written": 0}
+        assert {k: v for k, v in result.items() if k != "parked"} == {"status": "stage_gated", "sequences_written": 0}
         assert anthropic_client.messages.calls == []
         inserts = [c for c in fake_db.executed if c.table_name == "mse_dm_sequences" and c.calls[0][0] == "insert"]
         assert inserts == []
@@ -210,7 +210,7 @@ class TestSellingStageGate:
             supabase_client=fake_db, anthropic_client=anthropic_client,
         )
 
-        assert result == {"status": "stage_gated", "sequences_written": 0}
+        assert {k: v for k, v in result.items() if k != "parked"} == {"status": "stage_gated", "sequences_written": 0}
         assert anthropic_client.messages.calls == []
 
     def test_no_icp_config_row_defaults_to_building_and_skips(self):
@@ -227,7 +227,7 @@ class TestSellingStageGate:
             supabase_client=fake_db, anthropic_client=anthropic_client,
         )
 
-        assert result == {"status": "stage_gated", "sequences_written": 0}
+        assert {k: v for k, v in result.items() if k != "parked"} == {"status": "stage_gated", "sequences_written": 0}
 
     def test_stage_gate_skip_is_audited(self):
         fake_db = FakeSupabase(responses={"mse_icp_configs": [{"selling_stage": "warming"}]})

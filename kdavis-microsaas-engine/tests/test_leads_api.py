@@ -38,6 +38,7 @@ def test_find_leads_rejects_wrong_api_key():
 def test_find_leads_returns_run_id(fake_db, monkeypatch):
     fake_db.responses["mse_lead_finder_runs"] = [{"id": "run-1"}]
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
 
     captured = {}
     monkeypatch.setattr(
@@ -79,6 +80,7 @@ def test_find_leads_threads_limit_through_to_background_task(fake_db, monkeypatc
     config's full target_count."""
     fake_db.responses["mse_lead_finder_runs"] = [{"id": "run-1"}]
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
 
     captured = {}
     monkeypatch.setattr(
@@ -108,12 +110,18 @@ def test_run_lead_finder_background_passes_limit_through(monkeypatch):
     # (2026-10-02), and this test is specifically about v1's forwarding.
     leads_router._run_lead_finder_background("prod-1", "run-1", limit=3, pipeline="v1")
 
+    client = captured.pop("supabase_client")
     assert captured == {"product_id": "prod-1", "run_id": "run-1", "limit": 3}
+    # Its own reconnecting client, not the shared one that dropped the
+    # Oct 11 Cloud Decoded run.
+    from core.supabase_client import ResilientClient
+    assert isinstance(client, ResilientClient)
 
 
 def test_find_leads_500_when_run_row_insert_fails(fake_db, monkeypatch):
     fake_db.responses["mse_lead_finder_runs"] = []
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
 
     resp = client.post("/marketing/leads/find", json={"product_id": "prod-1"}, headers=AUTH)
     assert resp.status_code == 500
@@ -127,6 +135,7 @@ def test_get_run_requires_auth():
 def test_get_run_404_when_not_found(fake_db, monkeypatch):
     fake_db.responses["mse_lead_finder_runs"] = []
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
 
     resp = client.get("/marketing/leads/runs/run-1", headers=AUTH)
     assert resp.status_code == 404
@@ -135,6 +144,7 @@ def test_get_run_404_when_not_found(fake_db, monkeypatch):
 def test_get_run_returns_status(fake_db, monkeypatch):
     fake_db.responses["mse_lead_finder_runs"] = [{"id": "run-1", "status": "complete", "leads_found": 5}]
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
 
     resp = client.get("/marketing/leads/runs/run-1", headers=AUTH)
 
@@ -150,6 +160,7 @@ def test_list_leads_requires_auth():
 def test_list_leads_filters_by_product_id(fake_db, monkeypatch):
     fake_db.responses["mse_leads"] = [{"id": "lead-1", "product_id": "prod-1"}]
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
 
     resp = client.get("/marketing/leads?product_id=prod-1", headers=AUTH)
 
@@ -163,6 +174,7 @@ def test_list_leads_filters_by_product_id(fake_db, monkeypatch):
 def test_list_leads_applies_pagination_range(fake_db, monkeypatch):
     fake_db.responses["mse_leads"] = []
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
 
     resp = client.get("/marketing/leads?limit=10&offset=20", headers=AUTH)
 
@@ -185,6 +197,7 @@ def test_icp_products_joins_product_names(fake_db, monkeypatch):
     ]
     fake_db.responses["mse_products"] = [{"id": "prod-1", "name": "TradesDesk", "slug": "tradesdesk"}]
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
 
     resp = client.get("/marketing/leads/icp-products", headers=AUTH)
 
@@ -199,6 +212,7 @@ def test_icp_products_joins_product_names(fake_db, monkeypatch):
 def test_icp_products_empty_when_no_icp_configs(fake_db, monkeypatch):
     fake_db.responses["mse_icp_configs"] = []
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
 
     resp = client.get("/marketing/leads/icp-products", headers=AUTH)
 
@@ -216,6 +230,7 @@ def test_pipeline_summary_counts_by_stage(fake_db, monkeypatch):
         {"stage": "new"}, {"stage": "new"}, {"stage": "contacted"}, {"stage": "won"},
     ]
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
 
     resp = client.get("/marketing/leads/pipeline-summary?product_id=prod-1", headers=AUTH)
 
@@ -234,6 +249,7 @@ def test_pipeline_summary_counts_by_stage(fake_db, monkeypatch):
 def test_pipeline_summary_defaults_missing_stage_to_new(fake_db, monkeypatch):
     fake_db.responses["mse_leads"] = [{"stage": None}]
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
 
     resp = client.get("/marketing/leads/pipeline-summary", headers=AUTH)
 
@@ -264,6 +280,7 @@ def test_outreach_summary_counts_sent_and_meetings_per_product(fake_db, monkeypa
         {"id": "prod-2", "name": "DecodedSix"},
     ]
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
 
     resp = client.get("/marketing/leads/outreach-summary", headers=AUTH)
 
@@ -280,6 +297,7 @@ def test_outreach_summary_empty_when_no_sequences_or_leads(fake_db, monkeypatch)
     fake_db.responses["mse_dm_sequences"] = []
     fake_db.responses["mse_leads"] = []
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
 
     resp = client.get("/marketing/leads/outreach-summary", headers=AUTH)
 
@@ -295,6 +313,7 @@ def test_upsert_icp_config_requires_auth():
 def test_upsert_icp_config_writes_config(fake_db, monkeypatch):
     fake_db.responses["mse_icp_configs"] = [{"product_id": "prod-1", "vertical": "real_estate"}]
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
 
     resp = client.post(
         "/marketing/icp",
@@ -318,6 +337,7 @@ def test_get_icp_config_requires_auth():
 def test_get_icp_config_404_when_not_found(fake_db, monkeypatch):
     fake_db.responses["mse_icp_configs"] = []
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
 
     resp = client.get("/marketing/icp/prod-1", headers=AUTH)
     assert resp.status_code == 404
@@ -331,6 +351,7 @@ def test_find_leads_refuses_when_the_brave_budget_is_spent(fake_db, monkeypatch)
     codebase keeps having to clean up."""
     from agents.marketing import brave_budget as bb
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
     monkeypatch.setattr(
         leads_router, "_run_lead_finder_background",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not start a run")),
@@ -355,6 +376,7 @@ def test_find_leads_refuses_when_the_brave_budget_is_spent(fake_db, monkeypatch)
 
 def test_outbound_products_only_lists_enabled_ones(fake_db, monkeypatch):
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
     fake_db.responses["mse_icp_configs"] = [
         {"product_id": "p-consulting", "vertical": None, "target_count": 50,
          "selling_stage": "active", "outbound_enabled": True},
@@ -378,6 +400,7 @@ def test_weekly_funnel_reports_real_reply_and_call_counts(fake_db, monkeypatch):
     Conversations lane, so they are MEASURED data. 0 now means zero replies,
     not "we do not measure this"."""
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
     fake_db.responses["mse_lead_finder_runs"] = []
     fake_db.responses["mse_products"] = []
     fake_db.responses["mse_leads"] = []
@@ -397,6 +420,7 @@ def test_the_funnel_counts_each_stage_from_its_own_timestamp(fake_db, monkeypatc
     furthest one."""
     from datetime import datetime, timedelta, timezone
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
     recent = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
     old = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
     fake_db.responses["mse_lead_finder_runs"] = []
@@ -450,6 +474,7 @@ def test_v1_is_still_reachable_explicitly(monkeypatch):
 
 def test_an_unknown_pipeline_is_rejected_not_silently_defaulted(fake_db, monkeypatch):
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
     resp = client.post("/marketing/leads/find",
                        json={"product_id": "p", "pipeline": "v3"}, headers=AUTH)
     assert resp.status_code == 422
@@ -476,6 +501,7 @@ def test_scraper_v2_adopts_an_existing_run_row_instead_of_inserting(fake_db, mon
 
 def test_outreach_summary_counts_each_lane(fake_db, monkeypatch):
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
     fake_db.responses["mse_leads"] = [
         {"id": "a", "contact_status": "pending"},
         {"id": "b", "contact_status": "needs_review"},
@@ -500,6 +526,7 @@ def test_outreach_summary_counts_each_lane(fake_db, monkeypatch):
 
 def test_outreach_summary_replies_is_a_real_count(fake_db, monkeypatch):
     monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    monkeypatch.setattr(leads_router, "get_supabase_for_job", lambda: fake_db)
     fake_db.responses["mse_leads"] = []
     fake_db.responses["mse_dm_sequences"] = []
     fake_db.responses["mse_outreach_conversations"] = []

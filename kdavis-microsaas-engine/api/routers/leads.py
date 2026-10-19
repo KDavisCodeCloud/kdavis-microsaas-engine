@@ -16,7 +16,7 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 from pydantic import BaseModel, field_validator
 
 from api.middleware.auth import require_marketing_api_key
-from core.supabase_client import get_supabase
+from core.supabase_client import get_supabase, get_supabase_for_job
 
 log = logging.getLogger(__name__)
 
@@ -76,7 +76,13 @@ async def trigger_lead_finder(
     config's full target_count -- e.g. for a manual smoke test.
     """
     require_marketing_api_key(authorization)
-    db = get_supabase()
+    # A reconnecting client, not the shared one (2026-10-19). On Oct 11 the
+    # Sunday n8n call for Cloud Decoded hit a connection the server had
+    # already dropped: the run-row insert raised RemoteProtocolError, the
+    # request 500'd before any row existed, and the week's run vanished with
+    # no failed row and no audit entry. A retried insert can at worst leave
+    # one extra 'pending' row; a lost week leaves nothing.
+    db = get_supabase_for_job()
 
     # Brave budget guard (decision 1e, 2026-10-02). Checked BEFORE the run row
     # is created, so a refused run leaves no misleading 'pending' row behind.
@@ -125,7 +131,8 @@ def _run_lead_finder_background(
     if pipeline == "v1":
         from agents.marketing.mkt_lead_finder import run_lead_finder_for_product
         try:
-            run_lead_finder_for_product(product_id=product_id, run_id=run_id, limit=limit)
+            run_lead_finder_for_product(product_id=product_id, run_id=run_id, limit=limit,
+                                        supabase_client=get_supabase_for_job())
         except Exception:
             pass  # run_lead_finder_for_product writes the failure to the run row + audit log
         return
@@ -135,7 +142,8 @@ def _run_lead_finder_background(
         # max_queries is this run's HARD Brave cap, enforced across discovery
         # and decision-maker lookups together -- 40 matches the standing
         # per-run ceiling.
-        run_scraper_v2_scout(product_id=product_id, run_id=run_id, max_queries=40)
+        run_scraper_v2_scout(product_id=product_id, run_id=run_id, max_queries=40,
+                             supabase_client=get_supabase_for_job())
     except Exception:
         log.exception("[LeadFinder] scraper v2 run %s failed for %s", run_id, product_id)
 

@@ -154,7 +154,7 @@ class BraveSearchScraper(BaseScraper):
             "passed_scrape_filters": 0,
         }
 
-    def _search(self, query: str) -> list[dict]:
+    def _search(self, query: str, offset: int = 0) -> list[dict]:
         """Returns items normalized to the same {"link", "title", "snippet"}
         shape scrapers/google_search.py's CSE results had, so
         mkt_lead_finder.py's find_job_posting_signals (which reads those
@@ -164,7 +164,9 @@ class BraveSearchScraper(BaseScraper):
             return []
         response = self._get(
             BRAVE_SEARCH_URL,
-            params={"q": query, "count": 10},
+            # offset = result PAGE (0-9), not item index. A monthly rerun of
+            # the same query asks for the next page so it can find new firms.
+            params={"q": query, "count": 10, **({"offset": offset} if offset else {})},
             headers=_brave_headers(self.api_key),
             timeout=15,
         )

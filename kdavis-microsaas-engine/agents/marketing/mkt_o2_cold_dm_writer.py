@@ -488,7 +488,9 @@ def run_o2_cold_dm_writer(
         _emit_event(db, "dm_sequence_write_skipped_stage_gate", {
             "product_id": product_id, "selling_stage": stage, "lead_count": len(leads),
         })
-        return {"status": "stage_gated", "sequences_written": 0}
+        return {"status": "stage_gated", "sequences_written": 0,
+                "parked": [{"lead_id": l.get("id"), "company": l.get("company"), "code": "selling_stage_not_active",
+                            "reason": f"product selling_stage is {stage!r}, not 'active'"} for l in leads]}
 
     _emit_event(db, "dm_sequence_write_started", {
         "product_id": product_id, "campaign_build_id": campaign_build_id,
@@ -554,6 +556,8 @@ def run_o2_cold_dm_writer(
         })
         for l, r in parked:
             _log.info("[MKT-O2] parked %s (%s): %s", l.get("company"), l.get("id"), r)
+    parked_out = [{"lead_id": l.get("id"), "company": l.get("company"), "code": skip_code(r), "reason": r}
+                  for l, r in parked]
     leads = draftable
 
     rows: list[dict] = []
@@ -667,7 +671,24 @@ def run_o2_cold_dm_writer(
         "lead_source": lead_source, "sequences_written": len(rows),
     })
 
-    return {"status": "ready_for_hitl", "sequences_written": len(rows)}
+    return {"status": "ready_for_hitl", "sequences_written": len(rows), "parked": parked_out}
+
+
+def skip_code(reason: str) -> str:
+    """A stable short code for a contact_is_draftable / dedupe reason, so the
+    Loop Map can count reasons without parsing free text."""
+    r = (reason or "").lower()
+    if r.startswith("contact_status="):
+        return "no_named_buyer"
+    if r.startswith("no first name"):
+        return "no_first_name"
+    if r.startswith("no title"):
+        return "no_title"
+    if r.startswith("contact fit rejected"):
+        return "contact_fit_rejected"
+    if "sequence already exists" in r:
+        return "sequence_exists"
+    return "other"
 
 
 def run_o2_for_linkedin_leads(
@@ -708,10 +729,18 @@ def run_o2_for_linkedin_leads(
         .eq("product_id", product_id).eq("status", "pending_dm").execute().data or []
     )
     skip_reasons: dict[str, int] = {}
+    # Per-lead skips, for mse_dm_enrollment_skips (2026-10-19): the counts
+    # above say how many, this says which lead and why.
+    skipped: list[dict] = []
 
     def _skip(reason: str, n: int = 1) -> None:
         if n:
             skip_reasons[reason] = skip_reasons.get(reason, 0) + n
+
+    def _collect(result: dict) -> None:
+        for p in result.get("parked") or []:
+            skipped.append(p)
+            _skip(p["code"])
 
     total_written = 0
     by_source: dict[str, int] = {}
@@ -737,6 +766,7 @@ def run_o2_for_linkedin_leads(
         )
         total_written += result["sequences_written"]
         by_source[source] = result["sequences_written"]
+        _collect(result)
 
     lead_finder_leads = (
         db.table("mse_leads")
@@ -757,6 +787,7 @@ def run_o2_for_linkedin_leads(
         )
         total_written += result["sequences_written"]
         by_source["lead_finder"] = result["sequences_written"]
+        _collect(result)
     else:
         by_source["lead_finder"] = 0
 
@@ -786,6 +817,7 @@ def run_o2_for_linkedin_leads(
         )
         total_written += result["sequences_written"]
         by_source["job_posting_signal"] = result["sequences_written"]
+        _collect(result)
     else:
         by_source["job_posting_signal"] = 0
 
@@ -813,6 +845,7 @@ def run_o2_for_linkedin_leads(
         )
         total_written += result["sequences_written"]
         by_source["cloud_decoded_job_signal"] = result["sequences_written"]
+        _collect(result)
     else:
         by_source["cloud_decoded_job_signal"] = 0
 
@@ -839,6 +872,7 @@ def run_o2_for_linkedin_leads(
             )
             total_written += result["sequences_written"]
             by_source[extra_source] = result["sequences_written"]
+            _collect(result)
         else:
             by_source[extra_source] = 0
 
@@ -847,10 +881,12 @@ def run_o2_for_linkedin_leads(
     # shape that kept this engine inert -- surface it loudly rather than
     # returning a clean-looking zero.
     pending_total = len(_all_pending)
-    _skip("lead_finder_email_not_verified",
-          sum(1 for r in _all_pending
-              if r.get("source") not in _NO_EMAIL_FILTER_SOURCES
-              and r.get("email_status") != "verified"))
+    unverified = [r for r in _all_pending
+                  if r.get("source") not in _NO_EMAIL_FILTER_SOURCES and r.get("email_status") != "verified"]
+    _skip("lead_finder_email_not_verified", len(unverified))
+    skipped.extend({"lead_id": r["id"], "company": None, "code": "lead_finder_email_not_verified",
+                    "reason": f"source {r.get('source')!r} needs a verified email; "
+                              f"email_status={r.get('email_status')!r}"} for r in unverified)
     accounted = total_written + sum(skip_reasons.values())
     unexplained = max(pending_total - accounted, 0)
     if unexplained:
@@ -873,6 +909,7 @@ def run_o2_for_linkedin_leads(
         "by_source": by_source,
         "pending_dm_total": pending_total,
         "skip_reasons": skip_reasons,
+        "skipped": skipped,
     }
 
 

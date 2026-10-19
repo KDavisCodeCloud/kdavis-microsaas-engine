@@ -183,6 +183,34 @@ def scope_to_lane(query, lane: Optional[str]):
     return query
 
 
+# Partners lane order (Kelvin, 2026-10-19): a VC platform partner reaches a
+# whole portfolio, an audit firm hands off clients the week the audit ends,
+# a fractional CISO advises a handful, an AI agency is the loosest fit.
+PARTNER_TYPE_ORDER = ("vc_operating_partner", "compliance_firm", "fractional_ciso", "ai_agency")
+# The partner lane is sorted in Python after the read, so it reads this many
+# rows rather than `limit` -- otherwise a VC row past the limit never arrives.
+PARTNER_LANE_READ = 500
+
+
+def partner_rank(partner_type: Optional[str]) -> int:
+    try:
+        return PARTNER_TYPE_ORDER.index(partner_type)
+    except ValueError:
+        return len(PARTNER_TYPE_ORDER)
+
+
+def order_partner_lane(items: list[dict], lane: Optional[str], limit: int) -> list[dict]:
+    """Stable sort by partner type for the partners lane, then cut to limit.
+    Any other lane is returned as read."""
+    if lane != "partners":
+        return items[:limit]
+    return sorted(items, key=lambda c: partner_rank(c.get("partner_type")))[:limit]
+
+
+def _read_limit(lane: Optional[str], limit: int) -> int:
+    return max(limit, PARTNER_LANE_READ) if lane == "partners" else limit
+
+
 def _products(db) -> dict:
     return {p["id"]: p for p in
             (db.table("mse_products").select("id,name").execute().data or [])}
@@ -201,10 +229,11 @@ async def list_drafts(
     q = scope_to_lane(db.table("mse_dm_sequences").select("*").eq("status", "pending_hitl"), lane)
     if product_id:
         q = q.eq("product_id", product_id)
-    seqs = q.order("created_at", desc=True).limit(limit).execute().data or []
+    seqs = q.order("created_at", desc=True).limit(_read_limit(lane, limit)).execute().data or []
     seqs = [x for x in seqs if in_lane(x.get("product_id"), lane)]
     products = _products(db)
-    return {"drafts": [_card(db, s, products) for s in seqs], "count": len(seqs)}
+    cards = order_partner_lane([_card(db, s, products) for s in seqs], lane, limit)
+    return {"drafts": cards, "count": len(cards)}
 
 
 class EditTouches(BaseModel):
@@ -345,10 +374,11 @@ async def list_ready_to_paste(
     db = get_supabase()
     seqs = (scope_to_lane(db.table("mse_dm_sequences").select("*"), lane)
             .eq("status", "approved_manual")
-            .order("hitl_approved_at", desc=True).limit(limit).execute().data or [])
+            .order("hitl_approved_at", desc=True).limit(_read_limit(lane, limit)).execute().data or [])
     seqs = [x for x in seqs if in_lane(x.get("product_id"), lane)]
     products = _products(db)
-    return {"ready": [_card(db, s, products) for s in seqs], "count": len(seqs)}
+    cards = order_partner_lane([_card(db, s, products) for s in seqs], lane, limit)
+    return {"ready": cards, "count": len(cards)}
 
 
 class PasteMark(BaseModel):

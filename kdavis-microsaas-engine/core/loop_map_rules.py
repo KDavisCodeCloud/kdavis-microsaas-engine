@@ -95,8 +95,16 @@ LEAD_RUN_WINDOW_DAYS = 8  # weekly Sunday run, plus a day of slack
 
 # Runs that are not the desk's own sweep. The Hacker News scout records its
 # runs under the consulting product (2026-10-18) but is monthly and separate;
-# letting it stand in for the weekly ATS run would hide a missed Sunday.
-SIDE_SOURCES = ("hn_thread",)
+# letting it stand in for the weekly ATS run would hide a missed Sunday. The
+# weekly pain-phrase rescan (2026-10-19) finds no companies at all. Both are
+# shown as a line on their desk (HN on Find, the rescan on Qualify) and turn
+# it blocked if their own latest run failed.
+SIDE_SOURCES = ("hn_thread", "pain_rescan")
+# Sources scheduled monthly (agents/marketing/lead_schedule.py). A desk fed
+# only by these is judged against a month, not a week.
+MONTHLY_SOURCES = ("partner_signal", "vc_operating_partner", "hn_thread")
+MONTHLY_WINDOW_DAYS = 35
+SIDE_LABELS = {"hn_thread": "Hacker News scout", "pain_rescan": "Pain-phrase rescan"}
 
 
 def _desk_runs(S, pid) -> list[dict]:
@@ -104,7 +112,45 @@ def _desk_runs(S, pid) -> list[dict]:
             if not set(r.get("sources_used") or []) & set(SIDE_SOURCES)]
 
 
+def _window_days(runs: list[dict]) -> int:
+    srcs = {s for r in runs for s in (r.get("sources_used") or [])}
+    return MONTHLY_WINDOW_DAYS if srcs and srcs <= set(MONTHLY_SOURCES) else LEAD_RUN_WINDOW_DAYS
+
+
+def _side_run(S, pid, source: str) -> tuple[Optional[str], bool]:
+    """(one-line summary of the latest `source` run, did it fail)."""
+    runs = sorted((r for r in _rows(S, "runs", pid) if source in (r.get("sources_used") or [])),
+                  key=lambda r: str(r.get("started_at") or ""), reverse=True)
+    if not runs:
+        return None, False
+    r, label = runs[0], SIDE_LABELS[source]
+    if r.get("status") in ("failed", "error"):
+        return f"{label} {_day(r.get('started_at'))} FAILED: {r.get('error_message') or 'no error text'}", True
+    if r.get("status") not in RUN_DONE:
+        return f"{label} {_day(r.get('started_at'))}: {r.get('status')}.", False
+    f = r.get("funnel_stats") or {}
+    if source == "pain_rescan":
+        detail = f"{f.get('scanned', 0)} leads re-read, {f.get('newly_matched_leads', 0)} gained a pain phrase"
+    else:
+        detail = f"{r.get('leads_found') or 0} new leads"
+    return f"{label} {_day(r.get('completed_at'))}: {detail}.", False
+
+
+def _with_side(st: Status, S, pid, source: str) -> Status:
+    note, failed = _side_run(S, pid, source)
+    if not note:
+        return st
+    st.evidence = f"{st.evidence} {note}"
+    if failed and st.status in ("working", "not_proven"):
+        st.status = "blocked"
+    return st
+
+
 def outbound_lead_run(S, pid, now) -> Status:
+    return _with_side(_lead_run(S, pid, now), S, pid, "hn_thread")
+
+
+def _lead_run(S, pid, now) -> Status:
     runs = sorted(_desk_runs(S, pid), key=lambda r: str(r.get("started_at") or ""), reverse=True)
     if not runs:
         return Status("not_proven", "No lead-finder run has ever been recorded for this product.")
@@ -128,8 +174,10 @@ def outbound_lead_run(S, pid, now) -> Status:
     found = latest.get("leads_found") or 0
     postings = (latest.get("funnel_stats") or {}).get("postings_returned")
     read = f"{postings:,} postings read, " if isinstance(postings, int) else ""
-    if age > timedelta(days=LEAD_RUN_WINDOW_DAYS):
-        return Status("blocked", f"No completed run in {age.days} days (expected weekly). "
+    window = _window_days(runs)
+    if age > timedelta(days=window):
+        return Status("blocked", f"No completed run in {age.days} days "
+                                 f"(expected {'monthly' if window > LEAD_RUN_WINDOW_DAYS else 'weekly'}). "
                                  f"Last completed {_day(latest['completed_at'])}: {read}{found} leads.",
                       count=found, evidence_at=latest["completed_at"])
     if found <= 0:
@@ -140,6 +188,10 @@ def outbound_lead_run(S, pid, now) -> Status:
 
 
 def outbound_qualify(S, pid, now) -> Status:
+    return _with_side(_qualify(S, pid, now), S, pid, "pain_rescan")
+
+
+def _qualify(S, pid, now) -> Status:
     runs = [r for r in _desk_runs(S, pid) if r.get("status") in RUN_DONE and r.get("completed_at")]
     runs.sort(key=lambda r: str(r["completed_at"]), reverse=True)
     if not runs:
@@ -152,7 +204,7 @@ def outbound_qualify(S, pid, now) -> Status:
         qualified = sum(1 for l in _rows(S, "leads", pid)
                         if str(l.get("created_at") or "") >= since and l.get("status") in QUALIFIED_LEAD_STATUSES)
     age = now - datetime.fromisoformat(str(latest["completed_at"]).replace("Z", "+00:00"))
-    if age > timedelta(days=LEAD_RUN_WINDOW_DAYS):
+    if age > timedelta(days=_window_days(runs)):
         return Status("blocked", f"Nothing qualified since the run of {_day(latest['completed_at'])} "
                                  f"({qualified} then); no run in {age.days} days.",
                       count=qualified, evidence_at=latest["completed_at"])
@@ -182,7 +234,49 @@ def outbound_find_buyer(S, pid, now) -> Status:
 DRAFT_WINDOW_HOURS = 48
 
 
+ENROLL_CHECK_UTC = (15, 45)  # n8n fires the 08:00 MST run at 15:00 UTC
+
+
+def _enrollment_line(S, pid, now) -> tuple[Optional[str], bool]:
+    """(the latest 08:00 enrollment run and this product's skips in it,
+    is it broken). Broken = the latest run failed for this product, or no
+    run is recorded today after the 08:45 MST check time."""
+    runs = S.get("dm_runs")
+    if not isinstance(runs, list):
+        return None, False
+    if not runs:
+        return "No 08:00 enrollment run recorded in 7 days.", True
+    last = runs[0]
+    day = _day(last.get("created_at"))
+    errors = (last.get("metadata") or {}).get("errors") or {}
+    mine = errors.get(pid) or errors.get("_run")
+    if mine:
+        return f"08:00 enrollment {day} FAILED: {mine}", True
+    if day < now.date().isoformat() and (now.hour, now.minute) >= ENROLL_CHECK_UTC:
+        return f"No 08:00 enrollment run today; last {day}.", True
+    skips = [k for k in (S.get("dm_skips") if isinstance(S.get("dm_skips"), list) else [])
+             if k.get("product_id") == pid and str(k.get("run_at") or "")[:19] ==
+             str((last.get("metadata") or {}).get("run_at") or "")[:19]]
+    if not skips:
+        return f"08:00 enrollment {day}: no lead skipped.", False
+    by: dict[str, int] = {}
+    for k in skips:
+        by[k["reason"]] = by.get(k["reason"], 0) + 1
+    reasons = ", ".join(f"{n} {r.replace('_', ' ')}" for r, n in sorted(by.items(), key=lambda x: -x[1]))
+    return f"08:00 enrollment {day} skipped {len(skips)}: {reasons}.", False
+
+
 def outbound_draft_enrollment(S, pid, now) -> Status:
+    st = _draft_enrollment(S, pid, now)
+    line, broken = _enrollment_line(S, pid, now)
+    if line:
+        st.evidence = f"{st.evidence} {line}"
+        if broken and st.status != "waiting_on_you":
+            st.status = "blocked"
+    return st
+
+
+def _draft_enrollment(S, pid, now) -> Status:
     seqs = _rows(S, "seqs", pid)
     recent = [s for s in seqs if str(s.get("created_at") or "") >= _iso(now - timedelta(hours=DRAFT_WINDOW_HOURS))]
     eligible = [l for l in _rows(S, "leads", pid) if l.get("status") == "pending_dm"]
@@ -502,9 +596,17 @@ def _d6(S, pid) -> dict:
     return _external(S, "d6", pid)
 
 
+DISCOVERY_STALE_HOURS = 12  # three missed 4-hourly cycles
+
+
 def d6_topics(S, pid, now) -> Status:
     d = _d6(S, pid)
     last, week = d.get("topics_latest"), d.get("topics_7d") or 0
+    beat = d.get("discovery_latest")
+    if beat is not None and str(beat) < _iso(now - timedelta(hours=DISCOVERY_STALE_HOURS)):
+        return Status("blocked", f"Discovery has not fetched since {str(beat)[:16].replace('T', ' ')} UTC "
+                                 f"(expected every 4 hours); {week} topic(s) in 7 days.",
+                      count=week, evidence_at=str(beat))
     if week:
         return Status("working", f"{week} topic(s) found in 7 days.", count=week, evidence_at=last)
     if last and last < _iso(now - timedelta(days=2)):
