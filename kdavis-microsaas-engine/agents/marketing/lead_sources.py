@@ -21,7 +21,7 @@ import logging
 from datetime import date, datetime, timezone
 from typing import Any, Callable, Optional
 
-from core.supabase_client import get_supabase
+from core.supabase_client import get_supabase_for_job
 
 log = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ def run_hn_scout(supabase_client: Optional[Any] = None, *, months: int = 1,
     )
     from agents.marketing.pain_phrases import PainConfig, boost_intent, match_pain_phrases
 
-    db = supabase_client if supabase_client is not None else get_supabase()
+    db = supabase_client if supabase_client is not None else get_supabase_for_job()
     product_id = THDAGENTIC_CONSULTING_PRODUCT_ID
 
     def work():
@@ -163,7 +163,7 @@ def run_partner_scout(supabase_client: Optional[Any] = None, *, max_queries: int
     from agents.marketing.partner_sourcing import PARTNERS_PRODUCT_ID, PartnerStats, find_partner_leads
     from scrapers.brave_search import BraveSearchScraper
 
-    db = supabase_client if supabase_client is not None else get_supabase()
+    db = supabase_client if supabase_client is not None else get_supabase_for_job()
     stats = PartnerStats()
 
     def work():
@@ -200,7 +200,7 @@ def run_vc_scout_entry(supabase_client: Optional[Any] = None, *, max_probes: int
     from agents.marketing.partner_sourcing import PARTNERS_PRODUCT_ID
     from agents.marketing.vc_partners import run_vc_scout
 
-    db = supabase_client if supabase_client is not None else get_supabase()
+    db = supabase_client if supabase_client is not None else get_supabase_for_job()
 
     def work():
         rows, stats = run_vc_scout(db, http_get=http_get, max_probes=max_probes, sleep=sleep)
@@ -228,7 +228,7 @@ def run_pain_backfill(supabase_client: Optional[Any] = None, *, http_get=None, s
     from agents.marketing.pain_phrases import PainConfig, boost_intent, match_pain_phrases
     from scrapers.ats_boards import AtsBoardClient, board_ref_from_url
 
-    db = supabase_client if supabase_client is not None else get_supabase()
+    db = supabase_client if supabase_client is not None else get_supabase_for_job()
     client = AtsBoardClient(http_get=http_get, sleep=sleep)
     out = {"scanned": 0, "matched": 0, "boards_read": 0, "boards_failed": 0, "no_board": 0, "by_phrase": {}}
     board_text: dict[str, str] = {}

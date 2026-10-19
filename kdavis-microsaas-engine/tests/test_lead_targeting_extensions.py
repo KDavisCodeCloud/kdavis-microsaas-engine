@@ -706,3 +706,45 @@ def test_hn_posts_are_scored_header_role_above_body_mention():
 
 def test_a_framework_name_is_not_a_domain():
     assert domain_from_post(_post("Acme | Node.js and Vue.js Engineer | Remote"), "Acme") is None
+
+
+def test_resilient_client_replays_a_dropped_query_on_a_new_connection(monkeypatch):
+    import httpx
+    from core import supabase_client as sc
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    made = []
+
+    class Builder:
+        def __init__(self, client, table): self.client, self.chain = client, [table]
+        def select(self, cols): self.chain.append(("select", cols)); return self
+        def eq(self, k, v): self.chain.append(("eq", k, v)); return self
+        def execute(self):
+            if self.client["n"] == 0:
+                raise httpx.RemoteProtocolError("Server disconnected")
+            return type("R", (), {"data": self.chain})()
+
+    def factory():
+        c = {"n": len(made)}
+        made.append(c)
+        return type("C", (), {"table": lambda self, t: Builder(c, t)})()
+
+    db = sc.ResilientClient(factory)
+    out = db.table("mse_leads").select("id").eq("source", "hn_thread").execute()
+    assert len(made) == 2  # reconnected once
+    assert out.data == ["mse_leads", ("select", "id"), ("eq", "source", "hn_thread")]
+
+
+def test_non_transient_errors_are_not_retried():
+    from core import supabase_client as sc
+
+    class Boom:
+        def table(self, t):
+            class B:
+                def execute(self): raise ValueError("bad column")
+            return B()
+
+    calls = []
+    db = sc.ResilientClient(lambda: calls.append(1) or Boom())
+    with pytest.raises(ValueError):
+        db.table("x").execute()
+    assert len(calls) == 1
