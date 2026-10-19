@@ -175,7 +175,8 @@ COMPLIANCE_HOME = """<html><head><meta property="og:site_name" content="Ledgerli
 <body><h1>SOC 2 audit and readiness assessments for SaaS companies</h1>
 <p>Our clients rely on us for attestations.</p></body></html>"""
 COMPLIANCE_ABOUT = "<html><body><h2>Leadership</h2><div>Dana Whitfield</div><div>Managing Partner</div></body></html>"
-STAFFING_HOME = """<html><head><title>TalentBridge Staffing</title></head><body>
+STAFFING_HOME = """<html><head><title>TalentBridge Staffing</title>
+<meta name="description" content="SOC 2 audit specialists placed fast."></head><body>
 <p>We are an IT staffing agency. Our clients are hiring SOC 2 audit specialists.</p></body></html>"""
 BLOG_HOME = "<html><head><title>Random Blog</title></head><body><p>Ten tips for travel.</p></body></html>"
 
@@ -545,15 +546,18 @@ def test_a_heading_about_a_title_is_not_a_title():
     assert adjacent_name_title_pairs(segs, PARTNER_FIRM_TITLE_RE) == [("Rob Black", "Founder")]
 
 
-COURSE_HOME = """<html><head><meta property="og:site_name" content="Launch My AI Automation Agency"></head><body>
+COURSE_HOME = """<html><head><meta property="og:site_name" content="Launch My AI Automation Agency">
+<meta name="description" content="AI automation agency in a box."></head><body>
 <p>Start an AI automation agency in 30 days. We build your site and playbook.</p><p>Our clients succeed.</p></body></html>"""
-VENDOR_HOME = """<html><head><title>Cynomi</title></head><body>
+VENDOR_HOME = """<html><head><title>Cynomi - vCISO platform</title></head><body>
 <p>MSSPs leverage Cynomi’s Security Growth platform to deliver vCISO services. Our clients scale.</p></body></html>"""
-LEGAL_HOME = """<html><head><title>Digital Reference</title></head><body>
+LEGAL_HOME = """<html><head><title>Digital Reference</title>
+<meta name="description" content="Artificial Intelligence Legal Professional Services."></head><body>
 <p>Artificial Intelligence Legal Professional Services. Our clients trust us.</p></body></html>"""
 
 
-DIRECTORY_HOME = """<html><head><title>Digital Reference: A Portfolio Platform for All Professionals</title></head><body>
+DIRECTORY_HOME = """<html><head><title>Digital Reference: A Portfolio Platform for All Professionals</title>
+<meta name="description" content="Artificial Intelligence Legal Professional Services."></head><body>
 <p>The Video-First Platform to Find Professionals. Artificial Intelligence Legal Professional Services.
 Software Development &amp; Engineering. Our clients trust us.</p></body></html>"""
 
@@ -748,3 +752,48 @@ def test_non_transient_errors_are_not_retried():
     with pytest.raises(ValueError):
         db.table("x").execute()
     assert len(calls) == 1
+
+
+SPAM_HOME = """<html><head><title>Grant, AL Chamber of Commerce</title></head><body>
+<p>Welcome to Grant. Local events and services. SOC 2 Readiness</p><p>Our clients and members.</p></body></html>"""
+
+
+def test_a_stray_evidence_string_is_not_a_firm():
+    scraper = FakeScraper({"q": [{"link": "https://chamber.example/", "title": "", "snippet": ""}]})
+    rows, stats = find_partner_leads([{"segment": "compliance_firm", "query": "q"}], scraper=scraper,
+                                     http_get=http({"chamber.example/robots.txt": Resp(404), "chamber.example/": SPAM_HOME}),
+                                     sleep=lambda _s: None)
+    assert rows == [] and stats.dropped == {"evidence_only_a_stray_mention": 1}
+
+
+def test_the_firms_own_name_is_not_its_founder():
+    home = ("<html><head><title>Decrypt Compliance CPA</title><meta name=\"description\" content=\"SOC 2 audits "
+            "for SaaS.\"></head><body><p>SOC 2 audit firm. Our clients.</p></body></html>")
+    about = "<div>Decrypt Compliance</div><div>Founder</div>"
+    scraper = FakeScraper({"q": [{"link": "https://decrypt.example/", "title": "", "snippet": ""}]})
+    rows, _ = find_partner_leads([{"segment": "compliance_firm", "query": "q"}], scraper=scraper,
+                                 http_get=http({"decrypt.example/robots.txt": Resp(404), "decrypt.example/about": about,
+                                                "decrypt.example/": home}), sleep=lambda _s: None)
+    assert rows and rows[0]["first_name"] is None
+
+
+def test_more_is_not_a_first_name():
+    from agents.marketing.contact_discovery import _plausible_name
+    assert _plausible_name("More Traviss") is False
+
+
+def test_a_testimonial_agency_does_not_make_an_ai_agency():
+    home = ("<html><head><title>Athreon</title><meta name=\"description\" content=\"AI-powered transcription "
+            "and scribing solutions for law enforcement.\"></head><body><p>AI-powered transcription services. "
+            "\u201cI would recommend them to any agency.\u201d Our clients rely on us.</p></body></html>")
+    scraper = FakeScraper({"q": [{"link": "https://athreon.example/", "title": "", "snippet": ""}]})
+    rows, stats = find_partner_leads([{"segment": "ai_agency", "query": "q"}], scraper=scraper,
+                                     http_get=http({"athreon.example/robots.txt": Resp(404), "athreon.example/": home}),
+                                     sleep=lambda _s: None)
+    assert rows == [] and sum(stats.dropped.values()) == 1
+    assert set(stats.dropped) <= {"not_an_agency", "evidence_only_a_stray_mention"}
+
+
+def test_practice_names_are_not_people():
+    from agents.marketing.contact_discovery import _plausible_name
+    assert _plausible_name("Technology Practice") is False

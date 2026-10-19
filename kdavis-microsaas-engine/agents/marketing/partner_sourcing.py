@@ -92,7 +92,7 @@ SEGMENT_EVIDENCE: dict[str, re.Pattern] = {
     "ai_agency": re.compile(
         r"\b(?:AI|artificial\s+intelligence|generative\s+AI|LLM|automation)\b[^.]{0,60}?"
         r"\b(?:agency|studio|consultanc(?:y|ies)|development\s+(?:company|firm|partner|services)|"
-        r"solutions\s+for|services|we\s+build|build\s+custom)\b"
+        r"services|we\s+build|build\s+custom)\b"
         r"|\bwe\s+(?:build|design|develop|deploy)\b[^.]{0,40}?\b(?:AI|agents?|automations?|LLM)\b",
         re.IGNORECASE),
     "fractional_ciso": re.compile(
@@ -131,9 +131,15 @@ _NOT_A_SERVICE_FIRM = {
 
 # AI agencies need a second, shape-of-the-business signal: "Artificial
 # Intelligence ... Professional Services" alone matched a legal portfolio site.
+# In the BODY the agency word must be qualified: "recommend them to any
+# agency" in a sheriff's-office testimonial made a transcription service
+# (Athreon) look like an AI agency. In the firm's own HEAD a bare "agency"
+# or "studio" is the firm describing itself and counts.
 _AGENCY_SHAPE = re.compile(
-    r"\b(?:agency|studio|consultanc(?:y|ies)|development\s+(?:company|agency|partner|firm|services)|"
-    r"we\s+(?:build|design|develop|deliver)|software\s+development)\b", re.IGNORECASE)
+    r"\b(?:AI|automation|digital|development|software|product|dev|app)\s+(?:agency|studio)\b"
+    r"|\bconsultanc(?:y|ies)\b|\bdevelopment\s+(?:company|agency|partner|firm|services)\b"
+    r"|\bwe\s+(?:build|design|develop)\b|\bsoftware\s+development\b", re.IGNORECASE)
+_AGENCY_IN_HEAD = re.compile(r"\b(?:agency|studio)\b", re.IGNORECASE)
 
 # And it must be a service business: someone who has clients.
 _SERVICE_EVIDENCE = re.compile(
@@ -299,7 +305,9 @@ def find_partner_leads(
         # The head matters: a directory says what it is in its <title> and
         # og:site_name, which tag-stripping the body throws away.
         head_bits = [m.group(1) for rx in (_TITLE_RE, _SITE_NAME_RE, _DESC_RE) for m in [rx.search(page)] if m]
-        text = " ".join([html.unescape(" ".join(head_bits)), _clean_text(page)])
+        head = html.unescape(" ".join(head_bits))
+        body = _clean_text(page)
+        text = " ".join([head, body])
         evidence = SEGMENT_EVIDENCE[segment].search(text)
         if not evidence:
             # Re-check the other segments: a firm found by a CISO query may
@@ -312,10 +320,18 @@ def find_partner_leads(
         if not evidence:
             stats.drop("site_does_not_do_the_work")
             continue
+        # A firm's own title/description says what it does; a stray mention
+        # in the body does not make a firm. "Grant, AL Chamber of Commerce"
+        # and a travel blog each carried one "SOC 2 Readiness" string (SEO
+        # spam) in the 2026-10-19 run.
+        pattern = SEGMENT_EVIDENCE[segment]
+        if not pattern.search(head) and len(pattern.findall(body)) < 2:
+            stats.drop("evidence_only_a_stray_mention")
+            continue
         if not _SERVICE_EVIDENCE.search(text):
             stats.drop("not_a_service_business")
             continue
-        if segment == "ai_agency" and not _AGENCY_SHAPE.search(text):
+        if segment == "ai_agency" and not (_AGENCY_SHAPE.search(text) or _AGENCY_IN_HEAD.search(head)):
             stats.drop("not_an_agency")
             continue
         not_firm = next((reason for reason, pat in _NOT_A_SERVICE_FIRM.items() if pat.search(text)), None)
@@ -337,6 +353,10 @@ def find_partner_leads(
         site_contact = from_company_pages(host, http_get=http_get, paths=PARTNER_TEAM_PATHS,
                                           stats=contact_stats, max_pages=3,
                                           title_re=PARTNER_FIRM_TITLE_RE)
+        if site_contact and site_contact.is_usable and (text_mentions_company(site_contact.name, name)
+                                                      or text_mentions_company(name, site_contact.name)):
+            # "Decrypt Compliance | Founder": the firm's own name read as a person.
+            site_contact = None
         if site_contact and site_contact.is_usable and _names_another_company(site_contact.title, name):
             # "Founder, eData Enterprise" on 75way's page is a client
             # testimonial, not 75way's founder.

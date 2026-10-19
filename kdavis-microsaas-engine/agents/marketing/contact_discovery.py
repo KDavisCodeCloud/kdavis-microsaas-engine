@@ -110,6 +110,7 @@ _NOT_NAME_FIRST_WORD = frozenset({
     "in", "on", "by", "to", "all", "any", "each", "both", "join", "meet",
     "about", "contact", "apply", "report", "reporting", "lead", "leads",
     "tech", "senior", "staff", "principal", "head", "chief", "vice",
+    "more", "less", "view", "see", "read",
 })
 
 _TAG_RE = re.compile(r"<(?:script|style)[^>]*>.*?</(?:script|style)>", re.I | re.S)
@@ -127,6 +128,7 @@ _FURNITURE_WORDS = frozenset({
     "portfolio", "testimonials", "reviews", "industries", "partners", "company", "menu",
     "demo", "started", "featured", "clients", "stories", "veteran",
     "certified", "awards", "members", "leadership",
+    "practice", "department", "division", "technology", "compliance", "advisory",
 })
 
 _NOT_A_NAME = frozenset({
