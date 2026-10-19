@@ -156,7 +156,7 @@ def run_hn_scout(supabase_client: Optional[Any] = None, *, months: int = 1,
 
 def run_partner_scout(supabase_client: Optional[Any] = None, *, max_queries: int = 30,
                       max_firms: int = 25, run_id: Optional[str] = None, http_get=None,
-                      scraper=None, sleep=None) -> dict:
+                      scraper=None, sleep=None, segments: Optional[list[str]] = None) -> dict:
     from agents.marketing.company_classification import normalise_company_name
     from agents.marketing.mkt_lead_finder import _get_icp_config, _this_months_brave_query_count
     from agents.marketing.partner_sourcing import PARTNERS_PRODUCT_ID, PartnerStats, find_partner_leads
@@ -167,7 +167,8 @@ def run_partner_scout(supabase_client: Optional[Any] = None, *, max_queries: int
 
     def work():
         icp = _get_icp_config(db, PARTNERS_PRODUCT_ID) or {}
-        templates = [t for t in (icp.get("search_templates") or []) if isinstance(t, dict)]
+        templates = [t for t in (icp.get("search_templates") or []) if isinstance(t, dict)
+                     and (not segments or t.get("segment") in segments)]
         if not templates:
             raise RuntimeError("partner ICP has no search_templates -- nothing to search for")
         brave = scraper or BraveSearchScraper(query_count=_this_months_brave_query_count(db))

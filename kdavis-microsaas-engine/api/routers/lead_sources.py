@@ -37,6 +37,8 @@ class HnRequest(BaseModel):
 class PartnerRequest(BaseModel):
     max_queries: int = Field(default=30, ge=1, le=MAX_QUERIES_PER_RUN)
     max_firms: int = Field(default=25, ge=1, le=60)
+    # Run only these segments' queries (e.g. ["compliance_firm"]); all if empty.
+    segments: list[str] = Field(default_factory=list)
 
 
 class VcRequest(BaseModel):
@@ -83,7 +85,7 @@ async def partner_scout(body: PartnerRequest, background_tasks: BackgroundTasks,
     from agents.marketing.partner_sourcing import PARTNERS_PRODUCT_ID
     run_id = _new_run(db, PARTNERS_PRODUCT_ID, "partner_signal")
     background_tasks.add_task(_background, run_partner_scout, max_queries=body.max_queries,
-                              max_firms=body.max_firms, run_id=run_id)
+                              max_firms=body.max_firms, segments=body.segments, run_id=run_id)
     return {"run_id": run_id, "status": "pending", "source": "partner_signal",
             "max_queries": body.max_queries, "brave_budget": budget.as_dict()}
 

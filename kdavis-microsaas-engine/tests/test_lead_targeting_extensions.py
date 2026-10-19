@@ -669,3 +669,21 @@ def test_a_testimonial_attribution_is_not_the_firms_ceo():
 def test_testimonial_titles_name_another_company(title, firm, other):
     from agents.marketing.partner_sourcing import _names_another_company
     assert _names_another_company(title, firm) is other
+
+
+def test_partner_scout_can_run_one_segment(monkeypatch):
+    from agents.marketing import lead_sources
+    seen = {}
+
+    def fake_find(templates, **kw):
+        seen["segments"] = [t["segment"] for t in templates]
+        from agents.marketing.partner_sourcing import PartnerStats
+        return [], kw["stats"]
+
+    monkeypatch.setattr("agents.marketing.partner_sourcing.find_partner_leads", fake_find)
+    monkeypatch.setattr("agents.marketing.mkt_lead_finder._get_icp_config", lambda db, pid: {"search_templates": [
+        {"segment": "ai_agency", "query": "a"}, {"segment": "compliance_firm", "query": "c"}]})
+    db = _RecDb({"mse_leads": [], "mse_lead_finder_runs": []})
+    scraper = FakeScraper({})
+    lead_sources.run_partner_scout(db, segments=["compliance_firm"], scraper=scraper, run_id="r1")
+    assert seen["segments"] == ["compliance_firm"]
