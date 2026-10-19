@@ -82,6 +82,10 @@ class FakeQuery:
         self._filters.append((key, value))
         return self
 
+    def neq(self, key, value):
+        self.calls.append(("neq", key, value))
+        return self
+
     def lte(self, key, value):
         self.calls.append(("lte", key, value))
         self._filters.append((key, value))

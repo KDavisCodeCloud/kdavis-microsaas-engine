@@ -101,6 +101,8 @@ async def list_buyer_research_tasks(
                      "location,status,contact_status,source,signal_text,pain_phrases,"
                      "funded_by,partner_type")
              .eq("contact_status", "pending"))
+    from api.routers.outreach_lanes import scope_to_lane
+    query = scope_to_lane(query, lane)
     if product_id:
         query = query.eq("product_id", product_id)
     rows = (query.order("fit_score", desc=True)

@@ -630,3 +630,15 @@ def test_vc_scout_batches_portfolio_writes_keeps_probed_boards_and_retries(monke
     assert len(written) == 250 and stats.portfolio_companies == 250
     # co0 was probed before: its board_status is not reset to not_probed.
     assert "board_status" not in next(r for r in written if r["domain"] == "co0.com")
+
+
+def test_the_lane_is_applied_before_the_limit():
+    from api.routers.outreach_lanes import scope_to_lane
+    calls = []
+
+    class Q:
+        def eq(self, k, v): calls.append(("eq", k, v)); return self
+        def neq(self, k, v): calls.append(("neq", k, v)); return self
+
+    scope_to_lane(Q(), "partners"); scope_to_lane(Q(), "prospects"); scope_to_lane(Q(), None)
+    assert calls == [("eq", "product_id", PARTNERS_PRODUCT_ID), ("neq", "product_id", PARTNERS_PRODUCT_ID)]

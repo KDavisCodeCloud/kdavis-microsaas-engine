@@ -170,6 +170,19 @@ def in_lane(product_id: Optional[str], lane: Optional[str]) -> bool:
     return True
 
 
+def scope_to_lane(query, lane: Optional[str]):
+    """Apply the lane IN THE QUERY, before any limit. Filtering after the
+    limit starved the Partners lane: with 98 prospects awaiting a buyer, the
+    first 50 rows were all prospects and the partner tasks never arrived
+    (staging, 2026-10-18)."""
+    from agents.marketing.partner_sourcing import PARTNERS_PRODUCT_ID
+    if lane == "partners":
+        return query.eq("product_id", PARTNERS_PRODUCT_ID)
+    if lane == "prospects":
+        return query.neq("product_id", PARTNERS_PRODUCT_ID)
+    return query
+
+
 def _products(db) -> dict:
     return {p["id"]: p for p in
             (db.table("mse_products").select("id,name").execute().data or [])}
@@ -185,7 +198,7 @@ async def list_drafts(
     """Lane (b): drafts awaiting approval, newest first."""
     require_marketing_api_key(authorization)
     db = get_supabase()
-    q = db.table("mse_dm_sequences").select("*").eq("status", "pending_hitl")
+    q = scope_to_lane(db.table("mse_dm_sequences").select("*").eq("status", "pending_hitl"), lane)
     if product_id:
         q = q.eq("product_id", product_id)
     seqs = q.order("created_at", desc=True).limit(limit).execute().data or []
@@ -330,7 +343,7 @@ async def list_ready_to_paste(
     """
     require_marketing_api_key(authorization)
     db = get_supabase()
-    seqs = (db.table("mse_dm_sequences").select("*")
+    seqs = (scope_to_lane(db.table("mse_dm_sequences").select("*"), lane)
             .eq("status", "approved_manual")
             .order("hitl_approved_at", desc=True).limit(limit).execute().data or [])
     seqs = [x for x in seqs if in_lane(x.get("product_id"), lane)]
