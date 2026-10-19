@@ -553,7 +553,13 @@ LEGAL_HOME = """<html><head><title>Digital Reference</title></head><body>
 <p>Artificial Intelligence Legal Professional Services. Our clients trust us.</p></body></html>"""
 
 
+DIRECTORY_HOME = """<html><head><title>Digital Reference: A Portfolio Platform for All Professionals</title></head><body>
+<p>The Video-First Platform to Find Professionals. Artificial Intelligence Legal Professional Services.
+Software Development &amp; Engineering. Our clients trust us.</p></body></html>"""
+
+
 @pytest.mark.parametrize("page,segment,reason", [
+    (DIRECTORY_HOME, "ai_agency", "directory_or_marketplace"),
     (COURSE_HOME, "ai_agency", "course_or_educator"),
     (VENDOR_HOME, "fractional_ciso", "software_vendor"),
     (LEGAL_HOME, "ai_agency", "not_an_agency"),
@@ -570,6 +576,8 @@ def test_firm_name_drops_the_tagline():
     from agents.marketing.partner_sourcing import firm_name
     page = '<meta property="og:site_name" content="Nate Herk · AI automation made easy">'
     assert firm_name(page, "nateherk.com") == "Nate Herk"
+    assert firm_name("<title>Digital Reference: A Portfolio Platform for All Professionals</title>",
+                     "digitalreference.co") == "Digital Reference"
 
 
 class _RecDb:
@@ -642,3 +650,22 @@ def test_the_lane_is_applied_before_the_limit():
 
     scope_to_lane(Q(), "partners"); scope_to_lane(Q(), "prospects"); scope_to_lane(Q(), None)
     assert calls == [("eq", "product_id", PARTNERS_PRODUCT_ID), ("neq", "product_id", PARTNERS_PRODUCT_ID)]
+
+
+def test_a_testimonial_attribution_is_not_the_firms_ceo():
+    from agents.marketing.contact_discovery import _contact_from_text
+    from agents.marketing.contact_fit import PARTNER_FIRM_TITLE_RE
+    assert _contact_from_text("Great work. Matt CEO, Shadow Breeze Our services", "p", PARTNER_FIRM_TITLE_RE) is None
+    c = _contact_from_text("Leadership Rob Black - Founder of the firm", "p", PARTNER_FIRM_TITLE_RE)
+    assert (c.name, c.title) == ("Rob Black", "Founder")
+
+
+@pytest.mark.parametrize("title,firm,other", [
+    ("Founder, eData Enterprise", "75way", True),
+    ("Co-Founder @ Bright Defense", "Bright Defense", False),
+    ("Founder & Managing Partner", "IOmergent", False),
+    ("Founder, CEO", "Acme", False),
+])
+def test_testimonial_titles_name_another_company(title, firm, other):
+    from agents.marketing.partner_sourcing import _names_another_company
+    assert _names_another_company(title, firm) is other

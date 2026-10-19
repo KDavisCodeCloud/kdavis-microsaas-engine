@@ -213,8 +213,11 @@ def _patterns_for(title_re: re.Pattern) -> tuple[re.Pattern, re.Pattern]:
     if title_re is _BUYER_TITLE_RE:
         return _NAME_THEN_TITLE_RE, _TITLE_THEN_NAME_RE
     title_i = f"(?i:{title_re.pattern})"
+    # Title-then-name WITHOUT a comma: "CEO, Shadow Breeze" is how a client
+    # testimonial is attributed (title, company), and on 2026-10-18 it put a
+    # client's company name in as an agency's CEO.
     return (re.compile(rf"({_NAME_RE})\s*(?:,|-|–|—|\||·)\s*({title_i})"),
-            re.compile(rf"({title_i})\s*(?:,|-|–|—|:)?\s+({_NAME_RE})"))
+            re.compile(rf"({title_i})\s*(?:-|–|—|:)?\s+({_NAME_RE})"))
 
 
 def _contact_from_text(text: str, source: str,

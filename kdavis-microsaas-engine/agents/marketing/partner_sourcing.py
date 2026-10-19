@@ -117,6 +117,12 @@ _NOT_A_SERVICE_FIRM = {
         r"start\s+(?:an|your\s+own)\s+(?:AI\s+)?(?:automation\s+)?agency|"
         r"(?:educator|creator|youtuber)\b|teaches\s+(?:founders|operators|people)|"
         r"join\s+(?:my|the)\s+(?:community|skool))", re.IGNORECASE),
+    # Digital Reference ("The Video-First Platform to Find Professionals"):
+    # a directory whose category list contains every keyword above.
+    "directory_or_marketplace": re.compile(
+        r"\b(?:platform|marketplace|directory|network)\s+(?:to|for)\s+(?:find|hire|connect\s+with|discover)\b"
+        r"|\bfind\s+(?:and\s+hire\s+)?(?:the\s+)?(?:top\s+|best\s+)?(?:professionals|freelancers|experts|agencies|consultants)\b",
+        re.IGNORECASE),
     "software_vendor": re.compile(
         r"\b(?:start\s+(?:a|your)\s+free\s+trial|request\s+a\s+demo|book\s+a\s+demo|"
         r"leverage\s+\w+(?:\u2019s|'s)?\s+[\w\s]{0,30}?platform|our\s+platform\s+(?:helps|enables|lets|automates))\b",
@@ -152,25 +158,30 @@ def firm_host(url: str) -> Optional[str]:
     return host
 
 
+def _brand(text: str) -> str:
+    """The brand before a tagline: "Nate Herk · AI automation made easy",
+    "Digital Reference - The Video-First Platform..." -> the first part."""
+    return re.split(r"\s*[:·|]\s+|\s+[-–—]\s+", text.strip())[0].strip()
+
+
 def firm_name(page_html: str, host: str) -> str:
-    """og:site_name, else the <title>'s brand segment, else the host stem."""
+    """og:site_name, else the <title>, each trimmed to the brand; else the
+    host stem."""
+    stem = host.split(".")[0]
     m = _SITE_NAME_RE.search(page_html or "")
-    if m and 1 < len(m.group(1).strip()) <= 60:
-        # "Nate Herk · AI automation made easy", "Digital Reference: A
-        # Portfolio Platform..." -- the brand is the part before the tagline.
-        name = re.split(r"\s*[:·|]\s+|\s+[-–—]\s+", html.unescape(m.group(1).strip()))[0].strip()
-        if len(name) > 1:
-            return name[:60]
+    if m:
+        name = _brand(html.unescape(m.group(1)))
+        if 1 < len(name) <= 60:
+            return name
     m = _TITLE_RE.search(page_html or "")
     if m:
         segments = [html.unescape(x).strip() for x in re.split(r"\s+[|–—-]\s+|\s*\|\s*", m.group(1)) if x.strip()]
-        stem = host.split(".")[0]
         for seg in segments:  # prefer the segment that spells the domain
             if stem[:5] and stem[:5] in normalise_company_name(seg):
-                return seg[:60]
-        if segments and len(segments[-1]) <= 40:
-            return segments[-1][:60]
-    return host.split(".")[0].replace("-", " ").title()
+                return _brand(seg)[:60]
+        if segments and len(_brand(segments[-1])) <= 40:
+            return _brand(segments[-1])[:60]
+    return stem.replace("-", " ").title()
 
 
 @dataclass
@@ -185,6 +196,7 @@ class PartnerStats:
     contact_from_site: int = 0
     contact_from_brave: int = 0
     contact_pending: int = 0
+    contact_testimonial_rejected: int = 0
     duplicates: int = 0
     leads_qualified: int = 0
     contact_discovery: dict = field(default_factory=dict)
@@ -284,7 +296,10 @@ def find_partner_leads(
             stats.drop(f"homepage_http_{getattr(resp, 'status_code', 0)}")
             continue
         page = getattr(resp, "text", "") or ""
-        text = _clean_text(page)
+        # The head matters: a directory says what it is in its <title> and
+        # og:site_name, which tag-stripping the body throws away.
+        head_bits = [m.group(1) for rx in (_TITLE_RE, _SITE_NAME_RE, _DESC_RE) for m in [rx.search(page)] if m]
+        text = " ".join([html.unescape(" ".join(head_bits)), _clean_text(page)])
         evidence = SEGMENT_EVIDENCE[segment].search(text)
         if not evidence:
             # Re-check the other segments: a firm found by a CISO query may
@@ -322,6 +337,11 @@ def find_partner_leads(
         site_contact = from_company_pages(host, http_get=http_get, paths=PARTNER_TEAM_PATHS,
                                           stats=contact_stats, max_pages=3,
                                           title_re=PARTNER_FIRM_TITLE_RE)
+        if site_contact and site_contact.is_usable and _names_another_company(site_contact.title, name):
+            # "Founder, eData Enterprise" on 75way's page is a client
+            # testimonial, not 75way's founder.
+            stats.contact_testimonial_rejected += 1
+            site_contact = None
         if site_contact and site_contact.is_usable:
             contact = {"name": site_contact.name, "title": site_contact.title, "profile_url": None,
                        "source": site_contact.source}
@@ -372,6 +392,22 @@ def find_partner_leads(
     stats.contact_discovery = contact_stats.as_dict()
     stats.leads_qualified = len(rows)
     return rows, stats
+
+
+_TITLE_ORG_TAIL = re.compile(r"(?:,|\s@|\bat\b)\s*([A-Za-z0-9][\w&.' -]{1,60})$")
+
+
+def _names_another_company(title: Optional[str], firm: str) -> bool:
+    """True when the title is attributed to a different organisation --
+    the shape of a client testimonial ("Founder, Acme"), not the firm's own
+    leader ("Co-Founder @ Bright Defense")."""
+    m = _TITLE_ORG_TAIL.search((title or "").strip())
+    if not m:
+        return False
+    tail = m.group(1).strip()
+    if PARTNER_FIRM_TITLE_RE.fullmatch(tail) or re.fullmatch(r"(?i)(?:managing\s+partner|ceo|cto|founder)", tail):
+        return False  # "Founder, CEO" is two titles, not a company
+    return not text_mentions_company(tail, firm) and not text_mentions_company(firm, tail)
 
 
 def _split(name: Optional[str]) -> tuple[Optional[str], Optional[str]]:
