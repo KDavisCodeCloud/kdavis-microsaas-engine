@@ -80,12 +80,24 @@ ENGAGEMENT_TERMS = re.compile(r"\b(?:contract(?:or)?|fractional|part[\s-]time|fr
 SEEKING_FREELANCER = re.compile(r"^\W*seeking\s+freelancers?\b", re.IGNORECASE)
 
 _URL_RE = re.compile(r"https?://[^\s<>\"')]+", re.IGNORECASE)
+# Real TLDs only: "Node.js" or "Vue.js" in a header is not a domain.
+_BARE_DOMAIN_RE = re.compile(
+    r"(?<![@\w.])((?:[a-z0-9-]+\.)+(?:com|io|ai|co|dev|app|org|net|tech|inc|us|eu|so|xyz|pe|de|fr|uk|nl|se|fi"
+    r"|ca|au|in|health|bio|me|sh|gg|vc|ly|to|cloud|systems|software|works|studio|finance|energy|space))(?![\w.])",
+    re.IGNORECASE)
 _NOT_COMPANY_HOSTS = (
     "news.ycombinator.com", "linkedin.com", "github.com", "twitter.com", "x.com",
     "docs.google.com", "forms.gle", "calendly.com", "notion.so", "notion.site",
     "lever.co", "greenhouse.io", "ashbyhq.com", "workable.com", "wellfound.com",
     "angel.co", "ycombinator.com", "bit.ly", "youtube.com", "medium.com",
+    # ATS and job-board short links. grnh.se is Greenhouse's: Chronograph's
+    # first-run domain was stored as grnh.se.
+    "grnh.se", "lnkd.in", "dover.com", "workatastartup.com", "recruitee.com", "bamboohr.com",
+    "breezy.hr", "smartrecruiters.com", "teamtailor.com", "jobvite.com", "icims.com",
+    "myworkdayjobs.com", "rippling-ats.com", "personio.de", "personio.com", "join.com", "gem.com",
 )
+# careers.acme.com / jobs.acme.com -> acme.com
+_CAREERS_SUBDOMAIN = re.compile(r"^(?:careers?|jobs|apply|hiring|work)\.(?=[^.]+\.[^.]+)")
 
 
 def _get_json(url: str, http_get: Callable[..., Any]) -> Any:
@@ -195,12 +207,16 @@ def domain_from_post(post: HnPost, company: Optional[str]) -> Optional[str]:
     """The company's own site, if the post links one. ATS/social/doc hosts
     are not the company's domain."""
     candidates = []
-    for url in _URL_RE.findall(post.text):
+    # Bare domains in the header ("Chronograph (chronograph.pe) | ...") count
+    # too -- many posts name their site without a scheme.
+    urls = _URL_RE.findall(post.text)
+    urls += [f"https://{d}" for d in _BARE_DOMAIN_RE.findall(_URL_RE.sub(" ", post.first_line))]
+    for url in urls:
         host = (urlparse(url).hostname or "").lower()
         host = host[4:] if host.startswith("www.") else host
         if not host or any(host == h or host.endswith("." + h) for h in _NOT_COMPANY_HOSTS):
             continue
-        candidates.append(host)
+        candidates.append(_CAREERS_SUBDOMAIN.sub("", host))
     if not candidates:
         return None
     key = normalise_company_name(company)
@@ -208,6 +224,31 @@ def domain_from_post(post: HnPost, company: Optional[str]) -> Optional[str]:
         if key and key[:6] in normalise_company_name(host):
             return host
     return candidates[0]
+
+
+HEADER_INTENT = 0.45   # the infra role is in the post's own header line
+BODY_INTENT = 0.20     # an infra term appears only in the body
+ENGAGEMENT_INTENT = 0.10
+
+
+def score_post(post: HnPost, domain: Optional[str]) -> tuple[float, float, list[str]]:
+    """(fit, intent, reasons) on the same 0-1 scales as the ATS pipeline, so
+    HN leads rank among the others in Find the Buyer instead of floating to
+    the top on a NULL score.
+
+    Fit reuses lead_qualification.company_fit_score (stack overlap and a
+    resolved domain; size is unknown from a post). Intent separates an
+    advertised infra ROLE (term in the header line) from a passing mention."""
+    from agents.marketing.lead_qualification import company_fit_score
+    stack = extract_stack(post.text)
+    fit = company_fit_score(stack=stack, size_proxy_ok=False, domain_resolved=bool(domain))
+    header = bool(INFRA_TERMS.search(post.first_line))
+    intent = HEADER_INTENT if header else BODY_INTENT
+    reasons = ["infra role in the post header" if header else "infra term in the body only"]
+    if ENGAGEMENT_TERMS.search(post.text):
+        intent += ENGAGEMENT_INTENT
+        reasons.append("open to contract/fractional")
+    return fit.value, round(min(1.0, intent), 3), reasons + list(fit.reasons)
 
 
 def keep_post(post: HnPost) -> tuple[bool, str, list[str]]:
@@ -303,7 +344,8 @@ def find_hn_leads(
 
             engagement = sorted({m.group(0).lower() for m in ENGAGEMENT_TERMS.finditer(post.text)})
             stack = extract_stack(post.text)
-            reasons_out = [f"HN {post.thread_title}", f"mentions {', '.join(terms)}"]
+            fit, intent, score_reasons = score_post(post, domain)
+            reasons_out = [f"HN {post.thread_title}", f"mentions {', '.join(terms)}"] + score_reasons
             if engagement:
                 reasons_out.append(f"engagement: {', '.join(engagement)}")
             if stack:
@@ -320,6 +362,8 @@ def find_hn_leads(
                 "job_posting_title": post.first_line[:200],
                 "job_posting_date": post.posted_at.date().isoformat() if post.posted_at else None,
                 "stack_tags": stack or None,
+                "fit_score": fit,
+                "intent_score": intent,
                 "score_reasons": reasons_out,
                 "signal_text": post.text[:SIGNAL_TEXT_MAX],
                 "notes": f"Posted on Hacker News by {post.by}" if post.by else None,

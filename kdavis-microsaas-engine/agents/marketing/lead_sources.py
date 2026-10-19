@@ -124,7 +124,7 @@ def run_hn_scout(supabase_client: Optional[Any] = None, *, months: int = 1,
         _existing_job_signal_domains,
         _get_icp_config,
     )
-    from agents.marketing.pain_phrases import PainConfig, match_pain_phrases
+    from agents.marketing.pain_phrases import PainConfig, boost_intent, match_pain_phrases
 
     db = supabase_client if supabase_client is not None else get_supabase()
     product_id = THDAGENTIC_CONSULTING_PRODUCT_ID
@@ -143,6 +143,7 @@ def run_hn_scout(supabase_client: Optional[Any] = None, *, months: int = 1,
                 with_pain += 1
                 r["pain_phrases"] = m.phrases
                 r["pain_evidence"] = m.evidence
+                r["intent_score"], _ = boost_intent(r.get("intent_score") or 0.0, m, pain)
                 r["score_reasons"] = list(r.get("score_reasons") or []) + [
                     f"pain phrases in post: {', '.join(m.phrases)}"]
         funnel = stats.as_dict()

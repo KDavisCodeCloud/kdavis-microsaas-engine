@@ -687,3 +687,22 @@ def test_partner_scout_can_run_one_segment(monkeypatch):
     scraper = FakeScraper({})
     lead_sources.run_partner_scout(db, segments=["compliance_firm"], scraper=scraper, run_id="r1")
     assert seen["segments"] == ["compliance_firm"]
+
+
+def test_hn_domains_skip_ats_short_links_and_careers_subdomains():
+    p = _post("Chronograph (chronograph.pe) | Platform Engineer | https://grnh.se/abc123")
+    assert domain_from_post(p, "Chronograph") == "chronograph.pe"
+    p = _post("Estee Lauder | SRE | https://careers.elcompanies.com/job/1")
+    assert domain_from_post(p, "Estee Lauder") == "elcompanies.com"
+
+
+def test_hn_posts_are_scored_header_role_above_body_mention():
+    from agents.marketing.hn_scout import score_post
+    header = score_post(_post("Ojin | Lead Platform Engineer | Remote\nWe use Terraform and AWS."), "ojin.ai")
+    body = score_post(_post("Estee Lauder | Staff ML Engineer | NY\nYou will work with platform engineering."), None)
+    assert header[1] > body[1] and header[0] > body[0]
+    assert "infra role in the post header" in header[2] and "infra term in the body only" in body[2]
+
+
+def test_a_framework_name_is_not_a_domain():
+    assert domain_from_post(_post("Acme | Node.js and Vue.js Engineer | Remote"), "Acme") is None
