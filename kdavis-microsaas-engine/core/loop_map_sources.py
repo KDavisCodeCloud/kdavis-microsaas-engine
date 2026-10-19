@@ -162,10 +162,11 @@ def decodedsix_stats(now: datetime) -> dict:
     _, hitl_last = c("hitl_queue", {"resolved_at": "not.is.null", "_order": "resolved_at"})
     pageviews_7d, _ = c("analytics_pageviews", {"created_at": f"gte.{week}"})
     _, pageviews_latest = c("analytics_pageviews", {})
-    # Discovery's heartbeat: every cycle writes a discovery_items batch, even
-    # one that proposes no topic. topic_candidates alone let one manual run
-    # keep the desk green for a week over a dead scheduler (2026-10-19).
-    _, discovery_latest = c("discovery_items", {"_order": "fetched_at"})
+    # Discovery's heartbeat: every cycle, scheduled or manual, writes one
+    # audit_log action='discovery_cycle' row -- even a cycle that fetched
+    # nothing new. topic_candidates alone let one manual run keep the desk
+    # green for a week over a dead scheduler (2026-10-19).
+    _, discovery_latest = c("audit_log", {"action": "eq.discovery_cycle"})
     return {"slug": "decodedsix", "topics_latest": topics_latest, "topics_7d": topics_7d, "articles_latest": articles_latest,
             "articles_created_7d": articles_7d, "published_total": published_total,
             "published_latest": published_latest, "published_7d": published_7d,
