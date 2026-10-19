@@ -495,3 +495,14 @@ def test_funnel_trend_survives_an_unreadable_source():
     from api.routers.loop_map import _funnel_trend
     S = {"leads": {"_error": "RemoteProtocolError"}, "seqs": [], "convs": []}
     assert _funnel_trend(S, "p1", NOW)  # no AttributeError
+
+
+def test_brave_spend_includes_domain_lookups():
+    """Domain-resolution lookups were left out of the ledger (2026-10-19)."""
+    from agents.marketing.company_first_sourcing import FunnelStats
+    from agents.marketing.mkt_lead_finder import _record_brave_spend
+    stats = FunnelStats()
+    stats.queries_discovery, stats.queries_decision_maker, stats.brave_domain_queries = 20, 10, 6
+    db = MemDB()
+    assert _record_brave_spend(db, stats) == 36
+    assert db.tables["usage_events"][0]["metadata"]["count"] == 36

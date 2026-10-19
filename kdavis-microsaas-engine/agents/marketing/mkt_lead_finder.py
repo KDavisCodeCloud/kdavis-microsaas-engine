@@ -1573,7 +1573,10 @@ def _record_brave_spend(db, stats) -> int:
     """
     if stats is None:
         return 0
-    spent = stats.queries_discovery + stats.queries_decision_maker
+    # Domain-resolution lookups are Brave queries too; leaving them out
+    # under-recorded every v2 run (Cloud Decoded 2026-10-19: 36 spent, 30
+    # recorded).
+    spent = stats.queries_discovery + stats.queries_decision_maker + (stats.brave_domain_queries or 0)
     if not spent:
         return 0
     try:
