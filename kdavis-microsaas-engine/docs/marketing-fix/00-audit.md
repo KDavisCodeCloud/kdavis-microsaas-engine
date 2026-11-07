@@ -102,6 +102,17 @@ executions".
 - **The n8n 8am workflow only calls `/marketing/linkedin/dm-sequences`.** That
   drafts LinkedIn-intake leads only. The lead-finder enrollment is in-process.
 
+**n8n execution history (pulled 2026-11-07 via the n8n API):**
+
+| Workflow | Active | Recent executions | Last run |
+|---|---|---|---|
+| Outreach Sequence Sender (hourly) | yes | 181 / 181 success | 2026-11-07 20:00 UTC |
+| LinkedIn Outreach (daily 8am MST) | yes | 8 / 8 success | 2026-11-07 15:00 UTC |
+| Lead Finder (weekly, Sunday 6am MST) | yes | 1 / 1 success | 2026-11-01 13:00 UTC |
+
+No workflow is failing. Each one calls the API successfully, and the API
+correctly finds nothing to send.
+
 **Root causes on the send path, in order:**
 
 1. **No real recipient is sendable.** Of the 23 `pending_hitl` drafts, only 5 sit on
