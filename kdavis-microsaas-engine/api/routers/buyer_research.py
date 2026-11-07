@@ -109,7 +109,10 @@ async def list_buyer_research_tasks(
     rows = (query.order("fit_score", desc=True)
             .order("intent_score", desc=True)
             .limit(_read_limit(lane, limit)).execute().data or [])
-    rows = order_partner_lane([r for r in rows if in_lane(r.get("product_id"), lane)], lane, limit)
+    # A soft-purged lead (status rejected_wrong_icp, 2026-11-07) never shows
+    # as a buyer task, whatever its contact_status.
+    rows = order_partner_lane([r for r in rows if in_lane(r.get("product_id"), lane)
+                               and r.get("status") != "rejected_wrong_icp"], lane, limit)
 
     tasks = []
     for r in rows:

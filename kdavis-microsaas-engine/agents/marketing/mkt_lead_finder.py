@@ -1107,7 +1107,17 @@ def _existing_job_signal_companies(db) -> set:
     for source in PROSPECT_SIGNAL_SOURCES:
         rows = db.table("mse_leads").select("company").eq("source", source).execute().data or []
         names |= {_normalise_company(r["company"]) for r in rows if r.get("company")}
+    # Company-level suppression (2026-11-07): explicit and durable, so a
+    # rejected company stays out even if its mse_leads rows are ever cleaned.
+    names |= {r["company_norm"] for r in _suppressed_company_rows(db) if r.get("company_norm")}
     return {n for n in names if n}
+
+
+def _suppressed_company_rows(db) -> list:
+    """Every mse_suppressed_companies row. Read failure is LOUD: a finder that
+    silently ignores suppression re-ingests exactly the companies Kelvin
+    purged."""
+    return db.table("mse_suppressed_companies").select("domain,company_norm,product_id").execute().data or []
 
 
 def _existing_job_signal_domains(db) -> set:
@@ -1124,6 +1134,7 @@ def _existing_job_signal_domains(db) -> set:
     for source in PROSPECT_SIGNAL_SOURCES:
         rows = db.table("mse_leads").select("domain").eq("source", source).execute().data or []
         domains |= {r["domain"] for r in rows if r.get("domain")}
+    domains |= {r["domain"] for r in _suppressed_company_rows(db) if r.get("domain")}
     return domains
 
 
@@ -1638,11 +1649,12 @@ def retry_pending_contacts(
         return {"attempted": 0, "found": 0, "exhausted": 0}
 
     rows = (db.table("mse_leads")
-            .select("id,company,domain,contact_attempts")
+            .select("id,company,domain,contact_attempts,status")
             .eq("product_id", product_id)
             .eq("contact_status", "pending")
             .limit(budget)
             .execute().data or [])
+    rows = [r for r in rows if r.get("status") != "rejected_wrong_icp"]
     if not rows:
         return {"attempted": 0, "found": 0, "exhausted": 0}
 
