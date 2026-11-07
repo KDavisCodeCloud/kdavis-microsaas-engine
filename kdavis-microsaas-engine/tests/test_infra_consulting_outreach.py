@@ -192,7 +192,7 @@ class _FakeAnthropic:
 
 def _job_posting_lead():
     return {
-        "id": "lead-1", "company": "Acme Corp",
+        "id": "lead-1", "company": "Acme Corp", "domain": "acmecorp.com",
         # A fit-accepted contact is now a PRECONDITION for drafting
         # (contact-first gate, 2026-10-05): MKT-O2 parks company-only
         # leads in the Find-the-Buyer lane instead of drafting to nobody.

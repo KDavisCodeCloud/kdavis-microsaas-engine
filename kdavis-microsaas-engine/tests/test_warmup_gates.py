@@ -130,12 +130,12 @@ class TestSendsPaused:
 
 
 class TestSenderIntegration:
-    def test_risky_sends_while_budget_remains_and_blocks_after(self):
+    def test_risky_never_sends_whatever_the_budget(self):
         import agents.marketing.mkt_o5_sequence_sender as o5
 
         lead = {"email": "a@b.com", "lead_route": "outbound_email", "email_grade": "risky"}
-        assert o5._email_send_block_reason(lead, risky_budget_left=2) is None
-        assert o5._email_send_block_reason(lead, risky_budget_left=0) == "risky_daily_cap_reached"
+        assert o5._email_send_block_reason(lead, risky_budget_left=2) == "email_grade=risky"
+        assert o5._email_send_block_reason(lead, risky_budget_left=0) == "email_grade=risky"
 
     @pytest.mark.parametrize("grade", ["invalid", "unknown"])
     def test_invalid_and_unknown_never_send_regardless_of_budget(self, grade):

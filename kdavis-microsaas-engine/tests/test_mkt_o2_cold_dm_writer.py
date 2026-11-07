@@ -16,7 +16,7 @@ from agents.marketing.mkt_o2_cold_dm_writer import contact_is_draftable
 
 
 def _lead(**kw):
-    base = {"id": "l1", "company": "Acme", "contact_status": "found",
+    base = {"id": "l1", "company": "Acme", "domain": "acme.com", "contact_status": "found",
             # The channel now comes from the ROUTE (decision 1, 2026-10-06).
             "lead_route": "manual_linkedin",
             "first_name": "Cory", "last_name": "Ondrejka",
@@ -28,7 +28,7 @@ def _lead(**kw):
 def test_a_fit_accepted_cto_is_draftable():
     ok, reason = contact_is_draftable(_lead())
     assert ok is True
-    assert "executive technology title" in reason
+    assert "exec_tech" in reason
 
 
 @pytest.mark.parametrize("title", [

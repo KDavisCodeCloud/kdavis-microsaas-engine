@@ -164,6 +164,15 @@ def contact_is_draftable(lead: dict) -> tuple[bool, str]:
     """
     from agents.marketing.contact_fit import evaluate_contact_fit, evaluate_partner_contact_fit
 
+    # Buyer gate, company half (2026-11-07). Checked first: whatever wrote
+    # the lead, a job board, ATS host, competitor or excluded employer never
+    # gets a draft.
+    if not lead.get("partner_type"):
+        from agents.marketing.buyer_gate import company_block_reason
+        block = company_block_reason(lead.get("company"), lead.get("domain"))
+        if block:
+            return False, f"company rejected -- {block}"
+
     status = (lead.get("contact_status") or "").strip()
     if status != "found":
         return False, f"contact_status={status or 'unset'!r}, need 'found'"
@@ -180,7 +189,10 @@ def contact_is_draftable(lead: dict) -> tuple[bool, str]:
     if lead.get("partner_type"):
         fit = evaluate_partner_contact_fit(title, lead.get("partner_type"))
     else:
-        fit = evaluate_contact_fit(title, open_role_count=lead.get("open_role_count"))
+        fit = evaluate_contact_fit(
+            title, open_role_count=(lead.get("size_proxy_open_roles")
+                                    if lead.get("size_proxy_open_roles") is not None
+                                    else lead.get("open_role_count")))
     if not fit.accepted:
         return False, f"contact fit rejected -- {fit.reason}"
     return True, f"ok: {fit.reason}"
@@ -276,6 +288,12 @@ def _write_route_aware_sequence(lead: dict, product_id: str, anthropic_client=No
         offer = CONSULTING_OFFER
         system = build_partner_prompt(partner_type)
     else:
+        # An email draft only for a verified address (2026-11-07); a legacy
+        # outbound_email lead with a catch-all/unknown grade is drafted for
+        # the manual LinkedIn track instead.
+        from agents.marketing.buyer_gate import email_may_enter_send_queue
+        if route == "outbound_email" and not email_may_enter_send_queue(lead.get("email_grade")):
+            route = "manual_linkedin"
         channel = channel_for_route(route)
         offer = CLOUD_DECODED_OFFER if product_id == CLOUD_DECODED_PRODUCT_ID else CONSULTING_OFFER
         system = build_system_prompt(channel, offer, extra_rules=PAIN_RULE if pain_phrases else "")

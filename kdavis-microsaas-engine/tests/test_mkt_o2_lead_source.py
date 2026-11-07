@@ -148,7 +148,7 @@ def test_lead_finder_source_uses_lead_finder_lead_id_and_the_route_aware_prompt(
     # contact_status + a fit-accepted title are preconditions for drafting
     # as of the 2026-10-05 contact-first gate.
     leads = [{"id": "lf-lead-1", "first_name": "Alex", "title": "VP Engineering",
-              "company": "Sun Realty", "contact_status": "found", "open_role_count": 4,
+              "company": "Sun Realty", "domain": "sunrealty.com", "contact_status": "found", "open_role_count": 4,
               # Channel comes from the route as of 2026-10-06.
               "lead_route": "manual_linkedin"}]
 

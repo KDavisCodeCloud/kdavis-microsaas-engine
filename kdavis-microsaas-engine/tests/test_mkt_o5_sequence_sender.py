@@ -57,7 +57,7 @@ def _seed_active_stage(fake_db, product_id="prod-1"):
 
 def test_touch_1_sends_email_and_updates_status(fake_db):
     _seed_sequence(fake_db, status="approved_hitl")
-    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie", "email_grade": "valid"}]
     fake_resend = FakeResend()
 
     result = run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
@@ -87,7 +87,7 @@ def test_touch_1_appends_compliance_footer_with_address_and_unsubscribe_link(fak
     in every commercial email -- regression guard for the 2026-08-12 gap
     where neither existed anywhere in the send path."""
     _seed_sequence(fake_db, status="approved_hitl")
-    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie", "email_grade": "valid"}]
     fake_resend = FakeResend()
 
     run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
@@ -101,7 +101,7 @@ def test_touch_1_appends_compliance_footer_with_address_and_unsubscribe_link(fak
 
 def test_touch_1_skips_suppressed_lead_without_sending(fake_db):
     _seed_sequence(fake_db, status="approved_hitl")
-    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie", "email_grade": "valid"}]
     fake_db.responses["mse_email_suppressions"] = [{"id": "sup-1", "email": "lead@example.com"}]
     fake_resend = FakeResend()
 
@@ -125,7 +125,7 @@ def test_touch_1_stops_sending_once_daily_cap_reached(fake_db, monkeypatch):
          "touch_1": "msg 2", "touch_2": "follow 2", "status": "approved_hitl", "touch_1_sent_at": None},
     ]
     _seed_active_stage(fake_db)
-    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie", "email_grade": "valid"}]
     monkeypatch.setenv("MARKETING_DAILY_SEND_CAP", "0")
     fake_resend = FakeResend()
 
@@ -176,7 +176,7 @@ def test_touch_2_query_filters_on_status_and_cadence_cutoff(fake_db):
     end-to-end filtering behavior a fake DB can't meaningfully provide."""
     old_enough = (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
     _seed_sequence(fake_db, status="touch_1_sent", touch_1_sent_at=old_enough)
-    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie", "email_grade": "valid"}]
 
     run_send_touch_2(supabase_client=fake_db, resend_client=FakeResend())
 
@@ -190,7 +190,7 @@ def test_touch_2_query_filters_on_status_and_cadence_cutoff(fake_db):
 def test_touch_2_sends_and_completes_sequence(fake_db):
     old_enough = (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
     _seed_sequence(fake_db, status="touch_1_sent", touch_1_sent_at=old_enough)
-    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie", "email_grade": "valid"}]
     fake_resend = FakeResend()
 
     result = run_send_touch_2(supabase_client=fake_db, resend_client=fake_resend)
@@ -207,7 +207,7 @@ def test_touch_2_skips_lead_who_unsubscribed_after_touch_1(fake_db):
     someone can unsubscribe in the 3-day gap between touch_1 and touch_2."""
     old_enough = (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
     _seed_sequence(fake_db, status="touch_1_sent", touch_1_sent_at=old_enough)
-    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie", "email_grade": "valid"}]
     fake_db.responses["mse_email_suppressions"] = [{"id": "sup-1", "email": "lead@example.com"}]
     fake_resend = FakeResend()
 
@@ -233,7 +233,7 @@ def test_touch_1_resolves_lead_finder_lead_via_mse_leads(fake_db):
         "touch_1_sent_at": None,
     }]
     _seed_active_stage(fake_db)
-    fake_db.responses["mse_leads"] = [{"email": "verified@example.com", "first_name": "Alex"}]
+    fake_db.responses["mse_leads"] = [{"email": "verified@example.com", "first_name": "Alex", "email_grade": "valid"}]
     fake_db.responses["mse_apollo_leads"] = []  # must not be consulted for this sequence
     fake_resend = FakeResend()
 
@@ -270,7 +270,7 @@ def test_touch_1_advances_lead_finder_lead_to_contacted_and_logs_activity(fake_d
         "touch_1_sent_at": None,
     }]
     _seed_active_stage(fake_db)
-    fake_db.responses["mse_leads"] = [{"email": "verified@example.com", "first_name": "Alex"}]
+    fake_db.responses["mse_leads"] = [{"email": "verified@example.com", "first_name": "Alex", "email_grade": "valid"}]
     fake_resend = FakeResend()
 
     result = run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
@@ -306,7 +306,7 @@ def test_touch_2_logs_activity_without_changing_stage(fake_db):
         "touch_1_sent_at": (datetime.now(timezone.utc) - timedelta(days=4)).isoformat(),
     }]
     _seed_active_stage(fake_db)
-    fake_db.responses["mse_leads"] = [{"email": "verified@example.com", "first_name": "Alex"}]
+    fake_db.responses["mse_leads"] = [{"email": "verified@example.com", "first_name": "Alex", "email_grade": "valid"}]
     fake_resend = FakeResend()
 
     result = run_send_touch_2(supabase_client=fake_db, resend_client=fake_resend)
@@ -325,7 +325,7 @@ def test_touch_1_skips_mse_leads_activity_wiring_for_apollo_sequences(fake_db):
     lead_finder_lead_id must never touch mse_leads/mse_activities --
     apollo leads live in mse_apollo_leads, which has no stage column."""
     _seed_sequence(fake_db, status="approved_hitl")
-    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie", "email_grade": "valid"}]
     fake_resend = FakeResend()
 
     result = run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
@@ -375,7 +375,7 @@ def test_touch_1_claims_row_with_conditional_update_before_sending(fake_db):
     matching what real Postgres needs to make it atomic under concurrent
     callers -- not just an unconditional status flip."""
     _seed_sequence(fake_db, status="approved_hitl")
-    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie", "email_grade": "valid"}]
     fake_resend = FakeResend()
 
     run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
@@ -397,7 +397,7 @@ def test_touch_1_skips_without_sending_when_claim_is_lost_to_a_concurrent_run(fa
     next_update_returns_empty simulates that for the fake. Must not send,
     must not error -- a lost claim is an expected outcome, not a failure."""
     _seed_sequence(fake_db, status="approved_hitl")
-    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie", "email_grade": "valid"}]
     fake_db.next_update_returns_empty.add(("mse_dm_sequences", "touch_1_sending"))
     fake_resend = FakeResend()
 
@@ -415,7 +415,7 @@ def test_touch_1_reverts_claim_when_send_raises_so_it_can_retry_later(fake_db):
     the transient 'touch_1_sending' status forever -- it has to go back to
     'approved_hitl' so a later run picks it up again."""
     _seed_sequence(fake_db, status="approved_hitl")
-    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie", "email_grade": "valid"}]
 
     class ExplodingResend:
         class Emails:
@@ -441,7 +441,7 @@ def test_touch_2_claim_and_revert_use_touch_1_sent_as_the_base_status(fake_db):
     touch_1, or fail to revert correctly on a touch_2 send failure."""
     old_enough = (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
     _seed_sequence(fake_db, status="touch_1_sent", touch_1_sent_at=old_enough)
-    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie", "email_grade": "valid"}]
 
     run_send_touch_2(supabase_client=fake_db, resend_client=FakeResend())
 
@@ -468,7 +468,7 @@ def test_touch_1_voids_expired_approvals_before_processing_the_batch(fake_db):
         "hitl_approved_expires_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
     }]
     _seed_active_stage(fake_db)
-    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie", "email_grade": "valid"}]
 
     run_send_touch_1(supabase_client=fake_db, resend_client=FakeResend())
 
@@ -482,7 +482,7 @@ def test_touch_1_voids_expired_approvals_before_processing_the_batch(fake_db):
 
 def test_run_sequence_sender_runs_both_stages(fake_db):
     _seed_sequence(fake_db, status="approved_hitl")
-    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie", "email_grade": "valid"}]
     fake_resend = FakeResend()
 
     result = run_sequence_sender(supabase_client=fake_db, resend_client=fake_resend)
@@ -503,7 +503,7 @@ class TestSellingStageGateAtSendTime:
             "touch_1": "msg", "touch_2": "follow", "status": "approved_hitl", "touch_1_sent_at": None,
         }]
         fake_db.responses["mse_icp_configs"] = [{"product_id": "prod-warming", "selling_stage": "warming"}]
-        fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+        fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie", "email_grade": "valid"}]
         fake_resend = FakeResend()
 
         result = run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
@@ -520,7 +520,7 @@ class TestSellingStageGateAtSendTime:
             "touch_1": "msg", "touch_2": "follow", "status": "touch_1_sent", "touch_1_sent_at": old_enough,
         }]
         fake_db.responses["mse_icp_configs"] = [{"product_id": "prod-building", "selling_stage": "building"}]
-        fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+        fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie", "email_grade": "valid"}]
         fake_resend = FakeResend()
 
         result = run_send_touch_2(supabase_client=fake_db, resend_client=fake_resend)
@@ -532,7 +532,7 @@ class TestSellingStageGateAtSendTime:
         """Positive control -- proves the gate isn't just failing closed
         by accident (e.g. an exception swallowed somewhere)."""
         _seed_sequence(fake_db, status="approved_hitl")
-        fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+        fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie", "email_grade": "valid"}]
         fake_resend = FakeResend()
 
         result = run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
@@ -580,24 +580,22 @@ class TestScraperV2SendGate:
                   if c.table_name == "audit_log" and c.calls[0][0] == "insert"]
         assert audits[0]._payload["metadata"]["skipped"] == "lead_route=manual_linkedin"
 
-    def test_risky_graded_email_sends_while_the_warmup_budget_lasts(self, fake_db):
-        """Decision 3b (2026-10-01): catch-all addresses MAY send, capped at
-        25% of the daily cap during warmup. A catch-all accepts every RCPT TO,
-        so these carry real bounce risk -- the cap bounds the exposure rather
-        than refusing the volume."""
+    def test_risky_graded_email_never_sends(self, fake_db):
+        """2026-11-07 (buyer-targeting fix) reverses decision 3b: a catch-all
+        address is unverified and never reaches Resend, budget or not."""
         result, fake_resend = self._run(
             fake_db, {"email": "a@b.com", "first_name": "A",
                       "lead_route": "outbound_email", "email_grade": "risky"})
 
-        assert result["sent"] == 1
-        assert len(fake_resend.Emails.sent) == 1
+        assert result["sent"] == 0
+        assert fake_resend.Emails.sent == []
 
-    def test_risky_is_blocked_once_its_sub_cap_is_exhausted(self):
+    def test_risky_is_blocked_whatever_the_sub_cap_says(self):
         import agents.marketing.mkt_o5_sequence_sender as o5
 
         lead = {"email": "a@b.com", "lead_route": "outbound_email", "email_grade": "risky"}
-        assert o5._email_send_block_reason(lead, risky_budget_left=1) is None
-        assert o5._email_send_block_reason(lead, risky_budget_left=0) == "risky_daily_cap_reached"
+        assert o5._email_send_block_reason(lead, risky_budget_left=10) == "email_grade=risky"
+        assert o5._email_send_block_reason(lead, risky_budget_left=0) == "email_grade=risky"
 
     def test_valid_graded_outbound_email_lead_still_sends(self, fake_db):
         """The gate must not break the path it is protecting."""
@@ -615,9 +613,8 @@ class TestScraperV2SendGate:
             {"email": None, "lead_route": "manual_linkedin"}) == "lead_route=manual_linkedin"
         assert o5._email_send_block_reason(
             {"email": "a@b.com", "lead_route": "reject"}) == "lead_route=reject"
-        # 'risky' is handled by its own warmup sub-cap (decision 3b) and is
-        # covered separately; invalid and unknown never send at all.
-        for grade in ("invalid", "unknown"):
+        # Nothing but "valid" sends (2026-11-07).
+        for grade in ("risky", "invalid", "unknown"):
             assert o5._email_send_block_reason(
                 {"email": "a@b.com", "lead_route": "outbound_email", "email_grade": grade}
             ) == f"email_grade={grade}", f"{grade} must never send"
@@ -628,16 +625,18 @@ class TestScraperV2SendGate:
         assert o5._email_send_block_reason(
             {"email": "a@b.com", "lead_route": "outbound_email", "email_grade": "valid"}) is None
 
-    def test_pre_v2_lead_with_no_route_or_grade_is_not_blocked(self):
-        """Every row predating migration 20261001000057 has NULL for both.
-        Silently refusing to send to all of them would be a regression,
-        not a safety win -- they are governed by MKT-O2's email_status
-        gate as before."""
+    def test_ungraded_lead_needs_an_explicit_verified_status(self):
+        """2026-11-07: "not yet graded" is not "verified". A NULL grade sends
+        only when email_status says 'verified' (pre-v2 lead_finder rows)."""
         import agents.marketing.mkt_o5_sequence_sender as o5
 
-        assert o5._email_send_block_reason({"email": "a@b.com"}) is None
+        assert o5._email_send_block_reason({"email": "a@b.com"}) is not None
         assert o5._email_send_block_reason(
-            {"email": "a@b.com", "lead_route": None, "email_grade": None}) is None
+            {"email": "a@b.com", "lead_route": None, "email_grade": None,
+             "email_status": "unverified"}) is not None
+        assert o5._email_send_block_reason(
+            {"email": "a@b.com", "lead_route": None, "email_grade": None,
+             "email_status": "verified"}) is None
 
     def test_gate_columns_are_actually_selected(self):
         """The gate reads lead_route/email_grade, so they must be in the
@@ -662,7 +661,7 @@ class TestScraperV2SendGate:
 def test_reply_to_is_set_from_the_environment(fake_db, monkeypatch):
     monkeypatch.setenv("RESEND_REPLY_TO_EMAIL", "kdav2k5@gmail.com")
     _seed_sequence(fake_db, status="approved_hitl")
-    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie", "email_grade": "valid"}]
     fake_resend = FakeResend()
 
     run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
@@ -677,7 +676,7 @@ def test_reply_to_is_omitted_when_not_configured(fake_db, monkeypatch):
     'nobody has told us where replies go'."""
     monkeypatch.delenv("RESEND_REPLY_TO_EMAIL", raising=False)
     _seed_sequence(fake_db, status="approved_hitl")
-    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie", "email_grade": "valid"}]
     fake_resend = FakeResend()
 
     run_send_touch_1(supabase_client=fake_db, resend_client=fake_resend)
@@ -711,7 +710,7 @@ def test_touch_2_also_carries_reply_to(fake_db, monkeypatch):
     monkeypatch.setenv("RESEND_REPLY_TO_EMAIL", "kdav2k5@gmail.com")
     sent_at = datetime.now(timezone.utc) - timedelta(days=4)
     _seed_sequence(fake_db, status="touch_1_sent", touch_1_sent_at=sent_at.isoformat())
-    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie"}]
+    fake_db.responses["mse_apollo_leads"] = [{"email": "lead@example.com", "first_name": "Jamie", "email_grade": "valid"}]
     fake_resend = FakeResend()
 
     run_send_touch_2(supabase_client=fake_db, resend_client=fake_resend)

@@ -337,6 +337,13 @@ def find_hn_leads(
             if (key and key in existing_companies) or (domain and domain in existing_domains):
                 stats.duplicates += 1
                 continue
+            # Buyer gate, company half (2026-11-07): a resolved company domain
+            # is required, and boards / ATS hosts / competitors never qualify.
+            from agents.marketing.buyer_gate import company_block_reason
+            block = company_block_reason(company, domain)
+            if block:
+                stats.drop(block.split(":", 1)[0].replace(" ", "_"))
+                continue
             stats.kept += 1
             existing_companies.add(key)
             if domain:

@@ -80,6 +80,7 @@ from agents.marketing.company_classification import (
     text_mentions_company,
 )
 from agents.marketing.contact_fit import evaluate_contact_fit
+from agents.marketing.buyer_gate import company_block_reason, company_size_block_reason, size_band_for
 from agents.marketing.pain_phrases import PainConfig, boost_intent, match_pain_phrases
 from agents.marketing.contact_discovery import (
     ContactDiscoveryStats,
@@ -839,12 +840,14 @@ def qualify_candidate(
     if rejected:
         contact = {}
         contact_title = None
+        # The address belonged to the rejected person; it must not be kept.
+        email = None
+        grade = grade_email(None)
 
     has_contact = bool(contact.get("name") or contact_title)
     if has_contact and domain and email_may_route_outbound(grade):
         route = ROUTE_OUTBOUND_EMAIL
-        route_reason = (f"contact + {grade} email"
-                        + (" (capped during warmup)" if grade == "risky" else ""))
+        route_reason = f"contact + {grade} email"
     elif has_contact:
         route = ROUTE_MANUAL_LINKEDIN
         route_reason = f"contact, email_grade={grade}"
@@ -855,7 +858,13 @@ def qualify_candidate(
     status = "pending_dm" if has_contact else "company_qualified"
     contact_status = "found" if has_contact else "pending"
 
-    reasons = list(fit.reasons) + intent_reasons
+    # Fit = company (size proxy, stack, domain) 80% + buyer seniority 20%
+    # (2026-11-07). A lead whose contact cleared the buyer gate outranks an
+    # otherwise-identical company still waiting in Find the Buyer.
+    seniority_component = 0.2 if (has_contact and contact_title) else 0.0
+    fit_value = round(min(1.0, fit.value * 0.8 + seniority_component), 3)
+    reasons = list(fit.reasons) + [f"buyer seniority +{seniority_component:.1f}"
+                                   if seniority_component else "no confirmed buyer yet"] + intent_reasons
     if stage1:
         reasons = list(stage1.reasons) + reasons
 
@@ -879,7 +888,7 @@ def qualify_candidate(
         "funding_months": funding,
         "email": email,
         "email_grade": grade,
-        "fit_score": fit.value,
+        "fit_score": fit_value,
         "intent_score": intent_value,
         "score_reasons": reasons,
         "pain_phrases": pain_match.phrases,
@@ -1169,6 +1178,22 @@ def find_company_first_signals(
             stats.dropped_duplicate_company += 1
             continue
 
+        # Buyer gate, company half (2026-11-07): job boards / ATS hosts never
+        # stand in for the hiring company, and staffing firms, MSPs, DevOps
+        # consultancies and the named excluded employers are never leads.
+        block = company_block_reason(candidate.company, resolved_domain)
+        if not block:
+            lo, hi = size_band_for(product_id)
+            block = company_size_block_reason(
+                headcount_band=None, open_roles=candidate.total_open_roles,
+                min_size=lo, max_size=hi)
+            if block:
+                block = "size_band:" + block
+        if block:
+            key = block.split(":", 1)[0]
+            stats.dropped_excluded[key] = stats.dropped_excluded.get(key, 0) + 1
+            continue
+
         # ── STAGE 2: who do we talk to? Only for Stage 1 passers. ──
         #
         # FREE SOURCES FIRST (decision 5a): the JD's own named hiring
@@ -1187,8 +1212,19 @@ def find_company_first_signals(
             stats.contacts_from_free_sources[free.source or "unknown"] = (
                 stats.contacts_from_free_sources.get(free.source or "unknown", 0) + 1
             )
-        elif lookup_decision_makers and stats.queries_decision_maker < dm_budget:
+            # A free source often names the hiring manager -- frequently an
+            # IC lead. Not the buyer: discard it and still look for one.
+            if not evaluate_contact_fit(contact["title"], open_role_count=candidate.total_open_roles).accepted:
+                stats.contacts_rejected_on_fit += 1
+                contact = None
+        if contact is None and lookup_decision_makers and stats.queries_decision_maker < dm_budget:
             contact = find_decision_maker(scraper, candidate.company, stats=stats, sleep=sleep)
+        # Buyer gate BEFORE any email probe: never spend an SMTP probe on, or
+        # attach an address to, someone who is not the budget owner.
+        if contact and not evaluate_contact_fit(contact.get("title"),
+                                                open_role_count=candidate.total_open_roles).accepted:
+            stats.contacts_rejected_on_fit += 1
+            contact = None
 
         # A profile already used elsewhere: drop the ATTRIBUTION, keep the
         # company -- mse_leads.linkedin_url is globally UNIQUE.

@@ -1150,27 +1150,22 @@ class TestTwoStageQualification:
         assert without["status"] == "company_qualified"
         assert with_contact["status"] == "pending_dm"
         assert with_contact["contact_status"] == "found"
-        # Same company evidence, so the same company fit either way.
-        assert without["fit_score"] == with_contact["fit_score"]
+        # 2026-11-07: fit = company 80% + buyer seniority 20%, so a confirmed
+        # buyer ranks the same company higher; eligibility is unchanged.
+        assert with_contact["fit_score"] > without["fit_score"]
+        assert "buyer seniority" in " ".join(with_contact["score_reasons"])
 
-    def test_valid_or_risky_email_plus_contact_routes_to_outbound(self):
-        """Decision 3b (2026-10-01): "risky" (catch-all) joins "valid" on the
-        outbound route; its volume is capped at send time, not at routing
-        time. invalid and unknown stay on the manual track."""
+    def test_only_valid_email_plus_contact_routes_to_outbound(self):
+        """2026-11-07: only a verified address routes outbound. Catch-all
+        ("risky"), invalid and unknown all stay on the manual track."""
         candidate = self._candidate()
         stage1 = self._stage1(candidate)
         contact = {"name": "Jane Doe", "title": "CTO"}
-        for grade in ("valid", "risky"):
-            out = qualify_candidate(candidate, stage1=stage1, contact=contact,
-                                    email_grade=grade, email="jane@northwind.example")
-            assert out["lead_route"] == ROUTE_OUTBOUND_EMAIL, f"{grade} should route outbound"
-        # The risky route must say it is capped, so nobody reads it as a
-        # green light for unlimited volume.
-        risky = qualify_candidate(candidate, stage1=stage1, contact=contact,
-                                  email_grade="risky", email="jane@northwind.example")
-        assert "warmup" in risky["route_reason"].lower()
+        out = qualify_candidate(candidate, stage1=stage1, contact=contact,
+                                email_grade="valid", email="jane@northwind.example")
+        assert out["lead_route"] == ROUTE_OUTBOUND_EMAIL
 
-        for grade in ("invalid", "unknown"):
+        for grade in ("risky", "invalid", "unknown"):
             assert qualify_candidate(candidate, stage1=stage1, contact=contact,
                                      email_grade=grade)["lead_route"] == ROUTE_MANUAL_LINKEDIN
 

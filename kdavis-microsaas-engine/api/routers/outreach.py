@@ -126,7 +126,11 @@ def _approval_target_status(db, lead_source: str, lead_finder_lead_id: str | Non
             # A lead with no v2 route is a pre-v2 row; fall through to the
             # legacy source check rather than guessing.
             if route:
-                sendable = route == "outbound_email" and bool(row.get("email"))
+                # 2026-11-07: a verified ("valid") grade is required too. A
+                # catch-all or guessed address never reaches the send queue.
+                from agents.marketing.buyer_gate import email_may_enter_send_queue
+                sendable = (route == "outbound_email" and bool(row.get("email"))
+                            and email_may_enter_send_queue(row.get("email_grade")))
                 return "approved_hitl" if sendable else "approved_manual"
 
     return "approved_hitl" if lead_source in _EMAILABLE_LEGACY_SOURCES else "approved_manual"

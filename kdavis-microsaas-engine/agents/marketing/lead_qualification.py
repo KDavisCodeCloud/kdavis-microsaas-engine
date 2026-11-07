@@ -494,7 +494,10 @@ def email_may_send(grade: str) -> bool:
 # logic was unreachable for exactly the leads it was written for. A route is
 # a durable property of the lead; a cap is a property of today. Routing
 # admits risky, the sender rations it.
-ROUTABLE_EMAIL_GRADES = frozenset({"valid", "risky"})
+# 2026-11-07 (Kelvin, buyer-targeting fix): ONLY "valid" may route outbound.
+# Catch-all ("risky") and pattern guesses are unverified and go to Find the
+# Buyer instead. This supersedes decision 3b above.
+ROUTABLE_EMAIL_GRADES = frozenset({"valid"})
 
 
 def email_may_route_outbound(grade: Optional[str]) -> bool:
@@ -751,11 +754,6 @@ def route_lead(
         return ROUTE_MANUAL_LINKEDIN, "no domain"
     if not email_may_route_outbound(email_grade):
         return ROUTE_MANUAL_LINKEDIN, f"email grade={email_grade}"
-    if email_grade == "risky":
-        # Routed, but MKT-O5 will only send it while the warmup sub-cap has
-        # room. Said in the reason so the route is never mistaken for an
-        # unconditional green light.
-        return ROUTE_OUTBOUND_EMAIL, "qualified (catch-all, capped during warmup)"
     return ROUTE_OUTBOUND_EMAIL, "qualified"
 
 

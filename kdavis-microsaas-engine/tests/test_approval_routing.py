@@ -72,10 +72,14 @@ class TestRoutingReadsTheLead:
         db = FakeDb({"lead_route": "outbound_email", "email": None, "email_grade": "valid"})
         assert _approval_target_status(db, "job_posting_signal", "lead-1") == "approved_manual"
 
-    def test_risky_grade_still_reaches_the_sender(self):
-        """Decision 3b lets catch-all addresses send under a warmup sub-cap,
-        so the APPROVAL must not pre-empt that -- MKT-O5 owns the cap."""
+    def test_risky_grade_never_reaches_the_sender(self):
+        """2026-11-07 reverses decision 3b: a catch-all address is unverified,
+        so approval lands it on the manual track, never the send queue."""
         db = FakeDb({"lead_route": "outbound_email", "email": "a@b.com", "email_grade": "risky"})
+        assert _approval_target_status(db, "job_posting_signal", "lead-1") == "approved_manual"
+
+    def test_valid_grade_reaches_the_sender(self):
+        db = FakeDb({"lead_route": "outbound_email", "email": "a@b.com", "email_grade": "valid"})
         assert _approval_target_status(db, "job_posting_signal", "lead-1") == "approved_hitl"
 
 

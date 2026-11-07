@@ -148,7 +148,7 @@ def _get_lead(db, seq: dict) -> Optional[dict]:
         # would make that gate silently always-pass. Only mse_leads has
         # them (migration 20261001000057); mse_apollo_leads does not.
         result = (db.table("mse_leads")
-                  .select("email,first_name,lead_route,email_grade")
+                  .select("email,first_name,lead_route,email_grade,email_status")
                   .eq("id", seq["lead_finder_lead_id"]).maybe_single().execute())
         return result.data if result is not None else None
     result = db.table("mse_apollo_leads").select("email,first_name").eq("id", seq["lead_id"]).maybe_single().execute()
@@ -187,15 +187,21 @@ def _email_send_block_reason(lead: dict, *, risky_budget_left: int = 0) -> Optio
     if route and route != "outbound_email":
         return f"lead_route={route}"
     grade = lead.get("email_grade")
-    if grade == "risky":
-        # Decision 3b (2026-10-01): catch-all addresses MAY send, capped at
-        # 25% of the daily cap during warmup. A catch-all accepts every
-        # RCPT TO, so a 250 proved only that the domain answers -- the cap
-        # bounds the bounce exposure instead of refusing the volume.
-        if risky_budget_left <= 0:
-            return "risky_daily_cap_reached"
+    # 2026-11-07 (buyer-targeting fix): only a "valid" (SMTP-verified,
+    # non-catch-all) address is ever sent. This reverses decision 3b: catch-
+    # all ("risky") is unverified and is blocked unconditionally, and a lead
+    # with no grade at all is blocked too -- "not yet graded" is not
+    # "verified". risky_budget_left is kept in the signature for callers.
+    if grade is None:
+        # A missing address stays the caller's loud ValueError (see docstring).
+        if not lead.get("email"):
+            return None
+        # Pre-grading rows (apollo, pre-v2 lead_finder): the SMTP result is
+        # in email_status instead. Only an explicit 'verified' passes.
+        if (lead.get("email_status") or "") != "verified":
+            return f"email_grade=None, email_status={lead.get('email_status')}"
         return None
-    if grade is not None and not email_may_send(grade):
+    if not email_may_send(grade):
         return f"email_grade={grade}"
     return None
 

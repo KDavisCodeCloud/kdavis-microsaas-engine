@@ -321,16 +321,14 @@ class TestEmailGrades:
         for grade in ("risky", "invalid", "unknown"):
             assert email_may_send(grade) is False, f"{grade} must not send unconditionally"
 
-    def test_valid_and_risky_may_be_routed_outbound(self):
-        """Decision 3b (2026-10-01): catch-all addresses may take the
-        outbound route, with volume capped at send time."""
+    def test_only_valid_may_be_routed_outbound(self):
+        """2026-11-07 reverses decision 3b: catch-all is unverified."""
         from agents.marketing.lead_qualification import email_may_route_outbound
         assert email_may_route_outbound("valid") is True
-        assert email_may_route_outbound("risky") is True
-        for grade in ("invalid", "unknown", None, ""):
+        for grade in ("risky", "invalid", "unknown", None, ""):
             assert email_may_route_outbound(grade) is False, f"{grade!r} must not be routed outbound"
 
-    def test_risky_routes_outbound_and_says_it_is_capped(self):
+    def test_risky_routes_to_the_manual_track(self):
         """Regression: route_lead used to send every risky lead to
         manual_linkedin, and MKT-O5 checks the stored lead_route BEFORE its
         risky branch -- so the warmup cap was unreachable for exactly the
@@ -338,13 +336,14 @@ class TestEmailGrades:
         from agents.marketing.lead_qualification import (
             ROUTE_OUTBOUND_EMAIL, Score, route_lead,
         )
+        from agents.marketing.lead_qualification import ROUTE_MANUAL_LINKEDIN
         route, reason = route_lead(
             email_grade="risky", has_domain=True,
             fit=Score(0.85, []), intent=Score(0.80, []),
         )
-        assert route == ROUTE_OUTBOUND_EMAIL
-        assert "cap" in reason.lower(), (
-            f"the route must record that risky volume is bounded; got {reason!r}")
+        # 2026-11-07: catch-all goes to the manual track (Find the Buyer).
+        assert route == ROUTE_MANUAL_LINKEDIN
+        assert "risky" in reason
 
     def test_invalid_and_unknown_still_route_manual(self):
         from agents.marketing.lead_qualification import (

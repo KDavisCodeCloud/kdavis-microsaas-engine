@@ -100,56 +100,31 @@ def evaluate_contact_fit(
     title: Optional[str],
     *,
     open_role_count: Optional[int] = None,
-    founder_max_open_roles: int = FOUNDER_MAX_OPEN_ROLES,
+    headcount: Optional[int] = None,
+    founder_max_open_roles: int = FOUNDER_MAX_OPEN_ROLES,  # kept for callers; unused
 ) -> ContactFit:
     """
-    Decide whether `title` is a buyer for infrastructure work.
+    Is `title` the BUDGET OWNER for infrastructure work?
 
-    `open_role_count` is the company's TOTAL open roles, used only for the
-    founder-title size gate.
+    2026-11-07: delegates to agents.marketing.buyer_gate.classify_buyer_title,
+    the single buyer rule. The previous body accepted functional IC titles
+    ("Platform Engineer", "DevOps Engineer", "Cloud Architect") at any size --
+    the reason outreach reached workers instead of buyers. Only an ALLOW
+    verdict is accepted; DENY and AMBIGUOUS both return accepted=False, and
+    the reason says which, so an ambiguous title lands in Find the Buyer
+    for a human rather than being promoted.
+
+    `open_role_count` is the company's TOTAL open roles (CEO size proxy).
     """
-    if not title or not title.strip():
-        return ContactFit(False, "no title", None)
+    from agents.marketing.buyer_gate import classify_buyer_title
 
-    t = title.strip()
-
-    # Executive technology ownership is valid at any company size, and is
-    # checked before the wrong-function screen so "CTO" never trips it.
-    if EXEC_TECH_TITLE_RE.search(t) and not WRONG_FUNCTION_RE.search(t):
-        return ContactFit(True, f"executive technology title: {t!r}", "exec_tech")
-
-    # Wrong function, regardless of seniority. This is what "VP of Data" and
-    # "VP of Sales" fail on -- both VP-level, neither the buyer.
-    if WRONG_FUNCTION_RE.search(t) and not WRONG_FUNCTION_EXEMPT_RE.search(t):
-        wrong = WRONG_FUNCTION_RE.search(t).group(0)
-        return ContactFit(False, f"wrong function ({wrong}): {t!r}", None)
-
-    if FUNCTIONAL_TITLE_RE.search(t):
-        return ContactFit(True, f"infrastructure function: {t!r}", "functional")
-
-    # Founder-shaped: only at a small company, where the founder still owns
-    # infrastructure decisions.
-    if FOUNDER_TITLE_RE.search(t):
-        if open_role_count is None:
-            return ContactFit(
-                False,
-                f"founder title {t!r} but company size unknown -- cannot confirm <=50 people",
-                None,
-            )
-        if open_role_count <= founder_max_open_roles:
-            return ContactFit(
-                True,
-                f"founder title at a small company ({open_role_count} open roles)",
-                "founder_small",
-            )
-        return ContactFit(
-            False,
-            f"founder title {t!r} at a company with {open_role_count} open roles "
-            f"(> {founder_max_open_roles}, so not a <=50-person company)",
-            None,
-        )
-
-    return ContactFit(False, f"not a buyer title: {t!r}", None)
+    verdict = classify_buyer_title(title, headcount=headcount, open_role_count=open_role_count)
+    if verdict.accepted:
+        # Legacy category names kept so existing consumers keep working.
+        legacy = {"eng_leader": "exec_tech", "exec_tech": "exec_tech",
+                  "founder": "founder_small", "ceo_small": "founder_small"}
+        return ContactFit(True, verdict.reason, legacy.get(verdict.category, verdict.category))
+    return ContactFit(False, f"{verdict.verdict}: {verdict.reason}", None)
 
 
 # ── Partner lane (2026-10-18) ─────────────────────────────────────────────
