@@ -27,6 +27,7 @@ were welded together.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -97,7 +98,34 @@ speculate about clearances, contracts or customers.
 the signal context given below -- never invented.
 - No hype words ("game-changing", "revolutionary"), no generic flattery, no "I noticed you..." as a \
 generic opener with nothing specific behind it.
-- Never use dollar-amount/"make more money" framing -- this buyer is not that buyer."""
+- Never "make more money" or revenue-upside framing. Cost to the business is a different thing and is \
+required -- see the buyer rules below."""
+
+# ── Buyer rules (Kelvin, 2026-11-07) ─────────────────────────────────────
+#
+# The reader is the person who owns the budget and the headcount -- a CTO,
+# VP Engineering, Head of Platform or a founder -- not the engineer who would
+# do the work. Before this, the copy described tooling to a technical peer
+# ("a specific observation about their infrastructure challenge") and the
+# older prompts demanded "a specific dollar amount" with nothing to source it
+# from, which is a request to invent a number.
+BUYER_COPY_RULES = """\
+Buyer rules, non-negotiable:
+- THE READER OWNS THE BUDGET. Write to a CTO, VP Engineering, Head of Platform/Infrastructure or a \
+founder. They decide what gets funded; they do not do the hands-on work. Talk about what the problem \
+costs the business, not about tools or how the work is done.
+- USE THEIR SIGNAL. Open on the specific signal in the context (the role they are hiring for, the pain \
+their posting names, their funding, their post). Never a generic opener.
+- NAME THE BUSINESS PAIN IN ONE OF THREE UNITS: dollars (cloud spend, the cost of an unfilled seat), \
+hours (senior engineers' time, weeks of roadmap slipping while a role is open) or risk (outages, a \
+failed audit, a security gap). Pick ONE and say it plainly.
+- NO INVENTED METRICS. Use a number only if that exact number appears in the context. Otherwise name \
+the unit without a figure ("hours every week", "spend nobody is watching", "the audit risk while the \
+seat is empty"). Never invent a percentage, a savings figure, a time saving, a customer, a case study \
+or a result.
+- ONE OUTCOME. State the single outcome the offer delivers for that pain. Not a feature list.
+- ONE LOW-FRICTION CTA. Exactly one ask per message, as a question that is easy to say yes to (a \
+15-minute call, or "worth a look?"). Never two asks, never a calendar link and a question together."""
 
 
 @dataclass(frozen=True)
@@ -112,9 +140,10 @@ class Offer:
 CONSULTING_OFFER = Offer(
     name="infrastructure consulting",
     pitch=(
-        "Kelvin takes on cloud/platform engineering work on contract -- helping a team move faster on "
-        "infrastructure while they hire, or when the work outpaces the headcount they have. He is a "
-        "senior cloud and platform engineer, currently at CorVel. This is his own time, not a product."
+        "Kelvin takes on cloud/platform engineering work on contract. For a budget owner the outcome is: "
+        "the infrastructure work their open role was meant to cover gets done now, instead of the roadmap "
+        "waiting weeks or months for the hire -- without adding a permanent seat. He is a senior cloud and "
+        "platform engineer, currently at CorVel. This is his own time, not a product."
     ),
     close_url=CONSULTING_OFFER_URL,
 )
@@ -122,11 +151,12 @@ CONSULTING_OFFER = Offer(
 CLOUD_DECODED_OFFER = Offer(
     name="Cloud Decoded",
     pitch=(
-        "Cloud Decoded is an 11-agent DevOps/platform automation product (CI/CD triage, Kubernetes "
-        "alert remediation, IAM minimization, FinOps, drift detection). Frame it as force-"
-        "multiplication for the team they are building or the person they are hiring -- it makes that "
-        "hire faster and covers gaps day to day. NEVER a substitute for making the hire, and never "
-        "imply they should not hire."
+        "Cloud Decoded is DevOps/platform automation (CI/CD failure triage, Kubernetes alert "
+        "remediation, IAM least-privilege, cloud cost findings, drift detection). For a budget owner the "
+        "outcome is: the hours their senior engineers lose to pipeline failures and alert noise come back, "
+        "and cloud spend and access risk get watched while the team is still being built. Frame it as "
+        "force-multiplication for the team they are building or the person they are hiring -- NEVER a "
+        "substitute for making the hire, and never imply they should not hire."
     ),
     close_url=CLOUD_DECODED_DEMO_URL,
 )
@@ -156,12 +186,13 @@ subject = the subject line for touch_1, max {EMAIL_SUBJECT_MAX} chars. Specific 
 lower-case or sentence case, no colons-and-buzzwords, no "Re:" and no fake-reply tricks. It must read \
 like a person wrote it to one person.
 
-touch_1 = the opening email, max {EMAIL_TOUCH_MAX} chars. Open on their situation from the signal \
-below. One short sentence of relevant credibility in first person. End with one low-friction question.
+touch_1 = the opening email, max {EMAIL_TOUCH_MAX} chars. Open on their signal, name what it costs \
+the business (dollars, hours or risk), state the one outcome, one short sentence of credibility in \
+first person, and end with one low-friction question.
 
-touch_2 = sent 3 DAYS LATER if there has been no reply, max {EMAIL_TOUCH_MAX} chars. A specific \
-observation about their infrastructure challenge inferred only from the signal given. Then the ask, \
-and the close URL exactly once as a bare URL with no tracking parameters.
+touch_2 = sent 3 DAYS LATER if there has been no reply, max {EMAIL_TOUCH_MAX} chars. The same pain from \
+a second angle a budget owner cares about (what it costs while it stays unsolved), the one outcome, \
+then the ask and the close URL exactly once as a bare URL with no tracking parameters.
 
 touch_3 = sent 5 DAYS AFTER touch_2, ONLY if there has still been no reply, max 400 chars. One short \
 paragraph, a different angle, and it is the last message -- say so plainly.
@@ -186,7 +217,8 @@ real from the signal below. One sentence on what Kelvin does, in first person. N
 this note's only job is to get the invitation accepted.
 
 touch_2 = the first DM, sent 3 days AFTER THE CONNECTION IS ACCEPTED, max {LINKEDIN_DM_MAX} chars. \
-This is where the observation and the ask go, plus the close URL exactly once as a bare URL. It may \
+This is where the business pain (dollars, hours or risk), the one outcome and the one ask go, plus \
+the close URL exactly once as a bare URL. It may \
 refer to having connected, because that genuinely happened.
 
 touch_3 = sent 5 days after touch_2, ONLY if there has been no reply, max 300 chars. One line, a \
@@ -216,13 +248,14 @@ def build_system_prompt(channel: ChannelSpec, offer: Offer, *, extra_rules: str 
     schema = "{\n" + ",\n".join(f'  "{k}": str' for k in schema_keys) + "\n}"
     return (
         f"You are writing a cold outreach sequence for Kelvin Davis, selling {offer.name}, "
-        f"to a technical decision-maker at a company found publicly hiring.\n\n"
+        f"to the budget owner (CTO, VP Engineering, Head of Platform/Infrastructure or founder) at a "
+        f"company found publicly hiring.\n\n"
         f"WHAT YOU ARE SELLING\n{offer.pitch}\n\n"
         f"{channel.instructions}\n\n"
         f"Close every sequence to this URL and no other: {offer.close_url}\n\n"
         f"Return ONLY a single JSON object -- no prose, no markdown fences -- matching exactly:\n\n"
         f"{schema}\n\n"
-        f"{SHARED_COPY_RULES}\n"
+        f"{SHARED_COPY_RULES}\n{BUYER_COPY_RULES}\n"
         + (f"{extra_rules}\n" if extra_rules else "")
         + f"- The sequence stops entirely if they reply at any point; touch_3 is only ever sent on "
         f"zero reply."
@@ -249,6 +282,34 @@ def channel_violations(text: Optional[str], route: Optional[str]) -> list[str]:
         if re.search(rf"(?<![a-z]){re.escape(phrase)}(?![a-z])", low):
             problems.append(f"uses {other}-only phrasing on the {route} route: {phrase!r}")
     return problems
+
+
+# Numbers a draft may not invent: money, percentages, multipliers and
+# durations. A bare year or a count inside the company name is not a metric.
+_METRIC_RE = re.compile(
+    r"\$\s?\d[\d,.]*\s?[kKmMbB]?"
+    r"|\b\d[\d,.]*\s?(?:%|percent\b|x\b)"
+    r"|\b\d[\d,.]*\s?(?:hours?|hrs?|days?|weeks?|months?|minutes?|mins?|engineers?|people|customers?|teams?)\b",
+    re.IGNORECASE,
+)
+
+# The CTA itself is allowed to carry a duration ("a 15-minute call").
+_ALLOWED_CTA_RE = re.compile(r"\b(?:15|20|30)[-\s]?min(?:ute)?s?\b", re.IGNORECASE)
+
+
+def unsourced_metrics(text: Optional[str], context: object) -> list[str]:
+    """Metric-shaped numbers in `text` whose digits do not appear anywhere
+    in `context` (the lead + signal sent to the model). Each one is a figure
+    the model made up, which the buyer rules forbid."""
+    import json as _json
+    blob = _json.dumps(context, default=str) if not isinstance(context, str) else context
+    digits_in_context = set(re.findall(r"\d[\d,.]*", blob))
+    out = []
+    for m in _METRIC_RE.finditer(_ALLOWED_CTA_RE.sub(" ", text or "")):
+        nums = re.findall(r"\d[\d,.]*", m.group(0))
+        if any(n.rstrip(".,") not in {d.rstrip(".,") for d in digits_in_context} for n in nums):
+            out.append(m.group(0).strip())
+    return out
 
 
 # ── Pain phrases in touch 1 (2026-10-18) ─────────────────────────────────

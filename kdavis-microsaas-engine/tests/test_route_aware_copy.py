@@ -216,3 +216,67 @@ def test_mkt_o5_prefers_the_approved_subject():
     idx_stored = src.index('seq.get("subject")')
     idx_default = src.index("Quick question")
     assert idx_stored < idx_default, "the invented subject must only be a fallback"
+
+
+# ── Buyer rules (2026-11-07) ─────────────────────────────────────────────
+
+from agents.marketing.outreach_copy import BUYER_COPY_RULES, unsourced_metrics  # noqa: E402
+
+
+@pytest.mark.parametrize("ch", [EMAIL_CHANNEL, LINKEDIN_CHANNEL])
+@pytest.mark.parametrize("offer", [CONSULTING_OFFER, CLOUD_DECODED_OFFER])
+def test_every_prompt_carries_the_buyer_rules(ch, offer):
+    p = build_system_prompt(ch, offer)
+    assert BUYER_COPY_RULES in p
+    assert "budget owner" in p
+    assert "NO INVENTED METRICS" in p and "ONE LOW-FRICTION CTA" in p
+    assert "technical decision-maker" not in p
+
+
+def test_legacy_prompts_no_longer_demand_a_dollar_amount():
+    import agents.marketing.mkt_o2_cold_dm_writer as w
+    for prompt in (w._SYSTEM_PROMPT, w._ENGAGER_SYSTEM_PROMPT):
+        assert "specific dollar amount" not in prompt
+        assert "NO invented metrics" in prompt
+
+
+@pytest.mark.parametrize("text", [
+    "Teams like yours cut cloud spend 30% in a quarter.",
+    "That saves your engineers 12 hours a week.",
+    "We've helped 40 customers.",
+    "Typically a $50k saving.",
+    "3x faster deploys.",
+])
+def test_invented_metrics_are_caught(text):
+    assert unsourced_metrics(text, {"company": "Acme", "job_posting_title": "Head of Platform"})
+
+
+@pytest.mark.parametrize("text,ctx", [
+    ("Worth a 15-minute call?", {}),
+    ("Your posting lists 6 open infrastructure roles.", {"open_role_count": 6}),
+    ("Hours every week go to pipeline failures nobody owns.", {}),
+])
+def test_sourced_numbers_and_unitless_pain_pass(text, ctx):
+    assert unsourced_metrics(text, ctx) == []
+
+
+def test_writer_refuses_a_draft_that_keeps_inventing_metrics():
+    import json as _json
+    import agents.marketing.mkt_o2_cold_dm_writer as w
+
+    class _Msg:
+        def __init__(self, t): self.content = [type("C", (), {"text": t})()]
+
+    class _Client:
+        class messages:  # noqa: N801
+            calls = 0
+            @classmethod
+            def create(cls, **kw):
+                cls.calls += 1
+                return _Msg(_json.dumps({"touch_1": "Ana, cut spend 30% fast.",
+                                         "touch_2": "We save 12 hours a week.", "touch_3": "Last note."}))
+
+    lead = {"first_name": "Ana", "company": "Acme", "title": "CTO", "lead_route": "manual_linkedin"}
+    with pytest.raises(ValueError, match="invents metrics"):
+        w._write_route_aware_sequence(lead, "9b6c8f36-985f-4d7a-a416-c40da89e23af", anthropic_client=_Client)
+    assert _Client.messages.calls == 2

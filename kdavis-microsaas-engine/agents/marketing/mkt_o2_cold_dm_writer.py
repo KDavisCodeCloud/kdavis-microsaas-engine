@@ -2,8 +2,9 @@
 MKT-O2 Cold DM Sequence Writer.
 
 Writes a 2-touch cold DM sequence per lead using exact pain language from
-research_report. Framing: "make more money" + a dollar amount — never "save
-time." Every sequence lands in mse_dm_sequences with status='pending_hitl'
+research_report. Framing (2026-11-07): the budget owner's business pain in
+dollars, hours or risk, one outcome, one low-friction ask, and no figure that
+is not in the lead's own context. Every sequence lands in mse_dm_sequences with status='pending_hitl'
 — this agent never sends anything. A human approves in the HITL queue;
 approval unlocks MKT-O5 (agents/marketing/mkt_o5_sequence_sender.py), the
 separate sender, which sends via Resend with the CAN-SPAM compliance guard
@@ -59,11 +60,12 @@ touch_1 = connection request note or cold DM opener, max {TOUCH_1_MAX_CHARS} cha
 touch_2 = follow-up sent 3 days later, max {TOUCH_2_MAX_CHARS} chars.
 
 Rules, non-negotiable:
-- Frame around "make more money" + a specific dollar amount — never "save time"
-- Name a specific pain from the research below, not a generic problem
-- End with a low-friction call to action (one question, not a meeting ask)
+- Write to the budget owner (CTO, VP Engineering, Head of Platform, founder), not the engineer
+- Name ONE specific business pain from the research below in dollars, hours or risk
+- NO invented metrics: use a number only if it appears in the research below
+- State one outcome; end with one low-friction call to action (one question, not a meeting ask)
 - No hype words, no "I noticed you...", no generic flattery
-- touch_1 leads with the pain signal; touch_2 leads with the specific dollar value prop"""
+- touch_1 leads with the pain signal; touch_2 leads with what that pain costs the business"""
 
 # linkedin_engager leads already interacted with a real post -- touch_1
 # should open by naming that interaction (task spec's own template:
@@ -87,12 +89,13 @@ given below, never the literal bracket placeholders.
 touch_2 = follow-up sent 3 days later, max {TOUCH_2_MAX_CHARS} chars.
 
 Rules, non-negotiable:
-- Frame around "make more money" + a specific dollar amount — never "save time"
-- Name a specific pain from the research below, not a generic problem
-- End with a low-friction call to action (one question, not a meeting ask)
+- Write to the budget owner (CTO, VP Engineering, Head of Platform, founder), not the engineer
+- Name ONE specific business pain from the research below in dollars, hours or risk
+- NO invented metrics: use a number only if it appears in the research below
+- State one outcome; end with one low-friction call to action (one question, not a meeting ask)
 - No hype words, no generic flattery
-- touch_1 leads with the interaction reference then the pain signal; touch_2 leads with the specific
-  dollar value prop"""
+- touch_1 leads with the interaction reference then the pain signal; touch_2 leads with what that
+  pain costs the business"""
 
 # Channel/offer composition moved to agents/marketing/outreach_copy.py
 # (decision 1, 2026-10-06). The two prompts that used to live here were
@@ -276,6 +279,7 @@ def _write_route_aware_sequence(lead: dict, product_id: str, anthropic_client=No
         channel_for_route,
         channel_violations,
         pain_phrase_missing,
+        unsourced_metrics,
     )
 
     partner_type = (lead.get("partner_type") or "").strip() or None
@@ -344,6 +348,22 @@ def _write_route_aware_sequence(lead: dict, product_id: str, anthropic_client=No
         parsed = json.loads(_strip_fences(raw))
         if pain_phrase_missing(parsed.get("touch_1"), pain_phrases):
             _log.warning("[MKT-O2] %s touch_1 still omits pain phrases after retry", lead.get("company"))
+    # No invented metrics (2026-11-07). A figure that is not in the context
+    # was made up; one retry naming it, then refuse the draft outright --
+    # a reviewer skimming twenty drafts will not catch a plausible "30%".
+    def _invented(p: dict) -> list[str]:
+        return [n for k in ("subject", *channel.touches) for n in unsourced_metrics(p.get(k), safe_lead)]
+    invented = _invented(parsed)
+    if invented:
+        _log.warning("[MKT-O2] %s draft invented metrics %s; regenerating once", lead.get("company"), invented)
+        raw = _analyze(system, user_prompt + (
+            f"\n\nYour previous draft used figures that are not in the context: {json.dumps(invented)}. "
+            f"Remove every number that is not in the context; name the unit (dollars, hours, risk) "
+            f"without a figure."), anthropic_client=anthropic_client, max_tokens=1600)
+        parsed = json.loads(_strip_fences(raw))
+        invented = _invented(parsed)
+        if invented:
+            raise ValueError(f"MKT-O2 draft for {lead.get('company')} still invents metrics: {invented}")
     required = (["subject"] if channel.wants_subject else []) + list(channel.touches)
     missing = [k for k in required if k not in parsed or not str(parsed.get(k) or "").strip()]
     if missing:
