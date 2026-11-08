@@ -21,6 +21,9 @@ async def tenant_context_middleware(request: Request, call_next):
     # Public paths — no auth required
     PUBLIC_PATHS = {
         "/health", "/docs", "/openapi.json", "/redoc", "/webhooks/stripe", "/ceo/health",
+        # Resend delivery events; authenticated by the Svix signature inside
+        # api/routers/resend_webhook.py.
+        "/webhooks/resend",
         # n8n-triggered automation, not tenant-JWT-scoped — authenticated via
         # MARKETING_API_KEY inside api/routers/marketing.py instead.
         "/marketing/research", "/marketing/campaign",

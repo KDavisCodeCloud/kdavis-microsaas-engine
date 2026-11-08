@@ -434,6 +434,29 @@ async def mark_paste_event(
     return await _record_reply(db, seq, source="ready_to_paste")
 
 
+@router.post("/sequences/{sequence_id}/replied")
+async def mark_sequence_replied(
+    sequence_id: str,
+    authorization: Optional[str] = Header(default=None),
+):
+    """"Mark replied" for an EMAIL sequence (2026-11-07, Phase 6).
+
+    Replies to outreach land in Kelvin's own inbox (Reply-To), which this
+    service cannot read, so detection is this one manual action: it moves
+    the sequence to 'replied' -- out of reach of the touch_2 / touch_3
+    senders, which only poll touch_1_sent and touch_2_sent -- and opens a
+    conversation. Works from any status; idempotent.
+    """
+    require_marketing_api_key(authorization)
+    db = get_supabase()
+    seq = (db.table("mse_dm_sequences").select("*").eq("id", sequence_id)
+           .maybe_single().execute())
+    seq = seq.data if seq else None
+    if not seq:
+        raise HTTPException(status_code=404, detail="Sequence not found")
+    return await _record_reply(db, seq, source="email_mark_replied")
+
+
 async def _record_reply(db, seq: dict, *, source: str) -> dict:
     """Stop the sequence and open a conversation. Idempotent."""
     now = datetime.now(timezone.utc).isoformat()

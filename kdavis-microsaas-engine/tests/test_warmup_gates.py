@@ -150,14 +150,14 @@ class TestSenderIntegration:
         lead = {"email": "a@b.com", "lead_route": "outbound_email", "email_grade": "valid"}
         assert o5._email_send_block_reason(lead, risky_budget_left=0) is None
 
-    def test_both_send_loops_check_the_pause(self):
+    def test_every_send_loop_checks_the_pause(self):
         """A pause that only guards touch_1 would let follow-ups keep going
-        into a damaged reputation."""
+        into a damaged reputation. touch_2 and touch_3 share _run_follow_up."""
         import inspect
 
         import agents.marketing.mkt_o5_sequence_sender as o5
 
-        for fn in (o5.run_send_touch_1, o5.run_send_touch_2):
+        for fn in (o5.run_send_touch_1, o5._run_follow_up):
             src = inspect.getsource(fn)
             assert "sends_paused(db)" in src, f"{fn.__name__} does not check the bounce pause"
             assert "risky_budget_left" in src, f"{fn.__name__} does not apply the risky sub-cap"

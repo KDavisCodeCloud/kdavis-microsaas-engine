@@ -34,6 +34,7 @@ intended; remaining sequences simply stay in their current status for the
 next hourly run to pick up, same as any other skip here.
 """
 import logging
+from dataclasses import dataclass
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -59,6 +60,8 @@ log = logging.getLogger(__name__)
 
 AGENT_ID = "mkt-o5"
 TOUCH_2_DELAY = timedelta(days=3)
+# touch_3 lands on day 7 after touch_1.
+TOUCH_3_DELAY = timedelta(days=4)
 
 
 def _emit_event(db, event_type: str, metadata: dict) -> None:
@@ -168,7 +171,7 @@ def _get_lead(db, seq: dict) -> Optional[dict]:
         # would make that gate silently always-pass. Only mse_leads has
         # them (migration 20261001000057); mse_apollo_leads does not.
         result = (db.table("mse_leads")
-                  .select("email,first_name,lead_route,email_grade,email_status")
+                  .select("email,first_name,lead_route,email_grade,email_status,status")
                   .eq("id", seq["lead_finder_lead_id"]).maybe_single().execute())
         return result.data if result is not None else None
     result = db.table("mse_apollo_leads").select("email,first_name").eq("id", seq["lead_id"]).maybe_single().execute()
@@ -414,27 +417,54 @@ def run_send_touch_1(supabase_client: Optional[Any] = None, resend_client: Optio
     return {"sent": sent, "failed": failed, "skipped": skipped}
 
 
-def run_send_touch_2(supabase_client: Optional[Any] = None, resend_client: Optional[Any] = None) -> dict:
-    """Sends touch_2 for every sequence whose touch_1 was sent at least
-    TOUCH_2_DELAY ago and hasn't had touch_2 sent yet."""
+@dataclass(frozen=True)
+class _FollowUp:
+    """One follow-up touch: which status it waits in, how long after which
+    previous send, and where it goes next."""
+
+    touch: int
+    from_status: str
+    after_col: str
+    delay: timedelta
+    sending_status: str
+    sent_col: str
+
+
+# Day 3 and day 7 after touch_1 (Kelvin, 2026-11-07). Each follow-up only
+# ever fires from the status the previous touch left behind, so a reply
+# ('replied'), a bounce ('bounced') or an unsubscribe ('suppressed') moves the
+# sequence out of reach and stops it.
+_TOUCH_2 = _FollowUp(2, "touch_1_sent", "touch_1_sent_at", TOUCH_2_DELAY, "touch_2_sending", "touch_2_sent_at")
+_TOUCH_3 = _FollowUp(3, "touch_2_sent", "touch_2_sent_at", TOUCH_3_DELAY, "touch_3_sending", "touch_3_sent_at")
+
+# A lead in either of these states never gets another message.
+_STOPPED_LEAD_STATUSES = ("bounced", "unsubscribed")
+
+
+def _status_after(fu: _FollowUp, seq: dict) -> str:
+    """Where a sequence goes once this touch is sent."""
+    if fu.touch == 2 and (seq.get("touch_3") or "").strip():
+        return "touch_2_sent"
+    return "sequence_complete"
+
+
+def _run_follow_up(fu: _FollowUp, supabase_client: Optional[Any], resend_client: Optional[Any]) -> dict:
     db = supabase_client if supabase_client is not None else get_supabase()
 
-    cutoff = (datetime.now(timezone.utc) - TOUCH_2_DELAY).isoformat()
+    cutoff = (datetime.now(timezone.utc) - fu.delay).isoformat()
     sequences = (
         db.table("mse_dm_sequences")
         .select("*")
-        .eq("status", "touch_1_sent")
-        .lte("touch_1_sent_at", cutoff)
+        .eq("status", fu.from_status)
+        .lte(fu.after_col, cutoff)
         .execute()
         .data
         or []
     )
-    _emit_event(db, "sequence_send_touch2_started", {"count": len(sequences)})
+    _emit_event(db, f"sequence_send_touch{fu.touch}_started", {"count": len(sequences)})
 
     # Decision 3c (2026-10-01): a bounce rate over 3% in a rolling 7-day
-    # window pauses EVERY send. Past that point mailbox providers start
-    # filing everything as spam, and the damage outlives the batch that
-    # caused it -- so this is a hard stop, not a warning.
+    # window pauses EVERY send -- a hard stop, not a warning.
     paused, pause_reason = sends_paused(db)
     if paused:
         log.error("[MKT-O5] SENDS PAUSED: %s", pause_reason)
@@ -446,73 +476,94 @@ def run_send_touch_2(supabase_client: Optional[Any] = None, resend_client: Optio
     sent_count = sends_today(db)
     risky_budget_left = max(0, risky_send_cap() - risky_sends_today(db))
 
+    def _skip(seq: dict, reason: str, new_status: Optional[str] = None) -> None:
+        skipped.append(seq["id"])
+        if new_status:
+            db.table("mse_dm_sequences").update({"status": new_status}).eq("id", seq["id"]).eq(
+                "status", fu.from_status).execute()
+        _write_audit(db, "lose", seq.get("product_id", ""),
+                     {"sequence_id": seq["id"], "touch": fu.touch, "skipped": reason})
+
     sent, failed, skipped = 0, [], []
     for seq in sequences:
         try:
             if seq.get("product_id") not in active_product_ids:
-                skipped.append(seq["id"])
-                _write_audit(db, "lose", seq.get("product_id", ""), {"sequence_id": seq["id"], "touch": 2, "skipped": "selling_stage_not_active"})
+                _skip(seq, "selling_stage_not_active")
                 continue
-
             if sent_count >= cap:
-                skipped.append(seq["id"])
-                _write_audit(db, "lose", seq.get("product_id", ""), {"sequence_id": seq["id"], "touch": 2, "skipped": "daily_cap"})
+                _skip(seq, "daily_cap")
+                continue
+            body_text = (seq.get(f"touch_{fu.touch}") or "").strip()
+            if not body_text:
+                _skip(seq, f"no_touch_{fu.touch}_copy", "sequence_complete")
                 continue
 
             lead = _get_lead(db, seq)
             if not lead:
                 raise ValueError(f"No lead row for sequence {seq['id']}")
 
+            if (lead.get("status") or "") in _STOPPED_LEAD_STATUSES:
+                _skip(seq, f"lead_{lead['status']}",
+                      "bounced" if lead["status"] == "bounced" else "suppressed")
+                continue
+
             block = _email_send_block_reason(lead, risky_budget_left=risky_budget_left)
             if block:
-                skipped.append(seq["id"])
-                _write_audit(db, "lose", seq.get("product_id", ""),
-                             {"sequence_id": seq["id"], "touch": 2, "skipped": block})
+                _skip(seq, block)
                 continue
 
             if not lead.get("email"):
                 raise ValueError(f"No email on file for lead {seq.get('lead_finder_lead_id') or seq.get('lead_id')}")
 
-            # A lead can unsubscribe in the 3-day gap between touch_1 and
-            # touch_2 -- re-checking here, not just at touch_1, is the
-            # whole point of a suppression check rather than a one-time
-            # gate.
+            # A lead can unsubscribe between touches -- re-checked before
+            # every one, not just the first.
             if is_suppressed(db, lead["email"]):
-                skipped.append(seq["id"])
-                db.table("mse_dm_sequences").update({"status": "suppressed"}).eq("id", seq["id"]).eq("status", "touch_1_sent").execute()
-                _write_audit(db, "lose", seq["product_id"], {"sequence_id": seq["id"], "touch": 2, "skipped": "suppressed"})
+                _skip(seq, "suppressed", "suppressed")
                 continue
 
-            if not _claim_for_send(db, seq["id"], "touch_1_sent", "touch_2_sending"):
-                skipped.append(seq["id"])
-                _write_audit(db, "lose", seq["product_id"], {"sequence_id": seq["id"], "touch": 2, "skipped": "already_claimed"})
+            if not _claim_for_send(db, seq["id"], fu.from_status, fu.sending_status):
+                _skip(seq, "already_claimed")
                 continue
 
             try:
                 first_name = lead.get("first_name") or ""
                 subject = f"Following up, {first_name}".strip() if first_name else "Following up"
-                body = append_compliance_footer(DataSanitizationShield.clean(seq["touch_2"]), lead["email"])
-                resend_id_2 = _send_email(resend_client, lead["email"], subject, body)
+                body = append_compliance_footer(DataSanitizationShield.clean(body_text), lead["email"])
+                resend_id = _send_email(resend_client, lead["email"], subject, body)
                 if lead.get("email_grade") == "risky":
                     risky_budget_left -= 1
             except Exception:
-                _release_claim(db, seq["id"], "touch_2_sending", "touch_1_sent")
+                _release_claim(db, seq["id"], fu.sending_status, fu.from_status)
                 raise
 
             db.table("mse_dm_sequences").update({
-                "status": "sequence_complete",
-                "touch_2_sent_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("id", seq["id"]).eq("status", "touch_2_sending").execute()
-            _log_outreach_touch(db, seq, touch=2)
+                "status": _status_after(fu, seq),
+                fu.sent_col: datetime.now(timezone.utc).isoformat(),
+            }).eq("id", seq["id"]).eq("status", fu.sending_status).execute()
+            _log_outreach_touch(db, seq, touch=fu.touch)
             sent += 1
             sent_count += 1
-            _write_audit(db, "win", seq["product_id"], _win_metadata(seq, lead, 2, resend_id_2))
+            _write_audit(db, "win", seq["product_id"], _win_metadata(seq, lead, fu.touch, resend_id))
         except Exception as exc:
             failed.append(seq["id"])
-            _write_audit(db, "lose", seq.get("product_id", ""), {"sequence_id": seq["id"], "touch": 2, "error": str(exc)})
+            _write_audit(db, "lose", seq.get("product_id", ""),
+                         {"sequence_id": seq["id"], "touch": fu.touch, "error": str(exc)})
 
-    _emit_event(db, "sequence_send_touch2_completed", {"sent": sent, "failed": len(failed), "skipped": len(skipped)})
+    _emit_event(db, f"sequence_send_touch{fu.touch}_completed",
+                {"sent": sent, "failed": len(failed), "skipped": len(skipped)})
     return {"sent": sent, "failed": failed, "skipped": skipped}
+
+
+def run_send_touch_2(supabase_client: Optional[Any] = None, resend_client: Optional[Any] = None) -> dict:
+    """touch_2, 3 days after touch_1."""
+    return _run_follow_up(_TOUCH_2, supabase_client, resend_client)
+
+
+def run_send_touch_3(supabase_client: Optional[Any] = None, resend_client: Optional[Any] = None) -> dict:
+    """touch_3, 4 days after touch_2 (day 7). Before 2026-11-07 touch_3 was
+    drafted and approved but never sent: touch_2 marked the sequence
+    complete."""
+    return _run_follow_up(_TOUCH_3, supabase_client, resend_client)
 
 
 def run_sequence_sender(supabase_client: Optional[Any] = None, resend_client: Optional[Any] = None) -> dict:
@@ -520,4 +571,5 @@ def run_sequence_sender(supabase_client: Optional[Any] = None, resend_client: Op
     runs both touch stages in one pass."""
     t1 = run_send_touch_1(supabase_client=supabase_client, resend_client=resend_client)
     t2 = run_send_touch_2(supabase_client=supabase_client, resend_client=resend_client)
-    return {"touch_1": t1, "touch_2": t2}
+    t3 = run_send_touch_3(supabase_client=supabase_client, resend_client=resend_client)
+    return {"touch_1": t1, "touch_2": t2, "touch_3": t3}

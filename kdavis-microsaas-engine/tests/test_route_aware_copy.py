@@ -66,7 +66,7 @@ def test_both_channels_run_three_touches_on_the_same_cadence():
     assert EMAIL_CHANNEL.touches == LINKEDIN_CHANNEL.touches == ("touch_1", "touch_2", "touch_3")
     for ch in (EMAIL_CHANNEL, LINKEDIN_CHANNEL):
         assert "3 DAYS" in ch.instructions.upper()
-        assert "5 DAYS" in ch.instructions.upper()
+        assert "4 DAYS" in ch.instructions.upper()  # touch_3 on day 7 (2026-11-07)
         assert "no reply" in ch.instructions.lower()
 
 

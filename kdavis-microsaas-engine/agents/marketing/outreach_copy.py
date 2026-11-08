@@ -194,7 +194,7 @@ touch_2 = sent 3 DAYS LATER if there has been no reply, max {EMAIL_TOUCH_MAX} ch
 a second angle a budget owner cares about (what it costs while it stays unsolved), the one outcome, \
 then the ask and the close URL exactly once as a bare URL with no tracking parameters.
 
-touch_3 = sent 5 DAYS AFTER touch_2, ONLY if there has still been no reply, max 400 chars. One short \
+touch_3 = sent 4 DAYS AFTER touch_2 (day 7), ONLY if there has still been no reply, max 400 chars. One short \
 paragraph, a different angle, and it is the last message -- say so plainly.
 
 FORBIDDEN VOCABULARY. This is email, so LinkedIn mechanics are meaningless and must never appear: no \
@@ -221,7 +221,7 @@ This is where the business pain (dollars, hours or risk), the one outcome and th
 the close URL exactly once as a bare URL. It may \
 refer to having connected, because that genuinely happened.
 
-touch_3 = sent 5 days after touch_2, ONLY if there has been no reply, max 300 chars. One line, a \
+touch_3 = sent 4 days after touch_2, ONLY if there has been no reply, max 300 chars. One line, a \
 different angle, and the last message.
 
 FORBIDDEN VOCABULARY. There is no subject line, no inbox and no unsubscribe on this channel -- never \
