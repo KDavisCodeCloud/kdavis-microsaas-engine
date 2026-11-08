@@ -127,6 +127,69 @@ def daily_send_cap() -> int:
     return int(os.environ.get("MARKETING_DAILY_SEND_CAP", _DEFAULT_DAILY_SEND_CAP))
 
 
+# ── Warmup ramp (Kelvin, 2026-11-07) ─────────────────────────────────────
+#
+# A new sending domain earns reputation by volume growing slowly. The brief:
+# 10-15 a day in weeks 1-2, 20-25 in weeks 3-4, 30 a day at steady state.
+# Each band starts at its low end and steps up after a week. The day count
+# runs from the FIRST real prospect send -- a send to KELVIN_EMAIL (the
+# pipeline test) does not start the clock. MARKETING_DAILY_SEND_CAP still
+# applies on top as a hard ceiling; the lower of the two wins.
+
+WARMUP_RAMP = ((7, 10), (14, 15), (21, 20), (28, 25))  # (through day N, cap)
+WARMUP_STEADY_CAP = 30
+# Wins before this date belong to the old pipeline (one 2026-10-02 test).
+WARMUP_EPOCH = "2026-11-07T00:00:00+00:00"
+
+
+def _is_test_send(meta: dict) -> bool:
+    return bool((meta or {}).get("test_send"))
+
+
+def warmup_start(db):
+    """UTC date of the first real (non-test) prospect send, or None."""
+    from datetime import datetime
+
+    override = os.environ.get("MARKETING_WARMUP_START")
+    if override:
+        return datetime.fromisoformat(override).date()
+    rows = (
+        db.table("audit_log")
+        .select("created_at,metadata")
+        .eq("agent_id", "mkt-o5")
+        .eq("action", "sequence_send")
+        .eq("outcome", "win")
+        .gte("created_at", WARMUP_EPOCH)
+        .order("created_at")
+        .execute()
+        .data
+        or []
+    )
+    for row in rows:
+        if not _is_test_send(row.get("metadata") or {}):
+            return datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00")).date()
+    return None
+
+
+def warmup_daily_cap(db, today=None) -> int:
+    """Today's warmup cap. Day 1 is the first real send's date; before any
+    real send it is day 1."""
+    from datetime import datetime, timezone
+
+    today = today or datetime.now(timezone.utc).date()
+    start = warmup_start(db)
+    day = 1 if start is None else (today - start).days + 1
+    for through_day, cap in WARMUP_RAMP:
+        if day <= through_day:
+            return cap
+    return WARMUP_STEADY_CAP
+
+
+def effective_daily_cap(db) -> int:
+    """The cap the sender enforces: the warmup ramp, never above the env ceiling."""
+    return min(daily_send_cap(), warmup_daily_cap(db))
+
+
 # ── Warmup gates (Kelvin's decision 3b/3c, 2026-10-01) ───────────────────
 #
 # 3b: "risky" (catch-all) addresses MAY now route to outbound email, but

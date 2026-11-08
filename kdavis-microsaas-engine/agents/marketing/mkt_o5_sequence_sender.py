@@ -44,6 +44,7 @@ from core.email_compliance import (
     append_compliance_footer,
     build_list_unsubscribe_headers,
     daily_send_cap,
+    effective_daily_cap,
     is_suppressed,
     risky_send_cap,
     risky_sends_today,
@@ -109,13 +110,32 @@ def _build_send_payload(to_email: str, subject: str, body: str) -> dict:
     return payload
 
 
-def _send_email(resend_client, to_email: str, subject: str, body: str) -> None:
+def _send_email(resend_client, to_email: str, subject: str, body: str) -> Optional[str]:
+    """Send, and return Resend's message id (recorded on the win audit row so
+    a send can be traced to Resend's own logs and to a later bounce event)."""
     payload = _build_send_payload(to_email, subject, body)
     if resend_client is not None:
-        resend_client.Emails.send(payload)
-        return
-    resend.api_key = os.environ["RESEND_API_KEY"]
-    resend.Emails.send(payload)
+        resp = resend_client.Emails.send(payload)
+    else:
+        resend.api_key = os.environ["RESEND_API_KEY"]
+        resp = resend.Emails.send(payload)
+    if isinstance(resp, dict):
+        return resp.get("id")
+    return getattr(resp, "id", None)
+
+
+def _win_metadata(seq: dict, lead: dict, touch: int, resend_id: Optional[str]) -> dict:
+    """What a win row records. email_grade feeds risky_sends_today (which read
+    it from rows that never carried it until 2026-11-07); test_send keeps the
+    pipeline test to Kelvin's own inbox from starting the warmup clock."""
+    kelvin = (os.environ.get("KELVIN_EMAIL") or "").strip().lower()
+    return {
+        "sequence_id": seq["id"],
+        "touch": touch,
+        "resend_id": resend_id,
+        "email_grade": lead.get("email_grade"),
+        "test_send": bool(kelvin) and (lead.get("email") or "").strip().lower() == kelvin,
+    }
 
 
 def _get_active_product_ids(db) -> set:
@@ -316,7 +336,7 @@ def run_send_touch_1(supabase_client: Optional[Any] = None, resend_client: Optio
         return {"sent": 0, "failed": [], "skipped": [], "paused": pause_reason}
 
     active_product_ids = _get_active_product_ids(db)
-    cap = daily_send_cap()
+    cap = effective_daily_cap(db)
     sent_count = sends_today(db)
     risky_budget_left = max(0, risky_send_cap() - risky_sends_today(db))
 
@@ -371,7 +391,7 @@ def run_send_touch_1(supabase_client: Optional[Any] = None, resend_client: Optio
                 if not subject:
                     subject = f"Quick question, {first_name}".strip() if first_name else "Quick question"
                 body = append_compliance_footer(DataSanitizationShield.clean(seq["touch_1"]), lead["email"])
-                _send_email(resend_client, lead["email"], subject, body)
+                resend_id_1 = _send_email(resend_client, lead["email"], subject, body)
                 if lead.get("email_grade") == "risky":
                     risky_budget_left -= 1
             except Exception:
@@ -385,7 +405,7 @@ def run_send_touch_1(supabase_client: Optional[Any] = None, resend_client: Optio
             _log_outreach_touch(db, seq, touch=1)
             sent += 1
             sent_count += 1
-            _write_audit(db, "win", seq["product_id"], {"sequence_id": seq["id"], "touch": 1})
+            _write_audit(db, "win", seq["product_id"], _win_metadata(seq, lead, 1, resend_id_1))
         except Exception as exc:
             failed.append(seq["id"])
             _write_audit(db, "lose", seq.get("product_id", ""), {"sequence_id": seq["id"], "touch": 1, "error": str(exc)})
@@ -422,7 +442,7 @@ def run_send_touch_2(supabase_client: Optional[Any] = None, resend_client: Optio
         return {"sent": 0, "failed": [], "skipped": [], "paused": pause_reason}
 
     active_product_ids = _get_active_product_ids(db)
-    cap = daily_send_cap()
+    cap = effective_daily_cap(db)
     sent_count = sends_today(db)
     risky_budget_left = max(0, risky_send_cap() - risky_sends_today(db))
 
@@ -472,7 +492,7 @@ def run_send_touch_2(supabase_client: Optional[Any] = None, resend_client: Optio
                 first_name = lead.get("first_name") or ""
                 subject = f"Following up, {first_name}".strip() if first_name else "Following up"
                 body = append_compliance_footer(DataSanitizationShield.clean(seq["touch_2"]), lead["email"])
-                _send_email(resend_client, lead["email"], subject, body)
+                resend_id_2 = _send_email(resend_client, lead["email"], subject, body)
                 if lead.get("email_grade") == "risky":
                     risky_budget_left -= 1
             except Exception:
@@ -486,7 +506,7 @@ def run_send_touch_2(supabase_client: Optional[Any] = None, resend_client: Optio
             _log_outreach_touch(db, seq, touch=2)
             sent += 1
             sent_count += 1
-            _write_audit(db, "win", seq["product_id"], {"sequence_id": seq["id"], "touch": 2})
+            _write_audit(db, "win", seq["product_id"], _win_metadata(seq, lead, 2, resend_id_2))
         except Exception as exc:
             failed.append(seq["id"])
             _write_audit(db, "lose", seq.get("product_id", ""), {"sequence_id": seq["id"], "touch": 2, "error": str(exc)})
