@@ -215,6 +215,8 @@ KNOWN_COMPETITOR_STEMS = frozenset({
     "sparksoftcorp", "sparksoftcorporation",
     # AWS/cloud consultancies seen in live runs (2026-11-08).
     "rearc", "onica", "trek10", "clearscale", "nclouds", "logicworks", "cloudticity",
+    # Tech recruiting agencies whose names carry no staffing/recruiting word.
+    "onhires", "hired", "triplebyte", "vettery", "hiringlab",
 })
 
 
@@ -247,11 +249,33 @@ def is_aggregator_domain(domain: Optional[str]) -> bool:
     return d in AGGREGATOR_DOMAINS or reg in AGGREGATOR_DOMAINS or reg.startswith("builtin")
 
 
+# Resold second-level "domains" (CentralNic and similar): anyone can buy
+# tubitv.it.com, so a company resolved onto one is almost certainly the
+# wrong domain -- and an email pattern guessed on it goes to a stranger.
+# Seen live 2026-11-08: Tubi resolved to tubitv.it.com instead of tubitv.com.
+RESOLD_SLD_SUFFIXES = (
+    "it.com", "us.com", "uk.com", "eu.com", "de.com", "br.com", "cn.com", "jpn.com", "za.com",
+    "sa.com", "ru.com", "gb.net", "uk.net", "us.org", "in.net", "mex.com", "ae.org",
+)
+
+
+def resold_sld(domain: Optional[str]) -> Optional[str]:
+    """The resold suffix `domain` sits under, or None."""
+    host = (domain or "").strip().lower().split("//")[-1].split("/")[0].split("@")[-1].strip(".")
+    for suffix in RESOLD_SLD_SUFFIXES:
+        if host.endswith("." + suffix):
+            return suffix
+    return None
+
+
 def company_block_reason(company: Optional[str], domain: Optional[str]) -> Optional[str]:
     """Why this company may never be a lead, or None. Name + domain only."""
     reg = registrable_domain(domain)
     if not reg:
         return "no resolved company domain"
+    sld = resold_sld(domain)
+    if sld:
+        return f"unverifiable_resold_domain:{sld}"
     if is_aggregator_domain(domain):
         return f"aggregator_or_ats_domain:{reg}"
     stem = reg.split(".", 1)[0].replace("-", "")

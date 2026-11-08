@@ -42,6 +42,7 @@ def test_job_boards_and_ats_hosts_are_never_the_company(domain):
     ("BlueRock Managed Services", "bluerock.io", "competitor_name"),
     ("Stafford Gray", "staffordgray.com", "competitor"),
     ("Rearc", "rearc.io", "competitor"),
+    ("Onhires", "onhires.com", "competitor"),
 ])
 def test_competitors_and_excluded_employers_are_rejected(company, domain, expect):
     assert company_block_reason(company, domain).startswith(expect)
@@ -118,3 +119,14 @@ class TestSendPathEnforcesTheRule:
         from agents.marketing.lead_qualification import email_may_route_outbound
         assert email_may_route_outbound("valid")
         assert not email_may_route_outbound("risky")
+
+
+@pytest.mark.parametrize("domain", ["tubitv.it.com", "acme.us.com", "www.foo.uk.com", "bar.gb.net"])
+def test_resold_second_level_domains_are_not_a_company_domain(domain):
+    assert company_block_reason("Tubitv", domain).startswith("unverifiable_resold_domain")
+
+
+@pytest.mark.parametrize("domain", ["tubitv.com", "acme.co.uk", "deloitte.it", "united.com"])
+def test_ordinary_domains_are_not_mistaken_for_resold_ones(domain):
+    r = company_block_reason("Northwind", domain)
+    assert r is None or not r.startswith("unverifiable_resold_domain")
