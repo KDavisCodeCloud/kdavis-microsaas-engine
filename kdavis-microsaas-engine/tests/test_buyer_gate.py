@@ -41,6 +41,7 @@ def test_job_boards_and_ats_hosts_are_never_the_company(domain):
     ("Nimbus Cloud Consulting", "nimbuscc.io", "competitor_name"),
     ("BlueRock Managed Services", "bluerock.io", "competitor_name"),
     ("Stafford Gray", "staffordgray.com", "competitor"),
+    ("Rearc", "rearc.io", "competitor"),
 ])
 def test_competitors_and_excluded_employers_are_rejected(company, domain, expect):
     assert company_block_reason(company, domain).startswith(expect)

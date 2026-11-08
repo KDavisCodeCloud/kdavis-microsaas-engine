@@ -213,6 +213,8 @@ KNOWN_COMPETITOR_STEMS = frozenset({
     "jobot", "harnham", "hays", "adecco", "manpower", "experis", "modis", "akkodis",
     "nisum", "bairesdev", "softserve", "luxoft", "n-ix", "itransition", "scnsoft",
     "sparksoftcorp", "sparksoftcorporation",
+    # AWS/cloud consultancies seen in live runs (2026-11-08).
+    "rearc", "onica", "trek10", "clearscale", "nclouds", "logicworks", "cloudticity",
 })
 
 
