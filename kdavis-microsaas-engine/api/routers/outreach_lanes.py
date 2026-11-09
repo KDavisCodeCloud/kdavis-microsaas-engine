@@ -13,6 +13,8 @@ to read-only; these endpoints back the four lanes that replace it:
                         subtly different approval path gets born)
   (c) Ready to Paste   GET  /marketing/outreach/ready-to-paste
                        POST /marketing/outreach/ready-to-paste/{id}/mark
+  Email in flight      GET  /marketing/outreach/sequences/in-flight
+                       POST /marketing/outreach/sequences/{id}/replied
   (d) Conversations    GET  /marketing/outreach/conversations
                        POST /marketing/outreach/conversations/{lead_id}/stage
 
@@ -432,6 +434,41 @@ async def mark_paste_event(
         return {"sequence_id": sequence_id, "event": "accepted", "recorded": note}
 
     return await _record_reply(db, seq, source="ready_to_paste")
+
+
+# Email sequences MKT-O5 is still working through: approved and waiting for
+# touch_1, or with touch_2 / touch_3 still due. Every one of these will send
+# again unless a reply is recorded, which is what the lane below is for.
+IN_FLIGHT_STATUSES = ("approved_hitl", "touch_1_sending", "touch_1_sent",
+                      "touch_2_sending", "touch_2_sent", "touch_3_sending")
+
+
+@router.get("/sequences/in-flight")
+async def list_in_flight_sequences(
+    limit: int = 100,
+    lane: Optional[str] = None,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Email sequences with touches still to send (2026-11-09).
+
+    The dashboard surface for "Mark replied": replies land in Kelvin's inbox,
+    which this service cannot read, so each card here carries the button that
+    stops the remaining touches. Read-only; the stop is POST
+    /sequences/{id}/replied.
+    """
+    require_marketing_api_key(authorization)
+    db = get_supabase()
+    seqs = (scope_to_lane(db.table("mse_dm_sequences").select("*"), lane)
+            .in_("status", list(IN_FLIGHT_STATUSES))
+            .order("created_at", desc=True).limit(limit).execute().data or [])
+    seqs = [x for x in seqs if in_lane(x.get("product_id"), lane)]
+    products = _products(db)
+    cards = []
+    for seq in seqs:
+        card = _card(db, seq, products)
+        card["sent_at"] = {k: seq.get(f"{k}_sent_at") for k in ("touch_1", "touch_2", "touch_3")}
+        cards.append(card)
+    return {"sequences": cards, "count": len(cards)}
 
 
 @router.post("/sequences/{sequence_id}/replied")

@@ -154,6 +154,32 @@ def test_marking_replied_stops_the_sequence_and_opens_a_conversation(fake_db, mo
     assert opens, "a reply must open a conversation"
 
 
+def test_in_flight_lists_only_email_sequences_with_touches_due(fake_db, monkeypatch):
+    monkeypatch.setattr(lanes, "get_supabase", lambda: fake_db)
+    _seed(fake_db, seq_status="touch_1_sent")
+    fake_db.responses["mse_dm_sequences"][0]["touch_1_sent_at"] = "2026-11-09T15:00:00+00:00"
+    body = client.get("/marketing/outreach/sequences/in-flight", headers=AUTH).json()
+    assert body["count"] == 1
+    card = body["sequences"][0]
+    assert card["sequence_id"] == "seq-1"
+    assert card["sent_at"]["touch_1"] == "2026-11-09T15:00:00+00:00"
+    assert card["sent_at"]["touch_2"] is None
+    q = [c for c in fake_db.executed if c.table_name == "mse_dm_sequences"][0]
+    status_filter = [f for f in q._filters if f[0] == "status"][0]
+    assert "touch_2_sent" in status_filter[1] and "approved_hitl" in status_filter[1]
+    assert "replied" not in status_filter[1] and "approved_manual" not in status_filter[1]
+
+
+def test_mark_replied_on_an_email_sequence_stops_it(fake_db, monkeypatch):
+    monkeypatch.setattr(lanes, "get_supabase", lambda: fake_db)
+    _seed(fake_db, seq_status="touch_2_sent")
+    fake_db.responses["mse_outreach_conversations"] = []
+    resp = client.post("/marketing/outreach/sequences/seq-1/replied", headers=AUTH)
+    assert resp.status_code == 200
+    assert any(c.table_name == "mse_dm_sequences" and (c._payload or {}).get("status") == "replied"
+               for c in fake_db.executed)
+
+
 def test_an_unknown_paste_event_is_rejected(fake_db, monkeypatch):
     monkeypatch.setattr(lanes, "get_supabase", lambda: fake_db)
     _seed(fake_db, seq_status="approved_manual")
@@ -256,6 +282,8 @@ def test_every_lane_endpoint_requires_auth():
         ("get", "/marketing/outreach/drafts", None),
         ("get", "/marketing/outreach/ready-to-paste", None),
         ("get", "/marketing/outreach/conversations", None),
+        ("get", "/marketing/outreach/sequences/in-flight", None),
+        ("post", "/marketing/outreach/sequences/x/replied", None),
         ("post", "/marketing/outreach/drafts/x/edit", {"touch_1": "a"}),
         ("post", "/marketing/outreach/ready-to-paste/x/mark", {"event": "sent"}),
         ("post", "/marketing/outreach/conversations/x/stage", {"stage": "replied"}),

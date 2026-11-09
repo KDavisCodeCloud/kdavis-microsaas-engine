@@ -346,11 +346,14 @@ routing) and the updated `test_mkt_li1_on_demand.py`.
 
 **Checks that don't exist yet.**
 
-- **The LinkedIn agent has no code-enforced invented-metric check.** Spelled-out and
-  vignette specifics ("four months", "2am") get through the prompt rule. MKT-O2's
-  `unsourced_metrics` could be ported, extended to number words.
-- **No dashboard button for "Mark replied"** on email sequences. The API exists; the CEO
-  dashboard Conversations lane needs the button.
+- ~~The LinkedIn agent has no code-enforced invented-metric check.~~ **Closed 2026-11-09**
+  (platform `agents/marketing/invented_metrics.py`). It catches digits, spelled-out numbers
+  with a unit ("four months") and clock times ("2am"). A failing draft is retried once with
+  the phrases named; if any survive, the post is flagged in `hitl_notes` and escalated to
+  Tier 3. It flags all five phrases in the 2026-11-08 samples.
+- ~~No dashboard button for "Mark replied".~~ **Closed 2026-11-09:** `GET
+  /marketing/outreach/sequences/in-flight` lists email sequences with touches still due, and
+  the Outreach page has an "Email in flight" lane with a **mark replied** button on each.
 - **No automatic reply detection.** That would need Resend inbound or mailbox access.
 
 **Other prompts not rewritten.**
