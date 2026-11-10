@@ -31,6 +31,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, field_validator
 
 from api.middleware.auth import require_marketing_api_key
+from core.company_conflicts import company_conflicts, conflict_block_reason
 from core.linkedin_urls import PROFILE_URL_HELP, is_profile_url
 from core.supabase_client import get_supabase
 
@@ -95,6 +96,9 @@ def _card(db, seq: dict, products: dict) -> dict:
     """
     lead = _lead_for(db, seq)
     name = " ".join(x for x in [lead.get("first_name"), lead.get("last_name")] if x).strip()
+    # One company, one product (2026-11-09): the same company's cards under
+    # other products, and the refusal once one of them is approved.
+    conflicts = company_conflicts(db, lead, seq.get("product_id"), products)
     return {
         "sequence_id": seq.get("id"),
         "status": seq.get("status"),
@@ -142,6 +146,8 @@ def _card(db, seq: dict, products: dict) -> dict:
         # the queue with a CTO and no URL, which would have left a human
         # searching LinkedIn by name with no way to confirm the right person.
         "blocked_reason": _approval_block_reason(lead),
+        "company_conflicts": conflicts,
+        "conflict_block_reason": conflict_block_reason(conflicts),
         "created_at": seq.get("created_at"),
     }
 
@@ -549,6 +555,7 @@ async def list_conversations(
         out.append({
             "conversation_id": c.get("id"),
             "lead_id": c.get("lead_id"),
+            "product_id": c.get("product_id"),
             "product": (products.get(c.get("product_id")) or {}).get("name"),
             "company": lead.get("company"),
             "contact": {"name": name or None, "title": lead.get("title"),

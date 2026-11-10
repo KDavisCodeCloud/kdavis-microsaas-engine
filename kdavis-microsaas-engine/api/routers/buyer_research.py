@@ -114,12 +114,20 @@ async def list_buyer_research_tasks(
     rows = order_partner_lane([r for r in rows if in_lane(r.get("product_id"), lane)
                                and r.get("status") != "rejected_wrong_icp"], lane, limit)
 
+    from api.routers.outreach_lanes import _products
+    from core.company_conflicts import company_conflicts
+    products = _products(db) if rows else {}
+
     tasks = []
     for r in rows:
         partner = bool(r.get("partner_type"))
         tasks.append({
             "lead_id": r["id"],
             "product_id": r.get("product_id"),
+            "product": (products.get(r.get("product_id")) or {}).get("name"),
+            # One company, one product (2026-11-09): shown on the task so the
+            # human does not research a buyer another product already claimed.
+            "company_conflicts": company_conflicts(db, r, r.get("product_id"), products),
             "headline": (f"Find the founder at {r.get('company')}" if partner
                          else f"Find the buyer at {r.get('company')}"),
             "source": r.get("source"),

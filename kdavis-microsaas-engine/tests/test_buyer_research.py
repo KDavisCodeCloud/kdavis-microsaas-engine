@@ -48,6 +48,13 @@ class FakeTable:
     def limit(self, *_a, **_k):
         return self
 
+    # Company-conflict lookup (2026-11-09); it re-checks matches in Python.
+    def ilike(self, *_a, **_k):
+        return self
+
+    def in_(self, *_a, **_k):
+        return self
+
     def maybe_single(self):
         self._single = True
         return self

@@ -106,6 +106,12 @@ class FakeQuery:
         self._filters.append((key, value))
         return self
 
+    def ilike(self, key, pattern):
+        """Recorded, not applied -- like .eq(). Callers re-check the match in
+        Python, which is what the tests exercise."""
+        self.calls.append(("ilike", key, pattern))
+        return self
+
     def in_(self, key, values):
         """PostgREST `in` filter. Recorded like the others AND actually
         applied to the seeded rows, because the one caller that needs it

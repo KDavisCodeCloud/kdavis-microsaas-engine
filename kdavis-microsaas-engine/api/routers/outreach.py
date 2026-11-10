@@ -154,7 +154,7 @@ async def approve_dm_sequence(sequence_id: str, body: ResolveSequence, request: 
     # matching lookup change.
     existing = (
         db.table("mse_dm_sequences")
-        .select("lead_source,lead_finder_lead_id")
+        .select("lead_source,lead_finder_lead_id,product_id")
         .eq("id", sequence_id)
         .eq("status", "pending_hitl")
         .maybe_single()
@@ -179,6 +179,19 @@ async def approve_dm_sequence(sequence_id: str, body: ResolveSequence, request: 
         blocked = _approval_block_reason((lead_row.data if lead_row else None) or {})
         if blocked:
             raise HTTPException(status_code=409, detail=blocked)
+
+    # ONE COMPANY, ONE PRODUCT (2026-11-09). Same reasoning as the URL gate:
+    # the dashboard greys the button out, this is what actually refuses it.
+    if lf_id:
+        from api.routers.outreach_lanes import _products
+        from core.company_conflicts import company_conflicts, conflict_block_reason
+        ident = (db.table("mse_leads").select("id,company,domain")
+                 .eq("id", lf_id).maybe_single().execute())
+        conflicts = company_conflicts(db, (ident.data if ident else None) or {},
+                                      existing.data.get("product_id"), _products(db))
+        claimed = conflict_block_reason(conflicts)
+        if claimed:
+            raise HTTPException(status_code=409, detail=claimed)
 
     new_status = _approval_target_status(db, lead_source, existing.data.get("lead_finder_lead_id"))
     now = datetime.now(timezone.utc)
