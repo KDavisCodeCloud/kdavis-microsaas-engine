@@ -535,13 +535,19 @@ async def _record_reply(db, seq: dict, *, source: str) -> dict:
 @router.get("/conversations")
 async def list_conversations(
     limit: int = 100,
+    lane: Optional[str] = None,
     authorization: Optional[str] = Header(default=None),
 ):
-    """Lane (d): everyone who replied, and how far it went."""
+    """Lane (d): everyone who replied, and how far it went.
+
+    ?lane=prospects|partners (2026-11-09): partners have their own tab, so a
+    partner's reply must not sit in the prospects' Conversations lane.
+    """
     require_marketing_api_key(authorization)
     db = get_supabase()
-    convs = (db.table("mse_outreach_conversations").select("*")
+    convs = (scope_to_lane(db.table("mse_outreach_conversations").select("*"), lane)
              .order("updated_at", desc=True).limit(limit).execute().data or [])
+    convs = [c for c in convs if in_lane(c.get("product_id"), lane)]
     products = _products(db)
     out = []
     for c in convs:

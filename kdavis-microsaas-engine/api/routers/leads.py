@@ -299,8 +299,11 @@ async def get_outreach_summary_counters(authorization: Optional[str] = Header(de
         "replies_this_week": c["replies_this_week"],
         "parked_awaiting_contact": c["parked_awaiting_contact"],
         "window_start": c["window_start"],
+        # sends_today here = partner notes marked sent today (2026-11-09), for
+        # the Partners tab's daily block. Manual LinkedIn, so no send cap.
         "partners": {k: pc[k] for k in ("awaiting_buyer", "awaiting_approval", "ready_to_paste",
-                                         "replies_this_week", "parked_awaiting_contact")},
+                                         "replies_this_week", "parked_awaiting_contact",
+                                         "sends_today")},
         "notes": {
             "replies_this_week": ("mse_outreach_conversations.replied_at within 7 days -- "
                                   "marked by hand in the Conversations lane"),

@@ -545,3 +545,24 @@ def test_outreach_summary_prefix_is_exempt_from_tenant_context():
     import inspect
     source = inspect.getsource(tenant_context_middleware)
     assert "/marketing/outreach" in source
+
+
+def test_outreach_summary_counts_partner_notes_sent_today(fake_db, monkeypatch):
+    """The Partners tab's daily block (2026-11-09): notes marked sent today,
+    counted apart from the prospects' email sends."""
+    from datetime import datetime, timedelta, timezone
+    from agents.marketing.partner_sourcing import PARTNERS_PRODUCT_ID
+    monkeypatch.setattr(leads_router, "get_supabase", lambda: fake_db)
+    today = datetime.now(timezone.utc).isoformat()
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    fake_db.responses["mse_leads"] = []
+    fake_db.responses["mse_outreach_conversations"] = []
+    fake_db.responses["mse_dm_sequences"] = [
+        {"id": "p1", "product_id": PARTNERS_PRODUCT_ID, "status": "approved_manual", "touch_1_sent_at": today},
+        {"id": "p2", "product_id": PARTNERS_PRODUCT_ID, "status": "approved_manual", "touch_1_sent_at": today},
+        {"id": "p3", "product_id": PARTNERS_PRODUCT_ID, "status": "approved_manual", "touch_1_sent_at": yesterday},
+        {"id": "c1", "product_id": "consulting", "status": "touch_1_sent", "touch_1_sent_at": today},
+    ]
+    body = client.get("/marketing/outreach/summary", headers=AUTH).json()
+    assert body["partners"]["sends_today"] == 2
+    assert body["sends_today"] == 1, "partner notes never count against the email cap"

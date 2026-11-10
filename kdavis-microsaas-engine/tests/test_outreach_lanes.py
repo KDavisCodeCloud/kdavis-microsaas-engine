@@ -411,3 +411,20 @@ def test_both_lanes_share_one_url_validator():
         "buyer_research still has its own copy of the regex"
     assert linkedin_urls.is_profile_url("https://www.linkedin.com/in/x")
     assert not linkedin_urls.is_profile_url("https://www.linkedin.com/company/x")
+
+
+def test_conversations_can_be_scoped_to_one_lane(fake_db, monkeypatch):
+    """Partners have their own tab (2026-11-09): a partner's reply must not
+    land in the prospects' Conversations lane, and vice versa."""
+    from agents.marketing.partner_sourcing import PARTNERS_PRODUCT_ID
+    monkeypatch.setattr(lanes, "get_supabase", lambda: fake_db)
+    fake_db.responses["mse_outreach_conversations"] = [
+        {"id": "c-pro", "product_id": "prod-1", "lead_id": None, "stage": "replied"},
+        {"id": "c-par", "product_id": PARTNERS_PRODUCT_ID, "lead_id": None, "stage": "replied"},
+    ]
+    fake_db.responses["mse_products"] = []
+    ids = lambda lane: [c["conversation_id"] for c in client.get(
+        f"/marketing/outreach/conversations?lane={lane}", headers=AUTH).json()["conversations"]]
+    assert ids("prospects") == ["c-pro"]
+    assert ids("partners") == ["c-par"]
+    assert len(client.get("/marketing/outreach/conversations", headers=AUTH).json()["conversations"]) == 2
