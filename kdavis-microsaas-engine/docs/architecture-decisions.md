@@ -72,3 +72,15 @@ Exit diligence document. Updated in the same commit as the decision it documents
 **Why:** Commingled Stripe revenue makes per-product MRR tracking unreliable, complicates acquisition due diligence (buyer wants clean product-specific revenue history), and creates webhook routing complexity at scale. A buyer acquiring one product must not inherit billing entanglements with other products.
 
 **Consequences:** Separate Stripe accounts require separate API keys in env config. Webhook endpoints are product-specific. Admin overhead is higher but acquisition cleanliness justifies it.
+
+---
+
+## ADR-007: Lead Sources Are Official Feeds; Brave Buys New Slugs Only
+**Date:** 2026-11-15
+**Status:** Active
+
+**Decision:** Lead discovery reads only official, documented feeds (ATS posting APIs for Greenhouse, Lever, Ashby, Workable and Recruitee; the HN Firebase API; SEC EDGAR's daily index and `primary_doc.xml`; the GitHub REST API). A source whose robots.txt disallows the access pattern is not used (SmartRecruiters' API, EDGAR `/cgi-bin`). Wellfound, LinkedIn and similar sites are never fetched; Wellfound is read only as Brave result titles. Known ATS slugs are re-read weekly for free. Brave is spent only on discovering new slugs (weekly `slug_discovery`), with per-source monthly allocations and a 300-query per-run cap. Buyer candidates from any source are suggestions: a contact is created only with an SMTP-`valid` email and a buyer-gate ALLOW title, and nothing sends without HITL.
+
+**Why:** Volume was capped by re-finding the same ~190 ATS URLs every week with the same queries, while the free cache was read 200 boards at a time. Buyer names were missing because only the scout's small Brave budget ever looked for them.
+
+**Consequences:** `docs/lead-sources/REPORT.md` holds the before/after. Cloud Decoded's 31-60-day posting downweight (2026-10-01) is superseded: roles open 30+ days rank higher. The 8am digest's live n8n node needs a 6-line paste to print per-source yield; the API already serves it.
