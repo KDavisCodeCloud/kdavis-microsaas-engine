@@ -237,6 +237,11 @@ def load_sources(db, now: Optional[datetime] = None) -> dict:
                   else domain)
     S["resend_domains"] = _cached("resend_domains", resend_domains)
 
+    def _yield():
+        from core.lead_source_yield import source_yield
+        return source_yield(db, now=now)
+    S["source_yield"] = _guard("source_yield", _yield)
+
     def _budget():
         from agents.marketing.brave_budget import check_budget
         return check_budget(db).as_dict()

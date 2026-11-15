@@ -99,12 +99,18 @@ LEAD_RUN_WINDOW_DAYS = 8  # weekly Sunday run, plus a day of slack
 # weekly pain-phrase rescan (2026-10-19) finds no companies at all. Both are
 # shown as a line on their desk (HN on Find, the rescan on Qualify) and turn
 # it blocked if their own latest run failed.
-SIDE_SOURCES = ("hn_thread", "pain_rescan")
+SIDE_SOURCES = ("hn_thread", "pain_rescan",
+                # Lead-sources brief (2026-11-15): jobs that find slugs, filings
+                # or buyers but write no leads themselves. Shown as lines, never
+                # judged as "the latest scout found 0 leads".
+                "ats_slug_discovery", "sec_form_d", "wellfound_signal", "buyer_resolver")
 # Sources scheduled monthly (agents/marketing/lead_schedule.py). A desk fed
 # only by these is judged against a month, not a week.
 MONTHLY_SOURCES = ("partner_signal", "vc_operating_partner", "hn_thread")
 MONTHLY_WINDOW_DAYS = 35
-SIDE_LABELS = {"hn_thread": "Hacker News scout", "pain_rescan": "Pain-phrase rescan"}
+SIDE_LABELS = {"hn_thread": "Hacker News scout", "pain_rescan": "Pain-phrase rescan",
+               "ats_slug_discovery": "ATS slug discovery", "sec_form_d": "SEC Form D",
+               "wellfound_signal": "Wellfound signal", "buyer_resolver": "Buyer resolver"}
 
 
 def _desk_runs(S, pid) -> list[dict]:
@@ -131,6 +137,16 @@ def _side_run(S, pid, source: str) -> tuple[Optional[str], bool]:
     f = r.get("funnel_stats") or {}
     if source == "pain_rescan":
         detail = f"{f.get('scanned', 0)} leads re-read, {f.get('newly_matched_leads', 0)} gained a pain phrase"
+    elif source == "ats_slug_discovery":
+        detail = f"{f.get('slugs_written', 0)} new ATS slugs from {f.get('queries', 0)} Brave queries"
+    elif source == "wellfound_signal":
+        detail = f"{f.get('queued', 0)} new ATS slugs from {f.get('names_found', 0)} company names"
+    elif source == "sec_form_d":
+        detail = (f"{f.get('filings_written', 0)} filings read, {f.get('leads_matched', 0)} leads matched, "
+                  f"{f.get('seed_tokens_queued', 0)} slugs seeded")
+    elif source == "buyer_resolver":
+        detail = (f"{f.get('auto_resolved', 0)} buyers auto-resolved, {f.get('prefilled', 0)} pre-filled, "
+                  f"{f.get('manual', 0)} still manual")
     else:
         detail = f"{r.get('leads_found') or 0} new leads"
     return f"{label} {_day(r.get('completed_at'))}: {detail}.", False
@@ -147,7 +163,24 @@ def _with_side(st: Status, S, pid, source: str) -> Status:
 
 
 def outbound_lead_run(S, pid, now) -> Status:
-    return _with_side(_lead_run(S, pid, now), S, pid, "hn_thread")
+    st = _lead_run(S, pid, now)
+    for source in ("hn_thread", "ats_slug_discovery", "wellfound_signal", "sec_form_d"):
+        st = _with_side(st, S, pid, source)
+    return _with_yield(st, S)
+
+
+def _with_yield(st: Status, S) -> Status:
+    """Step 1 card (Phase 7): per-source yield against the weekly target."""
+    y = S.get("source_yield")
+    if not isinstance(y, dict) or "total" not in y:
+        return st
+    t, tgt = y["total"], y["target"]
+    parts = ", ".join(f"{k} {v['qualified']}/{v['named_buyer']}/{v['verified_email']}"
+                      for k, v in (y.get("by_source") or {}).items())
+    st.evidence = (f"{st.evidence} This week: {t['qualified']} companies / {t['named_buyer']} named buyers / "
+                   f"{t['verified_email']} verified emails (target {tgt['qualified']}/{tgt['named_buyer']}/"
+                   f"{tgt['verified_email']}){': ' + parts if parts else ''}.")
+    return st
 
 
 def _lead_run(S, pid, now) -> Status:
@@ -220,6 +253,10 @@ def _counters(S, pid, now) -> dict:
 
 
 def outbound_find_buyer(S, pid, now) -> Status:
+    return _with_side(_find_buyer(S, pid, now), S, pid, "buyer_resolver")
+
+
+def _find_buyer(S, pid, now) -> Status:
     c = _counters(S, pid, now)
     if c["awaiting_buyer"]:
         return Status("waiting_on_you", f"{c['awaiting_buyer']} qualified companies have no named buyer.",

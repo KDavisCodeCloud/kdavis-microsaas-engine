@@ -304,11 +304,24 @@ async def get_outreach_summary_counters(authorization: Optional[str] = Header(de
         "partners": {k: pc[k] for k in ("awaiting_buyer", "awaiting_approval", "ready_to_paste",
                                          "replies_this_week", "parked_awaiting_contact",
                                          "sends_today")},
+        # Lead-sources Phase 7 (2026-11-15): per-source yield against the weekly
+        # target, for the 8am digest. Never fails the summary.
+        **_source_yield_fields(db),
         "notes": {
             "replies_this_week": ("mse_outreach_conversations.replied_at within 7 days -- "
                                   "marked by hand in the Conversations lane"),
         },
     }
+
+
+def _source_yield_fields(db) -> dict:
+    try:
+        from core.lead_source_yield import source_yield, yield_lines
+        y = source_yield(db)
+        return {"source_yield": y, "source_yield_lines": yield_lines(y)}
+    except Exception as exc:
+        log.error("[Outreach] source yield unavailable: %s", exc)
+        return {"source_yield": None, "source_yield_lines": [f"Lead source yield unavailable: {exc}"]}
 
 
 @router.get("/leads/weekly-summary")
