@@ -95,6 +95,7 @@ from agents.marketing.role_taxonomy import (
     CLOUD_DECODED_FRESHNESS,
     CONSULTING_FRESHNESS,
     FreshnessPolicy,
+    SIZE_PROXY_MAX_OPEN_ROLES,
     RoleTaxonomy,
     freshness_multiplier_for,
     size_proxy_in_band,
@@ -185,7 +186,12 @@ class FunnelStats:
     board_tokens_from_cache: int = 0
     boards_polled: int = 0
     boards_skipped_over_cap: int = 0
+    boards_skipped_oversize: int = 0
     boards_not_reached: int = 0
+    # Brave discovery queries this run was ALLOWED (None = the old split). 0
+    # when the weekly slug-discovery job has already spent the week's
+    # discovery budget (agents/marketing/slug_discovery.py).
+    discovery_budget: Optional[int] = None
     postings_returned: int = 0
     postings_title_matched: int = 0
     companies_considered: int = 0
@@ -232,11 +238,26 @@ class FunnelStats:
 
 # ── Step 1: board token discovery ────────────────────────────────────────
 
+# Read the whole cache, a page at a time (PostgREST caps a response at 1,000
+# rows). Until 2026-11-15 a run read only the 200 least-recently-fetched
+# tokens -- every run in the baseline reports board_tokens_from_cache=194 out
+# of 643 -- so two thirds of the free slugs were read once every ~3 weeks.
+CACHE_PAGE_SIZE = 1000
+CACHE_MAX_ROWS = 10_000
+# A board whose last read showed more open roles than the size proxy allows is
+# rejected on size every time (187 of 636 on 2026-11-15). It is re-read every
+# OVERSIZE_RECHECK_DAYS instead of weekly, in case the company shrinks.
+OVERSIZE_RECHECK_DAYS = 28
+
+
 def load_cached_board_refs(
     db,
     product_id: Optional[str] = None,
-    limit: int = 200,
+    limit: Optional[int] = None,
     prior_failures: Optional[dict[str, int]] = None,
+    *,
+    skip_stats: Optional[dict[str, int]] = None,
+    now: Optional[datetime] = None,
 ) -> list[BoardRef]:
     """Board tokens already known for this product. Costs ZERO Brave
     quota -- this is the whole point of the cache table. Boards that have
@@ -270,10 +291,7 @@ def load_cached_board_refs(
         # order the same arbitrary 200 came back every week while the rest --
         # including every token queue_board_tokens queued as "fetch next
         # run" -- were never read. Found 2026-10-18: 392 cached, 200 loaded.
-        rows = (db.table(BOARD_TOKEN_TABLE)
-                .select("provider,board_token,consecutive_failures")
-                .order("last_fetched_at", desc=False, nullsfirst=True)
-                .limit(limit).execute().data or [])
+        rows = _read_cache_rows(db, limit)
     except Exception as exc:
         # The cache is an optimisation. A missing table or a transient
         # read error must degrade to "discover from scratch", never abort
@@ -292,8 +310,48 @@ def load_cached_board_refs(
         prior_failures[ref.cache_key] = failures
         if failures >= MAX_CONSECUTIVE_BOARD_FAILURES:
             continue
+        if _recently_oversize(r, now):
+            if skip_stats is not None:
+                skip_stats["oversize"] = skip_stats.get("oversize", 0) + 1
+            continue
         out.append(ref)
     return out
+
+
+def _read_cache_rows(db, limit: Optional[int]) -> list[dict]:
+    """Every cache row, least-recently-fetched first, paged. `limit` keeps the
+    old bounded read available to callers that want one."""
+    cap = limit if limit is not None else CACHE_MAX_ROWS
+    rows: list[dict] = []
+    while len(rows) < cap:
+        q = (db.table(BOARD_TOKEN_TABLE)
+             .select("provider,board_token,consecutive_failures,open_role_count,last_fetched_at")
+             .order("last_fetched_at", desc=False, nullsfirst=True))
+        size = min(CACHE_PAGE_SIZE, cap - len(rows))
+        if hasattr(q, "range"):
+            page = q.range(len(rows), len(rows) + size - 1).execute().data or []
+        else:  # test doubles without .range
+            page = q.limit(size).execute().data or []
+            rows.extend(page)
+            break
+        rows.extend(page)
+        if len(page) < size:
+            break
+    return rows
+
+
+def _recently_oversize(row: dict, now: Optional[datetime]) -> bool:
+    count = row.get("open_role_count")
+    fetched = row.get("last_fetched_at")
+    if count is None or count <= SIZE_PROXY_MAX_OPEN_ROLES or not fetched:
+        return False
+    try:
+        when = datetime.fromisoformat(str(fetched).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return ((now or datetime.now(timezone.utc)) - when).days < OVERSIZE_RECHECK_DAYS
 
 
 def discover_board_refs(
@@ -998,6 +1056,7 @@ def find_company_first_signals(
     stats: Optional[FunnelStats] = None,
     pain: Optional[PainConfig] = None,
     portfolio_index: Optional["PortfolioIndex"] = None,
+    discovery_queries: Optional[int] = None,
 ) -> tuple[list[dict], FunnelStats]:
     """
     The whole v2 pipeline for one product. Returns (qualified rows,
@@ -1053,18 +1112,26 @@ def find_company_first_signals(
     remaining = max(0, max_queries - domain_allowance)
     dm_budget = int(remaining * DECISION_MAKER_BUDGET_SHARE) if lookup_decision_makers else 0
     discovery_budget = remaining - dm_budget
+    if discovery_queries is not None:
+        # Discovery has its own weekly job and budget since 2026-11-15; a
+        # scout that is told 0 spends Brave only on domains and buyers.
+        discovery_budget = max(0, min(discovery_budget, discovery_queries))
+    stats.discovery_budget = discovery_budget
 
     # Step 1: cache first (free), then discovery (paid).
     refs: dict[str, BoardRef] = {}
     prior_failures: dict[str, int] = {}
     if db is not None:
-        for ref in load_cached_board_refs(db, product_id, prior_failures=prior_failures):
+        skipped: dict[str, int] = {}
+        for ref in load_cached_board_refs(db, product_id, prior_failures=prior_failures, skip_stats=skipped):
             refs[ref.cache_key] = ref
         stats.board_tokens_from_cache = len(refs)
+        stats.boards_skipped_oversize = skipped.get("oversize", 0)
     cached_keys = set(refs)
 
-    for ref in discover_board_refs(scraper, keywords, max_queries=discovery_budget, stats=stats, sleep=sleep):
-        refs.setdefault(ref.cache_key, ref)
+    if discovery_budget > 0:
+        for ref in discover_board_refs(scraper, keywords, max_queries=discovery_budget, stats=stats, sleep=sleep):
+            refs.setdefault(ref.cache_key, ref)
 
     if not refs:
         log.warning("[CompanyFirst] no ATS board tokens discovered or cached -- nothing to expand")

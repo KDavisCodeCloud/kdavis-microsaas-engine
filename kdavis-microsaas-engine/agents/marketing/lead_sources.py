@@ -109,9 +109,10 @@ def _run(db, product_id: str, source: str, run_id: Optional[str],
             "leads_written": len(inserted), "funnel_stats": funnel}
 
 
-def _record_brave(db, n: int) -> None:
+def _record_brave(db, n: int, source: str = "partner_scout") -> None:
     if n:
-        _emit(db, "brave_search_queries_used", {"month": date.today().isoformat()[:7], "count": n})
+        _emit(db, "brave_search_queries_used", {"month": date.today().isoformat()[:7], "count": n,
+                                                "source": source})
 
 
 # ── Hacker News ──────────────────────────────────────────────────────────

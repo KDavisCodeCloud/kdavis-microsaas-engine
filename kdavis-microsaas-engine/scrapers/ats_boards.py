@@ -24,6 +24,16 @@ Endpoints used (all official, public, documented, no auth, no scraping):
   Lever       GET api.lever.co/v0/postings/{token}?mode=json
   Ashby       GET api.ashbyhq.com/posting-api/job-board/{token}
   Workable    GET apply.workable.com/api/v1/widget/accounts/{token}?details=true
+  Recruitee   GET {token}.recruitee.com/api/offers/            (added 2026-11-15)
+
+NOT SmartRecruiters (checked 2026-11-15): api.smartrecruiters.com/robots.txt
+is "User-agent: * / Disallow: /" with an Allow only for LinkedInBot. The
+lead-sources brief makes a robots disallow a hard stop, so the provider is
+deliberately absent rather than half-supported.
+
+Recruitee boards live on per-company subdomains, and robots.txt there is the
+company's own, so it is read (and cached) before the first fetch of each
+host -- a company that disallows /api/ is skipped, not fetched.
 
 These are the same JSON feeds each vendor publishes for embedding a board
 on a customer's own careers page. No HTML parsing, no robots.txt question
@@ -37,11 +47,14 @@ import html
 import logging
 import random
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Callable, Iterable, Optional
 from urllib.parse import urlparse
+from urllib.robotparser import RobotFileParser
 
 import httpx
 
@@ -55,6 +68,7 @@ ATS_TIMEOUT_SECONDS = 20
 # not a 20-300 headcount prospect -- stop reading rather than ingest 800
 # roles from a company that is out of ICP anyway.
 MAX_POSTINGS_PER_BOARD = 120
+ATS_USER_AGENT = "THD-Agentic-Systems/1.0 (+https://thdstack.com)"
 
 
 # ── Board token discovery ────────────────────────────────────────────────
@@ -75,7 +89,22 @@ ATS_HOST_MAP: dict[str, tuple[str, int]] = {
     "apply.workable.com": ("workable", 0),
 }
 
-PROVIDERS = ("greenhouse", "lever", "ashby", "workable")
+# Providers whose token is the SUBDOMAIN, not a path segment:
+#   bunq.recruitee.com/o/security-engineer-3  -> recruitee:bunq
+SUBDOMAIN_ATS: dict[str, str] = {
+    "recruitee.com": "recruitee",
+}
+# Subdomains of those hosts that are the vendor's own site, never a company.
+_RESERVED_SUBDOMAINS = frozenset({
+    "www", "app", "api", "blog", "support", "help", "status", "docs", "careers",
+    "jobs", "mail", "cdn", "static", "assets", "auth", "login", "partners",
+})
+
+PROVIDERS = ("greenhouse", "lever", "ashby", "workable", "recruitee")
+
+# Providers whose board host is the company's own subdomain, so its robots.txt
+# is the company's and must be honoured per host (see module docstring).
+ROBOTS_CHECKED_PROVIDERS = frozenset({"recruitee"})
 
 # Path segments that are never a company token.
 _RESERVED_TOKENS = frozenset({
@@ -109,6 +138,12 @@ def board_ref_from_url(url: str) -> Optional[BoardRef]:
         return None
     parsed = urlparse(url if "//" in url else f"https://{url}")
     host = (parsed.netloc or "").lower().replace("www.", "")
+    for suffix, provider in SUBDOMAIN_ATS.items():
+        if host.endswith("." + suffix):
+            sub = host[: -len(suffix) - 1]
+            if "." in sub or sub in _RESERVED_SUBDOMAINS or not _TOKEN_RE.match(sub):
+                return None
+            return BoardRef(provider=provider, token=sub)
     mapping = ATS_HOST_MAP.get(host)
     if not mapping:
         return None
@@ -154,6 +189,7 @@ class AtsPosting:
         return (date.today() - self.posted_at).days
 
 
+_CAREERS_SUBDOMAIN = re.compile(r"^(?:careers?|jobs|apply|hiring|work)\.(?=[^.]+\.[^.]+)")
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 
@@ -197,7 +233,8 @@ def _parse_epoch_or_iso(value: Any) -> Optional[date]:
         except (OverflowError, OSError, ValueError):
             return None
     if isinstance(value, str):
-        raw = value.strip().replace("Z", "+00:00")
+        # Recruitee: "2026-11-11 13:21:40 UTC".
+        raw = re.sub(r"\s+UTC$", "+00:00", value.strip()).replace("Z", "+00:00")
         for parse in (datetime.fromisoformat, lambda s: datetime.strptime(s, "%Y-%m-%d")):
             try:
                 return parse(raw).date()
@@ -303,11 +340,34 @@ def _normalise_workable(payload: dict, ref: BoardRef) -> tuple[Optional[str], li
     return company, out
 
 
+def _normalise_recruitee(payload: dict, ref: BoardRef) -> tuple[Optional[str], list[AtsPosting]]:
+    offers = payload.get("offers") or []
+    company = next((_first_str(o.get("company_name")) for o in offers if _first_str(o.get("company_name"))), None)
+    out = []
+    for job in offers[:MAX_POSTINGS_PER_BOARD]:
+        if job.get("status") not in (None, "published"):
+            continue
+        desc = " ".join(x for x in (job.get("description"), job.get("requirements")) if isinstance(x, str))
+        out.append(AtsPosting(
+            provider="recruitee", board_token=ref.token, company=company,
+            title=_first_str(job.get("title")),
+            url=_first_str(job.get("careers_url"), job.get("careers_apply_url")),
+            location=_location_value(job.get("location")) or _location_value(
+                {"city": job.get("city"), "country": job.get("country")}),
+            # published_at is when the role went live, so it is the posting
+            # age; updated_at moves on every edit.
+            posted_at=_parse_epoch_or_iso(job.get("published_at") or job.get("created_at")),
+            description_text=_strip_html(desc),
+        ))
+    return company, out
+
+
 _PROVIDER_ENDPOINTS: dict[str, Callable[[str], str]] = {
     "greenhouse": lambda t: f"https://boards-api.greenhouse.io/v1/boards/{t}/jobs?content=true",
     "lever": lambda t: f"https://api.lever.co/v0/postings/{t}?mode=json",
     "ashby": lambda t: f"https://api.ashbyhq.com/posting-api/job-board/{t}",
     "workable": lambda t: f"https://apply.workable.com/api/v1/widget/accounts/{t}?details=true",
+    "recruitee": lambda t: f"https://{t}.recruitee.com/api/offers/",
 }
 
 _PROVIDER_NORMALISERS: dict[str, Callable[[Any, BoardRef], tuple[Optional[str], list[AtsPosting]]]] = {
@@ -315,6 +375,7 @@ _PROVIDER_NORMALISERS: dict[str, Callable[[Any, BoardRef], tuple[Optional[str], 
     "lever": _normalise_lever,
     "ashby": _normalise_ashby,
     "workable": _normalise_workable,
+    "recruitee": _normalise_recruitee,
 }
 
 
@@ -363,6 +424,10 @@ class AtsBoardClient:
         self._http_get = http_get or httpx.get
         self._sleep = sleep if sleep is not None else time.sleep
         self.stats = AtsStats()
+        # fetch_boards runs one worker per provider (2026-11-15), so every
+        # write to stats / board_status goes through this lock.
+        self._lock = threading.Lock()
+        self._robots: dict[str, Optional[RobotFileParser]] = {}
         # Per-board outcome, keyed by BoardRef.cache_key: "ok" | "empty" |
         # "failed". The caller needs these THREE values distinguished to
         # maintain the token cache correctly -- a 404 board should stop
@@ -378,40 +443,36 @@ class AtsBoardClient:
         endpoint_builder = _PROVIDER_ENDPOINTS.get(ref.provider)
         if not endpoint_builder:
             log.warning("ATS: unknown provider %r -- skipping", ref.provider)
-            self.stats.boards_failed += 1
-            self.board_status[ref.cache_key] = "failed"
+            self._fail(ref, None)
             return []
 
         url = endpoint_builder(ref.token)
+        if ref.provider in ROBOTS_CHECKED_PROVIDERS and not self._robots_allow(url):
+            log.info("ATS: %s board %r disallowed by robots.txt -- skipping", ref.provider, ref.token)
+            self._fail(ref, "robots_disallowed")
+            return []
         try:
             response = self._http_get(
                 url,
                 timeout=ATS_TIMEOUT_SECONDS,
-                headers={"Accept": "application/json", "User-Agent": "THD-Agentic-Systems/1.0 (+https://thdstack.com)"},
+                headers={"Accept": "application/json", "User-Agent": ATS_USER_AGENT},
             )
         except Exception as exc:  # network/timeout -- one board, not the run
             log.warning("ATS: %s board %r request failed: %s", ref.provider, ref.token, exc)
-            self.stats.boards_failed += 1
-            self.stats.http_errors["request_error"] = self.stats.http_errors.get("request_error", 0) + 1
-            self.board_status[ref.cache_key] = "failed"
+            self._fail(ref, "request_error")
             return []
 
         status = getattr(response, "status_code", 0)
         if status != 200:
             log.info("ATS: %s board %r returned HTTP %s", ref.provider, ref.token, status)
-            self.stats.boards_failed += 1
-            key = f"http_{status}"
-            self.stats.http_errors[key] = self.stats.http_errors.get(key, 0) + 1
-            self.board_status[ref.cache_key] = "failed"
+            self._fail(ref, f"http_{status}")
             return []
 
         try:
             payload = response.json()
         except Exception as exc:
             log.warning("ATS: %s board %r returned non-JSON: %s", ref.provider, ref.token, exc)
-            self.stats.boards_failed += 1
-            self.stats.http_errors["bad_json"] = self.stats.http_errors.get("bad_json", 0) + 1
-            self.board_status[ref.cache_key] = "failed"
+            self._fail(ref, "bad_json")
             return []
 
         company, postings = _PROVIDER_NORMALISERS[ref.provider](payload, ref)
@@ -420,12 +481,49 @@ class AtsBoardClient:
             if not p.company:
                 p.company = fallback_company
 
-        self.stats.boards_fetched += 1
-        self.stats.postings_returned += len(postings)
-        if not postings:
-            self.stats.boards_empty += 1
-        self.board_status[ref.cache_key] = "ok" if postings else "empty"
+        with self._lock:
+            self.stats.boards_fetched += 1
+            self.stats.postings_returned += len(postings)
+            if not postings:
+                self.stats.boards_empty += 1
+            self.board_status[ref.cache_key] = "ok" if postings else "empty"
         return postings
+
+    def _fail(self, ref: BoardRef, error_key: Optional[str]) -> None:
+        with self._lock:
+            self.stats.boards_failed += 1
+            if error_key:
+                self.stats.http_errors[error_key] = self.stats.http_errors.get(error_key, 0) + 1
+            self.board_status[ref.cache_key] = "failed"
+
+    def _robots_allow(self, url: str) -> bool:
+        """robots.txt for this URL's host, read once per host per client.
+
+        An unreadable or missing robots.txt (404, timeout) is "no rules",
+        which is what robots.txt itself specifies; a 401/403 on robots.txt
+        is treated as disallow-all, the conservative reading."""
+        parsed = urlparse(url)
+        host = parsed.netloc
+        if host not in self._robots:
+            parser: Optional[RobotFileParser] = None
+            try:
+                r = self._http_get(f"{parsed.scheme}://{host}/robots.txt", timeout=ATS_TIMEOUT_SECONDS,
+                                   headers={"User-Agent": ATS_USER_AGENT})
+                code = getattr(r, "status_code", 0)
+                parser = RobotFileParser()
+                if code in (401, 403):
+                    parser.disallow_all = True
+                elif code == 200:
+                    parser.parse((getattr(r, "text", "") or "").splitlines())
+                else:
+                    parser.allow_all = True
+            except Exception as exc:
+                log.info("ATS: robots.txt for %s unreadable (%s) -- treating as no rules", host, exc)
+                parser = RobotFileParser()
+                parser.allow_all = True
+            self._robots[host] = parser
+        parser = self._robots[host]
+        return True if parser is None else parser.can_fetch(ATS_USER_AGENT, url)
 
     def fetch_boards(
         self,
@@ -433,37 +531,57 @@ class AtsBoardClient:
         *,
         deadline_seconds: Optional[float] = None,
         clock: Optional[Callable[[], float]] = None,
+        parallel: bool = True,
     ) -> dict[str, list[AtsPosting]]:
-        """Several boards, deduped by cache_key, with a polite pause between
-        distinct boards. Returns {cache_key: postings}.
+        """Several boards, deduped by cache_key. Returns {cache_key: postings}.
 
         `deadline_seconds` bounds the whole sweep on WALL CLOCK rather than
-        on a board count (Kelvin's decision 4, 2026-10-01: poll all cached
-        boards, with a wall-clock bound). Board expansion costs no Brave
-        quota, so the only real limit is time: each board is one HTTP request
-        (20s timeout) plus a 1-2.5s pause. Stopping on elapsed time polls as
-        many boards as the budget allows instead of an arbitrary 60, while
-        still guaranteeing the run cannot outlive its scheduler and strand
-        the mse_lead_finder_runs row at "running".
+        on a board count (Kelvin's decision 4, 2026-10-01). Boards not
+        reached are simply absent from the result; the caller reports them
+        (`boards_not_reached`) rather than treating them as failures.
 
-        Boards not reached are simply absent from the result; the caller
-        reports them (`boards_not_reached`) rather than treating them as
-        failures, because nothing was learned about them either way.
+        One worker per PROVIDER (2026-11-15). Politeness is a per-host
+        property -- each vendor's API is a separate guest relationship -- so
+        boards on the same provider are still fetched one at a time with the
+        1-2.5 s pause between them, while Greenhouse, Lever, Ashby, Workable
+        and Recruitee run side by side. That is what lets a weekly run read
+        every known slug (643 on 2026-11-15) instead of the 200 a sequential
+        sweep could fit in its time budget. Within a provider the caller's
+        order is kept, so least-recently-fetched boards still go first.
         """
         now = clock or time.monotonic
         started = now()
+        unique: dict[str, BoardRef] = {}
+        for ref in refs:
+            unique.setdefault(ref.cache_key, ref)
+        groups: dict[str, list[BoardRef]] = {}
+        for ref in unique.values():
+            groups.setdefault(ref.provider, []).append(ref)
+
         seen: dict[str, list[AtsPosting]] = {}
-        for i, ref in enumerate(refs):
-            if ref.cache_key in seen:
-                continue
-            if deadline_seconds is not None and (now() - started) >= deadline_seconds:
-                log.info("[ATS] wall-clock budget %.0fs reached after %d boards -- stopping sweep",
-                         deadline_seconds, len(seen))
-                break
-            if i:
-                self._polite_pause()
-            seen[ref.cache_key] = self.fetch_board(ref)
-        return seen
+        seen_lock = threading.Lock()
+
+        def sweep(group: list[BoardRef]) -> None:
+            for i, ref in enumerate(group):
+                if deadline_seconds is not None and (now() - started) >= deadline_seconds:
+                    log.info("[ATS] wall-clock budget %.0fs reached in the %s sweep after %d boards",
+                             deadline_seconds, ref.provider, i)
+                    return
+                if i:
+                    self._polite_pause()
+                postings = self.fetch_board(ref)
+                with seen_lock:
+                    seen[ref.cache_key] = postings
+
+        if not parallel or len(groups) <= 1:
+            for group in groups.values():
+                sweep(group)
+        else:
+            with ThreadPoolExecutor(max_workers=len(groups), thread_name_prefix="ats") as pool:
+                for f in [pool.submit(sweep, g) for g in groups.values()]:
+                    f.result()
+        # Keep the input order in the result, whatever order workers finished.
+        return {k: seen[k] for k in unique if k in seen}
 
 
 # ── Relevance filtering ──────────────────────────────────────────────────
@@ -509,6 +627,10 @@ def company_domain_from_postings(postings: Iterable[AtsPosting]) -> Optional[str
         if not p.url:
             continue
         host = (urlparse(p.url).netloc or "").lower().replace("www.", "")
-        if host and host not in ATS_HOST_MAP and not host.endswith(("greenhouse.io", "lever.co", "ashbyhq.com", "workable.com")):
+        # careers.bunq.com -> bunq.com (Recruitee's careers_url is the
+        # company's own careers host).
+        host = _CAREERS_SUBDOMAIN.sub("", host)
+        if host and host not in ATS_HOST_MAP and not host.endswith(
+                ("greenhouse.io", "lever.co", "ashbyhq.com", "workable.com", "recruitee.com")):
             return host
     return None

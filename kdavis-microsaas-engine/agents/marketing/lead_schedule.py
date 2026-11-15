@@ -3,6 +3,7 @@ agents/marketing/lead_schedule.py
 
 In-process schedules for the 2026-10-18 lead sources (Kelvin, 2026-10-19).
 
+  slug_discovery weekly, Saturday (before the scouts)  shared; <=36 Brave, new ATS slugs only
   pain_rescan   weekly, after the Sunday ATS scout     consulting + Cloud Decoded
   hn_scout      monthly, on the 3rd                    consulting (source=hn_thread)
   partner_scout monthly, on the 1st, <=20 Brave        partners   (new firms only)
@@ -134,6 +135,28 @@ def _run_partners(db, run_id: str) -> dict:
                              page_offset=partner_page_offset(datetime.now(timezone.utc).date()))
 
 
+def _saturday_before_scout(now: datetime) -> Optional[str]:
+    """Due Saturday from 12:00 UTC through Sunday 12:00 UTC (an hour before
+    the 13:00 scouts); the period is that Saturday."""
+    if now.weekday() == 5 and now.hour >= 12:
+        return now.date().isoformat()
+    if now.weekday() == 6 and now.hour < SUNDAY_SCOUT_HOUR_UTC - 1:
+        return (now.date() - timedelta(days=1)).isoformat()
+    return None
+
+
+def _run_slug_discovery(db, run_id: str) -> dict:
+    from agents.marketing.lead_sources import _finish_run
+    from agents.marketing.slug_discovery import run_slug_discovery
+    try:
+        out = run_slug_discovery(db)
+    except Exception as exc:
+        _finish_run(db, run_id, written=0, funnel={"error": str(exc)[:500]}, error=str(exc))
+        raise
+    _finish_run(db, run_id, written=0, funnel={**out["funnel_stats"], "budget": out["budget"]})
+    return out
+
+
 def _run_vc(db, run_id: str) -> dict:
     from agents.marketing.lead_sources import run_vc_scout_entry
     return run_vc_scout_entry(db, max_probes=VC_SCHEDULED_MAX_PROBES, run_id=run_id)
@@ -147,6 +170,10 @@ def jobs() -> list[Job]:
             _sunday_after_scout(THDAGENTIC_CONSULTING_PRODUCT_ID), _run_pain(THDAGENTIC_CONSULTING_PRODUCT_ID)),
         Job("pain_rescan", CLOUD_DECODED_PRODUCT_ID, "pain_rescan",
             _sunday_after_scout(CLOUD_DECODED_PRODUCT_ID), _run_pain(CLOUD_DECODED_PRODUCT_ID)),
+        # Shared by both products; recorded under Cloud Decoded only because a
+        # run row needs a product. Spends Brave on NEW ATS slugs only.
+        Job("slug_discovery", CLOUD_DECODED_PRODUCT_ID, "ats_slug_discovery",
+            _saturday_before_scout, _run_slug_discovery),
         Job("hn_scout", THDAGENTIC_CONSULTING_PRODUCT_ID, "hn_thread", _monthly(3, 7, 14), _run_hn),
         Job("partner_scout", PARTNERS_PRODUCT_ID, "partner_signal", _monthly(1, 5, 14), _run_partners),
         Job("vc_scout", PARTNERS_PRODUCT_ID, "vc_operating_partner", _monthly(1, 5, 15), _run_vc),
@@ -258,7 +285,7 @@ def run_job(db, job: Job, period_key: str) -> Optional[dict]:
         log.error("[LeadSchedule] %s %s failed: %s", job.key, period_key, err)
         return {"job": job.key, "status": "failed", **meta, "error": err}
     summary = {k: result.get(k) for k in ("leads_written", "scanned", "matched", "newly_matched_leads",
-                                          "alerted", "problem") if k in result}
+                                          "alerted", "problem", "slugs_new", "brave_queries") if k in result}
     _finish_claim(db, claim_id, status="complete", run_id=run_id, result=summary)
     _audit(db, "win", job, {**meta, **summary})
     log.warning("[LeadSchedule] %s %s complete: %s", job.key, period_key, summary)

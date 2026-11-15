@@ -131,3 +131,102 @@ def check_budget(
         f"ok: {used}/{real_cap} used, a ~{estimated_queries}-query run projects "
         f"{projected}, under the {threshold} stop threshold",
     )
+
+
+# ── Per-source allocation (lead-source expansion, 2026-11-15) ──────────────
+#
+# The brief: "900 queries a month. Allocate them per source and log usage per
+# run. Never exceed 300 in one run." The 80% stop threshold above still
+# governs the whole month; these allocations divide the part under it so one
+# source cannot spend another's share. Every usage event a source writes
+# carries {"source": <key>}; events written before this change (or by code
+# paths that predate it) have no source and count against the month only.
+#
+# Sized from the 2026-11-15 baseline (docs/lead-sources/00-baseline.md):
+#   ats_scout       CD + CO weekly scouts. With discovery moved out they spend
+#                   only domain + buyer lookups: ~20/run x 2 x 4.3 weeks.
+#   slug_discovery  weekly new-slug discovery, ~36/week.
+#   wellfound       monthly company-name signal (Phase 4).
+#   partner_scout   monthly partner lane (unchanged, <=20).
+#   buyer_snippet   the optional search-snippet buyer resolver. Its flag
+#                   (ENABLE_SEARCH_SNIPPET_RESOLVER) is OFF by default, so this
+#                   share is unused unless Kelvin turns it on.
+# 200 + 160 + 40 + 20 + 60 = 480, leaving 240 of headroom under the 720
+# threshold and the 180 reserve above it.
+SOURCE_ALLOCATIONS: dict[str, int] = {
+    "ats_scout": 200,
+    "slug_discovery": 160,
+    "wellfound": 40,
+    "partner_scout": 20,
+    "buyer_snippet": 60,
+}
+MAX_QUERIES_PER_RUN = 300
+
+
+def source_usage(db, source: str, month: Optional[str] = None) -> int:
+    """This month's Brave queries recorded under `source`."""
+    from datetime import date
+    month = month or date.today().isoformat()[:7]
+    rows = (db.table("usage_events").select("metadata")
+            .eq("event_type", "brave_search_queries_used").execute().data or [])
+    return sum(int((r.get("metadata") or {}).get("count") or 0) for r in rows
+               if isinstance(r.get("metadata"), dict) and r["metadata"].get("month") == month
+               and r["metadata"].get("source") == source)
+
+
+def check_source_budget(db: Any, source: str, estimated_queries: int, *,
+                        cap: Optional[int] = None) -> BudgetDecision:
+    """May `source` start a run costing ~`estimated_queries` right now?
+
+    Refuses when (in order): the run alone exceeds MAX_QUERIES_PER_RUN, the
+    month-wide check_budget refuses, or the source's own allocation would be
+    exceeded. Fails closed on a read error, like check_budget."""
+    if estimated_queries > MAX_QUERIES_PER_RUN:
+        return BudgetDecision(False, -1, cap or monthly_cap(), stop_threshold(cap), -1,
+                              f"a {estimated_queries}-query run exceeds the {MAX_QUERIES_PER_RUN}-per-run cap")
+    overall = check_budget(db, estimated_queries=estimated_queries, cap=cap)
+    if not overall.allowed:
+        return overall
+    allocation = SOURCE_ALLOCATIONS.get(source)
+    if allocation is None:
+        return BudgetDecision(False, overall.used, overall.cap, overall.threshold, overall.projected,
+                              f"refusing to start: Brave source {source!r} has no allocation")
+    try:
+        used_by_source = source_usage(db, source)
+    except Exception as exc:
+        return BudgetDecision(False, overall.used, overall.cap, overall.threshold, -1,
+                              f"refusing to start: could not read {source} usage ({exc})")
+    if used_by_source + estimated_queries > allocation:
+        return BudgetDecision(
+            False, overall.used, overall.cap, overall.threshold, overall.projected,
+            f"{source} has used {used_by_source}/{allocation} of its monthly Brave allocation; "
+            f"a ~{estimated_queries}-query run would exceed it")
+    return BudgetDecision(
+        True, overall.used, overall.cap, overall.threshold, overall.projected,
+        f"ok: {source} {used_by_source}/{allocation} this month; month {overall.used}/{overall.cap}")
+
+
+def record_source_usage(db, source: str, count: int, **extra) -> None:
+    """The one place a per-source Brave spend is written (usage_events)."""
+    from datetime import date
+    if not count:
+        return
+    db.table("usage_events").insert({
+        "tenant_id": None, "event_type": "brave_search_queries_used",
+        "metadata": {"month": date.today().isoformat()[:7], "count": int(count), "source": source, **extra},
+    }).execute()
+
+
+def usage_by_source(db, month: Optional[str] = None) -> dict[str, int]:
+    """{source: queries} for the month; untagged events under 'unattributed'."""
+    from datetime import date
+    month = month or date.today().isoformat()[:7]
+    rows = (db.table("usage_events").select("metadata")
+            .eq("event_type", "brave_search_queries_used").execute().data or [])
+    out: dict[str, int] = {}
+    for r in rows:
+        m = r.get("metadata")
+        if isinstance(m, dict) and m.get("month") == month:
+            key = m.get("source") or "unattributed"
+            out[key] = out.get(key, 0) + int(m.get("count") or 0)
+    return out

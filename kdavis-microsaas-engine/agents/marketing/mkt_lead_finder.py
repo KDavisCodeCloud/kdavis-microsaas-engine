@@ -1592,7 +1592,9 @@ def _record_brave_spend(db, stats) -> int:
         return 0
     try:
         _emit_event(db, "brave_search_queries_used",
-                    {"month": date.today().isoformat()[:7], "count": spent})
+                    {"month": date.today().isoformat()[:7], "count": spent, "source": "ats_scout",
+                     "discovery": stats.queries_discovery, "decision_maker": stats.queries_decision_maker,
+                     "domain": stats.brave_domain_queries or 0})
     except Exception as exc:
         # Never let bookkeeping mask the real error on the failure path.
         log.error("[SCRAPER-V2] failed to record %d Brave queries: %s", spent, exc)
@@ -1895,8 +1897,14 @@ def run_scraper_v2_scout(
         pain = PainConfig.from_icp(icp)
         portfolio_index = PortfolioIndex.load(db)
 
+        # Weekly slug discovery (agents/marketing/slug_discovery.py) owns
+        # Brave discovery since 2026-11-15; when it has run this week the
+        # scout spends Brave only on domains and buyers.
+        from agents.marketing.slug_discovery import discovery_ran_recently
+        scout_discovery = 0 if discovery_ran_recently(db) else None
+
         qualified, stats = find_company_first_signals(
-            product_id, keywords, stats=stats,
+            product_id, keywords, stats=stats, discovery_queries=scout_discovery,
             policy=policy, taxonomy=taxonomy, freshness=freshness,
             email_resolver=email_resolver,
             db=db, scraper=scraper, max_queries=max_queries, max_age_days=max_age_days,
