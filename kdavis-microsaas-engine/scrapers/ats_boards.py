@@ -288,7 +288,9 @@ def _normalise_greenhouse(payload: dict, ref: BoardRef) -> tuple[Optional[str], 
             title=_first_str(job.get("title")),
             url=_first_str(job.get("absolute_url")),
             location=_location_value(job.get("location")),
-            posted_at=_parse_epoch_or_iso(job.get("updated_at") or job.get("first_published")),
+            # first_published, not updated_at: an edit last week does not make a
+            # role open since September fresh (lead-sources brief, posting age).
+            posted_at=_parse_epoch_or_iso(job.get("first_published") or job.get("updated_at")),
             description_text=_strip_html(job.get("content")),
         ))
     return company, out

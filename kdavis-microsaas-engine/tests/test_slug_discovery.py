@@ -354,3 +354,25 @@ def test_scout_skips_its_own_discovery_only_after_a_recent_run():
     assert sd.discovery_ran_recently(D([{"finished_at": "x"}]))
     assert not sd.discovery_ran_recently(D([]))
     assert not sd.discovery_ran_recently(D([], boom=True)), "fails toward the old behaviour"
+
+
+# ── Phase 6 targeting ─────────────────────────────────────────────────────
+
+def test_size_preference_for_cloud_decoded():
+    from agents.marketing.company_first_sourcing import size_preference, stated_headcount
+    assert stated_headcount("We are a team of 60 engineers") == 60
+    assert stated_headcount("50-120 employees") == 120
+    assert stated_headcount("no number here") is None
+    assert size_preference(80, (20, 150))[0] == 0.10
+    bonus, reason = size_preference(None, (20, 150))
+    assert bonus == 0 and "unknown" in reason
+    assert size_preference(400, (20, 150))[0] == 0
+    assert size_preference(80, None) == (0.0, None)
+
+
+def test_greenhouse_age_is_first_published_not_updated():
+    from scrapers.ats_boards import _normalise_greenhouse
+    _c, posts = _normalise_greenhouse({"jobs": [{"title": "SRE", "updated_at": "2026-11-10T00:00:00Z",
+                                                 "first_published": "2026-09-01T00:00:00Z"}]},
+                                      BoardRef("greenhouse", "x"))
+    assert posts[0].posted_at == date(2026, 9, 1)

@@ -101,7 +101,7 @@ async def list_buyer_research_tasks(
                      "location,status,contact_status,source,signal_text,pain_phrases,"
                      "funded_by,partner_type,buyer_suggestion,buyer_candidates,buyer_resolution,"
                      "funding_date,funding_amount,funding_source,posting_age_days,job_posting_date,"
-                     "headcount_band,headcount_band_source,hn_post_fields")
+                     "headcount_band,size_estimate,size_estimate_method,hn_post_fields")
              .eq("contact_status", "pending"))
     from api.routers.outreach_lanes import scope_to_lane
     query = scope_to_lane(query, lane)
@@ -281,7 +281,8 @@ def card_signals(r: dict) -> dict:
         "funding_amount": r.get("funding_amount"),
         "funding_source": r.get("funding_source"),
         "headcount_band": r.get("headcount_band"),
-        "headcount_source": r.get("headcount_band_source"),
+        "size_estimate": r.get("size_estimate"),
+        "size_estimate_method": r.get("size_estimate_method"),
         "remote": (r.get("hn_post_fields") or {}).get("remote"),
     }
 

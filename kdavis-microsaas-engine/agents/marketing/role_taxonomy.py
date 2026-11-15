@@ -237,8 +237,12 @@ class FreshnessPolicy:
 # Consulting: a req open 31-60 days is EVIDENCE, not decay.
 CONSULTING_FRESHNESS = FreshnessPolicy(max_age_days=60, full_weight_days=60)
 
-# Cloud Decoded: 0-30 full, 31-60 downweighted.
-CLOUD_DECODED_FRESHNESS = FreshnessPolicy(max_age_days=60, full_weight_days=30)
+# Cloud Decoded: full weight across the window since 2026-11-15. The
+# lead-sources brief ("roles open 30+ days rank higher") supersedes the
+# 2026-10-01 rule that downweighted days 31-60: a req still open after a month
+# is the pain the product removes. The older role also earns the
+# hard-to-fill intent bonus (company_first_sourcing.HARD_TO_FILL_DAYS).
+CLOUD_DECODED_FRESHNESS = FreshnessPolicy(max_age_days=60, full_weight_days=60)
 
 
 def matching_postings(

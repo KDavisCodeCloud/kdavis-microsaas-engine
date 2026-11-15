@@ -285,10 +285,10 @@ class TestFreshnessWindow:
         assert weight == expected
 
     @pytest.mark.parametrize("age,expected", [
-        (0, 1.0), (15, 1.0), (30, 1.0),
-        (31, FRESHNESS_AGEING_WEIGHT), (45, FRESHNESS_AGEING_WEIGHT), (60, FRESHNESS_AGEING_WEIGHT),
+        (0, 1.0), (15, 1.0), (30, 1.0), (31, 1.0), (45, 1.0), (60, 1.0),
     ])
-    def test_cloud_decoded_downweights_the_second_month(self, age, expected):
+    def test_cloud_decoded_keeps_full_weight_since_the_lead_sources_brief(self, age, expected):
+        """2026-11-15: roles open 30+ days rank HIGHER, so no second-month decay."""
         weight, _reason = CLOUD_DECODED_FRESHNESS.weight_for(age)
         assert weight == expected
 
@@ -323,11 +323,11 @@ class TestFreshnessDropCounts:
         assert [p.title for p in matched] == ["DevOps Engineer"]
         assert drops["over_max_age"] == 1
 
-    def test_ageing_postings_are_kept_and_flagged_for_cloud_decoded(self, taxonomy):
+    def test_second_month_postings_are_kept_unflagged_for_cloud_decoded(self, taxonomy):
         postings = [_Posting("Platform Engineer", age_days=45)]
         matched, drops = matching_postings(postings, taxonomy, freshness=CLOUD_DECODED_FRESHNESS)
         assert len(matched) == 1
-        assert drops["ageing_downweighted"] == 1
+        assert "ageing_downweighted" not in drops
 
     def test_consulting_does_not_flag_the_same_posting(self, taxonomy):
         postings = [_Posting("Platform Engineer", age_days=45)]
@@ -349,7 +349,9 @@ class TestFreshnessMultiplierPerCompany:
     def test_all_ageing_gives_the_ageing_weight(self):
         postings = [_Posting("Platform Engineer", age_days=45),
                     _Posting("DevOps Engineer", age_days=50)]
-        weight, _ = freshness_multiplier_for(postings, CLOUD_DECODED_FRESHNESS)
+        # CD no longer decays the second month (2026-11-15); a 30-day policy still does.
+        from agents.marketing.role_taxonomy import FreshnessPolicy
+        weight, _ = freshness_multiplier_for(postings, FreshnessPolicy(max_age_days=60, full_weight_days=30))
         assert weight == FRESHNESS_AGEING_WEIGHT
 
     def test_consulting_full_weight_even_at_fifty_days(self):

@@ -171,6 +171,44 @@ DECISION_MAKER_BUDGET_SHARE = 0.35
 # platform team is a second, warm route in.
 VC_FUNDED_INTENT_BOOST = 0.10
 
+# Lead-sources brief, Phase 6 (2026-11-15).
+#   Posting age: a matching role open this long ranks higher -- the team has
+#   failed to fill it, which is the pain both products sell against.
+HARD_TO_FILL_DAYS = 30
+HARD_TO_FILL_INTENT_BOOST = 0.10
+#   Company size: Cloud Decoded prefers 20-150 people. Unknown is allowed but
+#   ranks below a known in-band company; 151+ inside the product's hard band
+#   is allowed with no preference bonus.
+PREFERRED_SIZE_BY_PRODUCT: dict[str, tuple[int, int]] = {
+    "777a1852-f84c-49d8-890e-cd14670b7f6f": (20, 150),   # Cloud Decoded
+}
+PREFERRED_SIZE_FIT_BONUS = 0.10
+
+
+def stated_headcount(text: Optional[str]) -> Optional[int]:
+    """A headcount the posting itself states ("a team of 60", "120
+    employees"), else None. The upper end of a stated range."""
+    from agents.marketing.lead_qualification import _HEADCOUNT_RANGE_RE, _HEADCOUNT_SINGLE_RE, _HEADCOUNT_TEAM_RE
+    if not text:
+        return None
+    m = _HEADCOUNT_RANGE_RE.search(text)
+    if m:
+        return int(m.group(2))
+    m = _HEADCOUNT_SINGLE_RE.search(text) or _HEADCOUNT_TEAM_RE.search(text)
+    return int(m.group(1)) if m else None
+
+
+def size_preference(estimate: Optional[int], preferred: Optional[tuple[int, int]]) -> tuple[float, Optional[str]]:
+    """(fit bonus, reason) for the product's preferred size band."""
+    if not preferred:
+        return 0.0, None
+    lo, hi = preferred
+    if estimate is None:
+        return 0.0, f"size unknown (preferred {lo}-{hi}, ranked below a known in-band company)"
+    if lo <= estimate <= hi:
+        return PREFERRED_SIZE_FIT_BONUS, f"size ~{estimate} in preferred {lo}-{hi} (+{PREFERRED_SIZE_FIT_BONUS:.2f})"
+    return 0.0, f"size ~{estimate} outside preferred {lo}-{hi}"
+
 
 @dataclass
 class FunnelStats:
@@ -813,6 +851,7 @@ def qualify_candidate(
     today: Optional[date] = None,
     pain: Optional[PainConfig] = None,
     funded_by: Optional[list[str]] = None,
+    preferred_size: Optional[tuple[int, int]] = None,
 ) -> dict[str, Any]:
     """
     Scores and routes ONE company candidate that has already PASSED Stage 1.
@@ -876,6 +915,20 @@ def qualify_candidate(
         intent_value = round(min(1.0, intent_value + VC_FUNDED_INTENT_BOOST), 3)
         intent_reasons.append(f"VC-backed per portfolio page (+{VC_FUNDED_INTENT_BOOST:.2f}): {', '.join(funded_by)}")
 
+    # Posting age (Phase 6): the LONGEST-open matching role -- how long the
+    # team has been trying to hire -- from the ATS first-published date.
+    ages = [p.age_days for p in candidate.matching if p.age_days is not None]
+    posting_age_days = max(ages) if ages else None
+    if posting_age_days is not None and posting_age_days >= HARD_TO_FILL_DAYS:
+        intent_value = round(min(1.0, intent_value + HARD_TO_FILL_INTENT_BOOST), 3)
+        intent_reasons.append(f"role open {posting_age_days}d, hard to fill (+{HARD_TO_FILL_INTENT_BOOST:.2f})")
+
+    # Size estimate (Phase 6): stated in the JD, else unknown. Recorded with
+    # its method so a card never presents a guess as a fact.
+    size_estimate = stated_headcount(jd) or stated_headcount(candidate.jd_text_all)
+    size_method = "jd_stated" if size_estimate is not None else None
+    size_bonus, size_reason = size_preference(size_estimate, preferred_size)
+
     grade = email_grade or grade_email(None)
 
     # Two gates on the contact, in order of cost. A wrong contact never
@@ -920,9 +973,11 @@ def qualify_candidate(
     # (2026-11-07). A lead whose contact cleared the buyer gate outranks an
     # otherwise-identical company still waiting in Find the Buyer.
     seniority_component = 0.2 if (has_contact and contact_title) else 0.0
-    fit_value = round(min(1.0, fit.value * 0.8 + seniority_component), 3)
+    fit_value = round(min(1.0, fit.value * 0.8 + seniority_component + size_bonus), 3)
     reasons = list(fit.reasons) + [f"buyer seniority +{seniority_component:.1f}"
                                    if seniority_component else "no confirmed buyer yet"] + intent_reasons
+    if size_reason:
+        reasons.append(size_reason)
     if stage1:
         reasons = list(stage1.reasons) + reasons
 
@@ -943,6 +998,9 @@ def qualify_candidate(
         "size_proxy_open_roles": candidate.total_open_roles,
         "stack_tags": stack,
         "headcount_band": band,
+        "posting_age_days": posting_age_days,
+        "size_estimate": size_estimate,
+        "size_estimate_method": size_method,
         "funding_months": funding,
         "email": email,
         "email_grade": grade,
@@ -1315,7 +1373,7 @@ def find_company_first_signals(
         qualified = qualify_candidate(
             candidate, freshness=freshness, stage1=stage1, contact=contact,
             email_grade=grade, email=email_value, config=cfg, today=today,
-            pain=pain, funded_by=funded,
+            pain=pain, funded_by=funded, preferred_size=PREFERRED_SIZE_BY_PRODUCT.get(product_id),
         )
         if qualified["pain_phrases"]:
             stats.pain_phrase_leads += 1
@@ -1370,8 +1428,9 @@ MSE_LEADS_WRITABLE_COLUMNS = frozenset({
     "domain_source", "size_proxy_open_roles",
     # migration 066
     "pain_phrases", "pain_evidence", "funded_by", "partner_type", "signal_text",
-    # migration 073 (lead-source expansion)
-    "buyer_candidates", "hn_post_fields",
+    # migrations 073 + 075 (lead-source expansion)
+    "buyer_candidates", "hn_post_fields", "posting_age_days",
+    "size_estimate", "size_estimate_method",
 })
 
 
@@ -1423,6 +1482,9 @@ def to_mse_lead_row(qualified: dict, *, source: str) -> dict:
         "company_tags": qualified.get("company_tags") or None,
         "stage1_reasons": qualified.get("stage1_reasons") or None,
         "headcount_band": qualified.get("headcount_band"),
+        "posting_age_days": qualified.get("posting_age_days"),
+        "size_estimate": qualified.get("size_estimate"),
+        "size_estimate_method": qualified.get("size_estimate_method"),
         "funding_months": qualified.get("funding_months"),
         "email_grade": qualified.get("email_grade"),
         "fit_score": qualified.get("fit_score"),

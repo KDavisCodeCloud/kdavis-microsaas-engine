@@ -52,6 +52,11 @@ STAGE_TIMESTAMP = {
 }
 
 
+def card_signals(lead: dict) -> dict:
+    from api.routers.buyer_research import card_signals as _signals
+    return _signals(lead)
+
+
 def _lead_for(db, seq: dict) -> dict:
     lfid = seq.get("lead_finder_lead_id")
     if lfid:
@@ -60,7 +65,9 @@ def _lead_for(db, seq: dict) -> dict:
             "linkedin_url,lead_route,contact_status,job_posting_title,"
             "job_posting_url,job_posting_date,open_role_count,fit_score,"
             "intent_score,score_reasons,stack_tags,source,pain_phrases,pain_evidence,"
-            "funded_by,partner_type,signal_text"
+            "funded_by,partner_type,signal_text,posting_age_days,funding_date,funding_amount,"
+            "funding_source,headcount_band,size_estimate,size_estimate_method,hn_post_fields,"
+            "buyer_suggestion"
         ).eq("id", lfid).maybe_single().execute()
         return (r.data if r else None) or {}
     lid = seq.get("lead_id")
@@ -127,6 +134,10 @@ def _card(db, seq: dict, products: dict) -> dict:
         },
         "scores": {"fit": lead.get("fit_score"), "intent": lead.get("intent_score")},
         "why": lead.get("score_reasons") or [],
+        # Lead-sources Phase 6: source + signals label on the card, and where
+        # the contact came from when the buyer resolver found them.
+        "signals": card_signals(lead),
+        "contact_source": (lead.get("buyer_suggestion") or {}).get("source"),
         # 2026-10-18 signals, shown on the card so the reviewer can check the
         # draft against what the posting / post / firm actually said.
         "pain_phrases": lead.get("pain_phrases") or [],
