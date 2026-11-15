@@ -383,3 +383,59 @@ def build_partner_prompt(partner_type: Optional[str]) -> str:
         f"{PARTNER_COPY_RULES}\n"
         "- The sequence stops entirely if they reply at any point; touch_3 is only ever sent on zero reply."
     )
+
+
+# ── Demo reference links (Cloud Decoded GAPS #34, 2026-11-14) ─────────────
+#
+# Cloud Decoded records what a visitor does after opening a link that carries
+# ?ref=<code> (theclouddecoded.com/privacy discloses this): demo opened, fixes
+# approved, signup, checkout, paid. The code is derived from the lead's id, so
+# it needs no storage and the dashboard can recompute it to read the lead's
+# activity back. 11 characters instead of a 36-character UUID, because the
+# link sits inside messages with hard length limits.
+#
+# The model is still asked for the BARE url (the copy rules forbid tracking
+# parameters in what it writes); the ref is attached deterministically after
+# generation and again at approval, so it never depends on model compliance.
+
+DEMO_REF_PARAM = "ref"
+# Bare demo URL not already followed by a query, fragment, or more path.
+_BARE_DEMO_URL_RE = re.compile(re.escape(CLOUD_DECODED_DEMO_URL) + r"(?![?#\w/-])")
+_UUID_HEX_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def demo_ref_code(lead_id: object) -> Optional[str]:
+    """Stable ref code for a lead: 'r' + the first 10 hex digits of its UUID.
+
+    Returns None for anything that is not a UUID, so a malformed id never
+    produces a link that silently attributes to nobody."""
+    hexid = str(lead_id or "").replace("-", "").lower()
+    if not _UUID_HEX_RE.match(hexid):
+        return None
+    return "r" + hexid[:10]
+
+
+def demo_url_for_lead(lead_id: object) -> str:
+    code = demo_ref_code(lead_id)
+    return f"{CLOUD_DECODED_DEMO_URL}?{DEMO_REF_PARAM}={code}" if code else CLOUD_DECODED_DEMO_URL
+
+
+def attach_demo_ref(text: Optional[str], lead_id: object) -> Optional[str]:
+    """Replace every bare Cloud Decoded demo URL in text with the lead's ref'd
+    URL. Idempotent: a URL that already carries any query string (including a
+    ?ref= typed by hand) is left exactly as it is."""
+    code = demo_ref_code(lead_id)
+    if not text or not code:
+        return text
+    return _BARE_DEMO_URL_RE.sub(demo_url_for_lead(lead_id), text)
+
+
+def attach_demo_ref_if_fits(text: Optional[str], lead_id: object, limit: int) -> tuple[Optional[str], bool]:
+    """Approval-time variant: attach the ref only if the result still fits the
+    channel limit. Approved copy is never trimmed to make room -- it goes out
+    with the plain link instead (a send matters more than its attribution).
+    Returns (text, changed)."""
+    tagged = attach_demo_ref(text, lead_id)
+    if tagged == text or len(tagged or "") > limit:
+        return text, False
+    return tagged, True

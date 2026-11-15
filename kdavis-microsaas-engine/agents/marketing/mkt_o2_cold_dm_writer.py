@@ -35,6 +35,7 @@ those tables never distinguish "sequence drafted, not yet sent" from
 
 import json
 import logging
+import re
 from typing import Any, Optional
 
 import core.llm_router as llm_router
@@ -105,6 +106,8 @@ Rules, non-negotiable:
 from agents.marketing.outreach_copy import (  # noqa: E402
     CLOUD_DECODED_DEMO_URL,
     CONSULTING_OFFER_URL,
+    attach_demo_ref,
+    demo_url_for_lead,
 )
 
 # The three lead_source values whose leads live in mse_leads and therefore
@@ -255,6 +258,27 @@ def _ensure_close_url(text: str, url: str, limit: int) -> str:
     return _trim_copy(text, room, label="close body").rstrip() + suffix
 
 
+# Any Cloud Decoded demo URL, bare or already carrying a query string.
+_ANY_DEMO_URL_RE = re.compile(re.escape(CLOUD_DECODED_DEMO_URL) + r"(?:\?[^\s]*)?(?![\w/-])")
+
+
+def _fit_demo_ref(text: str, lead_id: object, limit: int) -> str:
+    """Give the lead's demo link its ?ref= code (GAPS #34) within the cap.
+
+    Usually the ref'd link simply fits. When it doesn't, every copy of the
+    link is removed and the ref'd one re-appended through _ensure_close_url,
+    which trims the BODY to make room -- same rule as the close URL itself:
+    a shorter message beats a broken link. Runs before human review, so the
+    reviewer approves exactly what will be sent.
+    """
+    tagged = attach_demo_ref(text, lead_id)
+    if not tagged or tagged == text or len(tagged) <= limit:
+        return tagged
+    body = _ANY_DEMO_URL_RE.sub("", tagged)
+    body = "\n".join(line.rstrip() for line in body.splitlines()).strip()
+    return _ensure_close_url(body, demo_url_for_lead(lead_id), limit)
+
+
 # ── Route-aware writer (Kelvin's decision 1, 2026-10-06) ─────────────────
 
 def _write_route_aware_sequence(lead: dict, product_id: str, anthropic_client=None) -> dict:
@@ -380,6 +404,12 @@ def _write_route_aware_sequence(lead: dict, product_id: str, anthropic_client=No
     if not partner_type:
         out["touch_2"] = _ensure_close_url(
             out["touch_2"], offer.close_url, channel.limits.get("touch_2", 900))
+
+    # GAPS #34: the Cloud Decoded demo link carries this lead's ref code, so
+    # theclouddecoded.com can tell which contact opened the demo. Other
+    # offers' URLs never match, so this is a no-op for them.
+    for key in channel.touches:
+        out[key] = _fit_demo_ref(out[key], lead.get("id"), channel.limits.get(key, 900))
 
     # A generation that drifted across channels is caught here, not shipped.
     # Raising rather than scrubbing: the wrong channel's vocabulary usually

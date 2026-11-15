@@ -51,7 +51,10 @@ def test_approve_sequence_updates_pending_row(monkeypatch, fake_db):
     )
 
     assert resp.status_code == 200
-    assert resp.json() == {"status": "approved_hitl", "id": "seq-1"}
+    body = resp.json()
+    assert (body["status"], body["id"]) == ("approved_hitl", "seq-1")
+    # No demo link in this sequence, so no ref was attached (GAPS #34).
+    assert body["demo_ref"] is None and body["demo_ref_attached"] == []
 
     # approve now does a SELECT (to read lead_source) before the UPDATE --
     # narrow to the update call specifically rather than assuming index 0.
@@ -169,7 +172,8 @@ def test_approve_linkedin_sequence_uses_approved_manual_status(monkeypatch, fake
     )
 
     assert resp.status_code == 200
-    assert resp.json() == {"status": "approved_manual", "id": "seq-2"}
+    body = resp.json()
+    assert (body["status"], body["id"]) == ("approved_manual", "seq-2")
 
     seq_updates = [c for c in fake_db.executed if c.table_name == "mse_dm_sequences" and c.calls[0][0] == "update"]
     assert seq_updates[0]._payload["status"] == "approved_manual"

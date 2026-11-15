@@ -31,6 +31,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, field_validator
 
 from api.middleware.auth import require_marketing_api_key
+from agents.marketing.outreach_copy import CLOUD_DECODED_DEMO_URL, demo_ref_code
 from core.company_conflicts import company_conflicts, conflict_block_reason
 from core.linkedin_urls import PROFILE_URL_HELP, is_profile_url
 from core.supabase_client import get_supabase
@@ -134,6 +135,13 @@ def _card(db, seq: dict, products: dict) -> dict:
         "partner_type": lead.get("partner_type"),
         "signal_text": (lead.get("signal_text") or "")[:1500] or None,
         "touches": {k: seq.get(k) for k in ("touch_1", "touch_2", "touch_3") if seq.get(k)},
+        # GAPS #34: the ?ref= code this lead's Cloud Decoded demo link carries
+        # (attached at generation/approval), so the dashboard can show what the
+        # contact did on theclouddecoded.com without re-deriving it. None when
+        # the sequence has no demo link (consulting, partner notes).
+        "demo_ref": (demo_ref_code(lead.get("id"))
+                     if any(CLOUD_DECODED_DEMO_URL in (seq.get(k) or "") for k in ("touch_1", "touch_2", "touch_3"))
+                     else None),
         "subject": seq.get("subject"),
         "drafted_for_route": seq.get("drafted_for_route"),
         # APPROVAL GATE (decision 1, 2026-10-06). Computed server-side so the
@@ -561,6 +569,9 @@ async def list_conversations(
         out.append({
             "conversation_id": c.get("id"),
             "lead_id": c.get("lead_id"),
+            # GAPS #34: same derivation as the card's demo_ref. A conversation
+            # with no demo activity simply shows nothing on the dashboard.
+            "demo_ref": demo_ref_code(c.get("lead_id")),
             "product_id": c.get("product_id"),
             "product": (products.get(c.get("product_id")) or {}).get("name"),
             "company": lead.get("company"),

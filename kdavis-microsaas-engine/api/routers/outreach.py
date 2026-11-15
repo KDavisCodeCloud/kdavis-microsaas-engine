@@ -27,6 +27,9 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from agents.marketing.mkt_o5_sequence_sender import _get_lead
+from agents.marketing.outreach_copy import (
+    attach_demo_ref, attach_demo_ref_if_fits, channel_for_route, demo_ref_code,
+)
 from core.email_compliance import append_compliance_footer
 from core.supabase_client import get_supabase
 
@@ -47,6 +50,41 @@ def _require_admin(request: Request) -> None:
 
 class ResolveSequence(BaseModel):
     resolved_by: str | None = None
+
+
+_TOUCH_KEYS = ("touch_1", "touch_2", "touch_3")
+
+
+def _sequence_lead_id(seq: dict):
+    """The lead a sequence was drafted for, whichever lead table it lives in --
+    the same id MKT-O2 derived the demo ref from at generation time. Same
+    precedence as outreach_lanes._lead_for, so the ref on the approved link
+    and the ref the dashboard card looks up can never disagree."""
+    return seq.get("lead_finder_lead_id") or seq.get("lead_id") or seq.get("linkedin_lead_id")
+
+
+def _demo_ref_touches(seq: dict) -> tuple[dict, list[str], list[str]]:
+    """GAPS #34. The touches whose Cloud Decoded demo link should carry the
+    lead's ?ref= code, rewritten. Covers drafts generated before ref links
+    existed and links pasted back in by an edit. Only where the result still
+    fits the channel limit: approved copy is never trimmed to make room, it
+    just goes out with the plain link (skipped).
+
+    Returns (rewritten touches, attached keys, skipped-over-limit keys)."""
+    lead_id = _sequence_lead_id(seq)
+    limits = channel_for_route(seq.get("drafted_for_route")).limits
+    rewritten, attached, skipped = {}, [], []
+    for key in _TOUCH_KEYS:
+        text = seq.get(key)
+        if not text:
+            continue
+        new, changed = attach_demo_ref_if_fits(text, lead_id, limits.get(key, 900))
+        if changed:
+            rewritten[key] = new
+            attached.append(key)
+        elif attach_demo_ref(text, lead_id) != text:
+            skipped.append(key)
+    return rewritten, attached, skipped
 
 
 @router.get("/dm-sequences/{sequence_id}/preview")
@@ -74,6 +112,9 @@ async def preview_dm_sequence(sequence_id: str, request: Request):
     seq = db.table("mse_dm_sequences").select("*").eq("id", sequence_id).maybe_single().execute()
     if seq is None or not seq.data:
         raise HTTPException(status_code=404, detail="Sequence not found")
+    # Exact bytes: a still-pending draft gets its demo ref at approval, so show it now.
+    if seq.data.get("status") == "pending_hitl":
+        seq.data.update(_demo_ref_touches(seq.data)[0])
 
     lead_source = seq.data.get("lead_source") or "apollo"
     if lead_source not in ("apollo", "lead_finder"):
@@ -154,7 +195,8 @@ async def approve_dm_sequence(sequence_id: str, body: ResolveSequence, request: 
     # matching lookup change.
     existing = (
         db.table("mse_dm_sequences")
-        .select("lead_source,lead_finder_lead_id,product_id")
+        .select("lead_source,lead_finder_lead_id,linkedin_lead_id,lead_id,product_id,"
+                "drafted_for_route,touch_1,touch_2,touch_3")
         .eq("id", sequence_id)
         .eq("status", "pending_hitl")
         .maybe_single()
@@ -204,19 +246,35 @@ async def approve_dm_sequence(sequence_id: str, body: ResolveSequence, request: 
     if new_status == "approved_hitl":
         update_payload["hitl_approved_expires_at"] = (now + _HITL_APPROVAL_TTL).isoformat()
 
+    # GAPS #34: written in the same guarded update as the status change, so
+    # what MKT-O5 sends / Ready-to-Paste shows is the ref'd copy.
+    ref_touches, ref_attached, ref_skipped = _demo_ref_touches(existing.data)
+    update_payload.update(ref_touches)
+
     result = db.table("mse_dm_sequences").update(update_payload).eq("id", sequence_id).eq("status", "pending_hitl").execute()
 
     if not result.data:
         raise HTTPException(status_code=404, detail="Sequence not found or already resolved")
 
+    ref_note = ""
+    if ref_attached:
+        ref_note = f"; demo ref {demo_ref_code(_sequence_lead_id(existing.data))} on {', '.join(ref_attached)}"
+    if ref_skipped:
+        ref_note += f"; plain demo link kept on {', '.join(ref_skipped)} (ref would exceed the channel limit)"
     db.table("agent_events").insert({
         "agent_name": "Outreach HITL",
         "department": "marketing",
-        "action": f"DM sequence {sequence_id[:8]}… approved by operator",
+        "action": f"DM sequence {sequence_id[:8]}… approved by operator{ref_note}",
         "verdict": "pass",
     }).execute()
 
-    return {"status": new_status, "id": sequence_id}
+    return {
+        "status": new_status,
+        "id": sequence_id,
+        "demo_ref": demo_ref_code(_sequence_lead_id(existing.data)) if (ref_attached or ref_skipped) else None,
+        "demo_ref_attached": ref_attached,
+        "demo_ref_skipped_over_limit": ref_skipped,
+    }
 
 
 @router.post("/dm-sequences/{sequence_id}/reject")
