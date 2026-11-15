@@ -511,11 +511,32 @@ def _token_fallback(token: str) -> str:
     return company_name_from_token(token)
 
 
+def resolve_company_slug(company_name: str, ats_client, known: set[str]):
+    """("known" | "new", BoardRef) for the company's ATS board, or None.
+
+    Direct ATS API calls only (no Brave): each name variant is tried on each
+    provider; a board already in the cache is "known" without a fetch, and a
+    new one is accepted only when board_names_company() proves it is this
+    company. Shared by the Form D and Wellfound seeds."""
+    from scrapers.ats_boards import PROVIDERS, BoardRef
+
+    for token in slug_variants(company_name):
+        for provider in PROVIDERS:
+            ref = BoardRef(provider, token)
+            if ref.cache_key in known:
+                return ("known", ref)
+        for provider in PROVIDERS:
+            ref = BoardRef(provider, token)
+            postings = ats_client.fetch_board(ref)
+            if postings and board_names_company(postings, company_name, provider, token):
+                return ("new", ref)
+    return None
+
+
 def seed_from_filings(db, ats_client, *, today: Optional[date] = None, max_companies: int = 60,
                       stats: Optional[FormDStats] = None) -> FormDStats:
     from agents.marketing.mkt_lead_finder import _existing_job_signal_companies
     from agents.marketing.slug_discovery import known_slugs
-    from scrapers.ats_boards import PROVIDERS, BoardRef
 
     today = today or date.today()
     stats = stats or FormDStats()
@@ -542,19 +563,7 @@ def seed_from_filings(db, ats_client, *, today: Optional[date] = None, max_compa
         if stats.seed_considered >= max_companies:
             break
         stats.seed_considered += 1
-        found = None
-        for token in slug_variants(f["issuer_name"]):
-            for provider in PROVIDERS:
-                ref = BoardRef(provider, token)
-                if ref.cache_key in known:
-                    found = ("known", ref)
-                    break
-                postings = ats_client.fetch_board(ref)
-                if postings and board_names_company(postings, f["issuer_name"], provider, token):
-                    found = ("new", ref)
-                    break
-            if found:
-                break
+        found = resolve_company_slug(f["issuer_name"], ats_client, known)
         db.table(FILINGS_TABLE).update({"seed_checked_at": datetime.now(timezone.utc).isoformat(),
                                         "seed_board": found[1].cache_key if found else None}
                                        ).eq("accession_no", f["accession_no"]).execute()
