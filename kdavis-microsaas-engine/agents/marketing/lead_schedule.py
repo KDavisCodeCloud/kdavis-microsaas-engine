@@ -4,6 +4,7 @@ agents/marketing/lead_schedule.py
 In-process schedules for the 2026-10-18 lead sources (Kelvin, 2026-10-19).
 
   slug_discovery weekly, Saturday (before the scouts)  shared; <=36 Brave, new ATS slugs only
+  form_d        weekdays from 11:00 UTC                shared; SEC EDGAR (official, <=5 req/s), no Brave
   pain_rescan   weekly, after the Sunday ATS scout     consulting + Cloud Decoded
   hn_scout      monthly, 2nd weekday (day after thread) consulting (source=hn_thread)
   partner_scout monthly, on the 1st, <=20 Brave        partners   (new firms only)
@@ -184,6 +185,26 @@ def _run_slug_discovery(db, run_id: str) -> dict:
     return out
 
 
+def _weekday_after_11(now: datetime) -> Optional[str]:
+    """Daily on weekdays from 11:00 UTC -- the previous business day's EDGAR
+    index is published overnight."""
+    if now.weekday() < 5 and now.hour >= 11:
+        return now.date().isoformat()
+    return None
+
+
+def _run_form_d(db, run_id: str) -> dict:
+    from agents.marketing.form_d import run_form_d
+    from agents.marketing.lead_sources import _finish_run
+    try:
+        out = run_form_d(db)
+    except Exception as exc:
+        _finish_run(db, run_id, written=0, funnel={"error": str(exc)[:500]}, error=str(exc))
+        raise
+    _finish_run(db, run_id, written=0, funnel=out["funnel_stats"])
+    return out
+
+
 def _run_vc(db, run_id: str) -> dict:
     from agents.marketing.lead_sources import run_vc_scout_entry
     return run_vc_scout_entry(db, max_probes=VC_SCHEDULED_MAX_PROBES, run_id=run_id)
@@ -202,6 +223,10 @@ def jobs() -> list[Job]:
         Job("slug_discovery", CLOUD_DECODED_PRODUCT_ID, "ats_slug_discovery",
             _saturday_before_scout, _run_slug_discovery),
         Job("hn_scout", THDAGENTIC_CONSULTING_PRODUCT_ID, "hn_thread", _hn_after_thread, _run_hn),
+        # SEC Form D: funding dates + officers for the pipeline, and tech
+        # filers seeded as ATS slugs. Shared; recorded under consulting
+        # (funding is consulting's intent signal). No Brave.
+        Job("form_d", THDAGENTIC_CONSULTING_PRODUCT_ID, "sec_form_d", _weekday_after_11, _run_form_d),
         Job("partner_scout", PARTNERS_PRODUCT_ID, "partner_signal", _monthly(1, 5, 14), _run_partners),
         Job("vc_scout", PARTNERS_PRODUCT_ID, "vc_operating_partner", _monthly(1, 5, 15), _run_vc),
         Job("dm_8am_watchdog", THDAGENTIC_CONSULTING_PRODUCT_ID, None, _watchdog_period, _run_watchdog),
