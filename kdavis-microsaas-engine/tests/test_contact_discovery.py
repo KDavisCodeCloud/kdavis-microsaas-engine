@@ -277,3 +277,9 @@ class TestCaseSensitivityOfNames:
         assert from_jd_text("You will report to Jane Doe, VP of Engineering.") is not None
         assert from_jd_text("you will report to Jane Doe, VP of Engineering.") is not None
         assert from_jd_text("You will report to the team, VP of Engineering.") is None
+
+
+def test_placeholder_copy_is_not_a_person():
+    from agents.marketing.contact_discovery import _plausible_name
+    assert not _plausible_name("Coming Soon")
+    assert not _plausible_name("Your Name")

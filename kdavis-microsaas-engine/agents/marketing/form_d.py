@@ -251,7 +251,16 @@ def officer_candidates(filing: dict) -> list[dict]:
             continue
         clar = p.get("clarification") or ""
         m = _TITLE_IN_CLARIFICATION.search(clar)
-        title = clar.strip() if m else "Executive Officer (Form D)"
+        # A short clarification IS the title ("CTO and Co-Founder"); a sentence
+        # ("Mr. X is the Chief Executive Officer, President, and Secretary of
+        # the Issuer.") contributes only the title phrase it contains.
+        if m and len(clar.strip()) <= 40:
+            title = clar.strip()
+        elif m:
+            title = m.group(0).strip()
+            title = title.upper() if title.lower() in ("cto", "ceo") else title.title()
+        else:
+            title = "Executive Officer (Form D)"
         verdict = classify_buyer_title(title).verdict
         out.append({
             "name": p["name"], "title": title, "email": None, "email_grade": None,

@@ -151,3 +151,11 @@ def test_404_is_not_retried_and_429_backs_off():
     c = fd.SecClient(get, sleep=sleeps.append, clock=lambda: 100.0, ua="a b@c.d")
     assert c.get("missing") is None and len(calls) == 1
     assert c.get("throttled").status_code == 200 and 10 in sleeps
+
+
+def test_sentence_clarification_contributes_only_its_title_phrase():
+    f = {"accession_no": "a", "filing_url": "u", "related_persons": [
+        {"name": "Fed Par", "relationships": ["Executive Officer"],
+         "clarification": "Mr. Par is the Chief Executive Officer, President, and Secretary of the Issuer."}]}
+    c = fd.officer_candidates(f)[0]
+    assert c["title"] == "Chief Executive Officer" and "Secretary" in c["evidence"]

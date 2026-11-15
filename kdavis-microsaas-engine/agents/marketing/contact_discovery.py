@@ -135,6 +135,10 @@ _NOT_A_NAME = frozenset({
     "our team", "the team", "about us", "contact us", "who we are",
     "leadership team", "meet the", "join us", "our people", "our story",
     "privacy policy", "terms of", "all rights", "cookie policy",
+    # 2026-11-15: placeholder copy on a team page ("Coming Soon / CEO") came
+    # through the buyer resolver as a suggested buyer.
+    "coming soon", "your name", "open role", "open position", "we're hiring", "hiring now",
+    "lorem ipsum", "first last", "full name", "to be announced", "tba", "tbd",
 })
 
 
