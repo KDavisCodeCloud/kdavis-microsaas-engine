@@ -4,6 +4,8 @@ agents/marketing/lead_schedule.py
 In-process schedules for the 2026-10-18 lead sources (Kelvin, 2026-10-19).
 
   slug_discovery weekly, Saturday (before the scouts)  shared; <=36 Brave, new ATS slugs only
+  wellfound     monthly, 1st-5th from 15:00 UTC        shared; <=8 Brave, names from result titles only
+  buyer_resolver daily from 14:00 UTC                 CD + consulting Find the Buyer backlog
   form_d        weekdays from 11:00 UTC                shared; SEC EDGAR (official, <=5 req/s), no Brave
   pain_rescan   weekly, after the Sunday ATS scout     consulting + Cloud Decoded
   hn_scout      monthly, 2nd weekday (day after thread) consulting (source=hn_thread)
@@ -205,6 +207,36 @@ def _run_form_d(db, run_id: str) -> dict:
     return out
 
 
+def _run_wellfound(db, run_id: str) -> dict:
+    from agents.marketing.lead_sources import _finish_run
+    from agents.marketing.wellfound_signal import run_wellfound_signal
+    try:
+        out = run_wellfound_signal(db)
+    except Exception as exc:
+        _finish_run(db, run_id, written=0, funnel={"error": str(exc)[:500]}, error=str(exc))
+        raise
+    _finish_run(db, run_id, written=0, funnel={**out["funnel_stats"], "budget": out["budget"]})
+    return out
+
+
+def _daily_from(hour: int) -> Callable[[datetime], Optional[str]]:
+    def period(now: datetime) -> Optional[str]:
+        return now.date().isoformat() if now.hour >= hour else None
+    return period
+
+
+def _run_buyer_resolver(db, run_id: str) -> dict:
+    from agents.marketing.buyer_resolver import run_buyer_resolver
+    from agents.marketing.lead_sources import _finish_run
+    try:
+        out = run_buyer_resolver(db)
+    except Exception as exc:
+        _finish_run(db, run_id, written=0, funnel={"error": str(exc)[:500]}, error=str(exc))
+        raise
+    _finish_run(db, run_id, written=0, funnel=out["funnel_stats"])
+    return out
+
+
 def _run_vc(db, run_id: str) -> dict:
     from agents.marketing.lead_sources import run_vc_scout_entry
     return run_vc_scout_entry(db, max_probes=VC_SCHEDULED_MAX_PROBES, run_id=run_id)
@@ -227,6 +259,13 @@ def jobs() -> list[Job]:
         # filers seeded as ATS slugs. Shared; recorded under consulting
         # (funding is consulting's intent signal). No Brave.
         Job("form_d", THDAGENTIC_CONSULTING_PRODUCT_ID, "sec_form_d", _weekday_after_11, _run_form_d),
+        # Wellfound company names from Brave result titles only (never fetched),
+        # resolved to ATS slugs for the normal scout. Monthly, <=8 Brave.
+        # Find the Buyer auto-fill, daily before the 08:00 MST (15:00 UTC)
+        # MKT-O2 drafting so a resolved buyer is drafted the same morning.
+        Job("buyer_resolver", THDAGENTIC_CONSULTING_PRODUCT_ID, "buyer_resolver", _daily_from(14),
+            _run_buyer_resolver),
+        Job("wellfound_signal", CLOUD_DECODED_PRODUCT_ID, "wellfound_signal", _monthly(1, 5, 15), _run_wellfound),
         Job("partner_scout", PARTNERS_PRODUCT_ID, "partner_signal", _monthly(1, 5, 14), _run_partners),
         Job("vc_scout", PARTNERS_PRODUCT_ID, "vc_operating_partner", _monthly(1, 5, 15), _run_vc),
         Job("dm_8am_watchdog", THDAGENTIC_CONSULTING_PRODUCT_ID, None, _watchdog_period, _run_watchdog),

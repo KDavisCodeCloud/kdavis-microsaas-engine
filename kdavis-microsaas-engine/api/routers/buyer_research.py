@@ -99,7 +99,9 @@ async def list_buyer_research_tasks(
                      "job_posting_url,open_role_count,size_proxy_open_roles,stack_tags,"
                      "company_tags,fit_score,intent_score,score_reasons,contact_attempts,"
                      "location,status,contact_status,source,signal_text,pain_phrases,"
-                     "funded_by,partner_type")
+                     "funded_by,partner_type,buyer_suggestion,buyer_candidates,buyer_resolution,"
+                     "funding_date,funding_amount,funding_source,posting_age_days,job_posting_date,"
+                     "headcount_band,headcount_band_source,hn_post_fields")
              .eq("contact_status", "pending"))
     from api.routers.outreach_lanes import scope_to_lane
     query = scope_to_lane(query, lane)
@@ -155,6 +157,14 @@ async def list_buyer_research_tasks(
             "company_tags": r.get("company_tags") or [],
             "location": r.get("location"),
             "automated_attempts": r.get("contact_attempts") or 0,
+            # Phase 5 (2026-11-15): the resolver's best guess, for a one-click
+            # confirm, with where it came from. Never auto-saved unless the
+            # email verified AND the title passed the buyer gate.
+            "buyer_suggestion": r.get("buyer_suggestion"),
+            "buyer_candidates": (r.get("buyer_candidates") or [])[:5],
+            "buyer_resolution": r.get("buyer_resolution"),
+            # Phase 6 card labels: source + signals.
+            "signals": card_signals(r),
         })
     return {"tasks": tasks, "count": len(tasks)}
 
@@ -239,26 +249,17 @@ def _grade_email_for_lead(lead_id: str, first_name: str, last_name: str, domain:
     lead to the manual track) and must not be left NULL as though grading
     never ran.
     """
-    from agents.marketing.lead_qualification import grade_email, is_role_address
-    from core.email_finder import find_email, verify_email
+    from agents.marketing.buyer_resolver import grade_contact_email
 
     db = get_supabase()
     try:
-        result = find_email(first_name, last_name, domain, supabase_client=db, max_candidates=2)
-        domain_is_catch_all = None
-        if result.verification_status == "verified" and result.email:
-            probe = verify_email(
-                f"no-such-mailbox-{abs(hash(domain)) % 10**8}@{domain}", domain=domain)
-            domain_is_catch_all = probe.status in ("verified", "catch_all")
-        grade = grade_email(
-            result.verification_status,
-            domain_is_catch_all=domain_is_catch_all,
-            role_address=is_role_address(result.email),
-        )
+        # One grading path for human-saved and resolver-found contacts.
+        g = grade_contact_email(first_name, last_name, domain, db=db)
+        grade = g["email_grade"]
         payload = {"email_grade": grade}
-        if result.email:
-            payload["email"] = result.email
-            payload["email_status"] = result.verification_status
+        if g["email"]:
+            payload["email"] = g["email"]
+            payload["email_status"] = g["email_status"]
         db.table("mse_leads").update(payload).eq("id", lead_id).execute()
         log.info("[BuyerResearch] graded %s@%s for lead %s -> %s",
                  first_name, domain, lead_id, grade)
@@ -268,6 +269,54 @@ def _grade_email_for_lead(lead_id: str, first_name: str, last_name: str, domain:
             db.table("mse_leads").update({"email_grade": "unknown"}).eq("id", lead_id).execute()
         except Exception:
             log.error("[BuyerResearch] could not even record the grading failure for %s", lead_id)
+
+
+def card_signals(r: dict) -> dict:
+    """Source and signals shown on a Find the Buyer / draft card."""
+    return {
+        "source": r.get("source"),
+        "posting_age_days": r.get("posting_age_days"),
+        "posting_date": r.get("job_posting_date"),
+        "funding_date": r.get("funding_date"),
+        "funding_amount": r.get("funding_amount"),
+        "funding_source": r.get("funding_source"),
+        "headcount_band": r.get("headcount_band"),
+        "headcount_source": r.get("headcount_band_source"),
+        "remote": (r.get("hn_post_fields") or {}).get("remote"),
+    }
+
+
+@router.post("/resolve")
+async def resolve_buyers(
+    background_tasks: BackgroundTasks,
+    force: bool = False,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Run the buyer resolver over the Find the Buyer backlog now (it also
+    runs daily). Records an mse_lead_finder_runs row (source buyer_resolver)
+    and returns its id to poll."""
+    require_marketing_api_key(authorization)
+    from agents.marketing.mkt_lead_finder import THDAGENTIC_CONSULTING_PRODUCT_ID
+    db = get_supabase()
+    run = db.table("mse_lead_finder_runs").insert({
+        "product_id": THDAGENTIC_CONSULTING_PRODUCT_ID, "status": "running", "sources_used": ["buyer_resolver"],
+    }).execute()
+    run_id = run.data[0]["id"]
+    background_tasks.add_task(_resolve_in_background, run_id, force)
+    return {"run_id": run_id, "status": "running"}
+
+
+def _resolve_in_background(run_id: str, force: bool) -> None:
+    from agents.marketing.buyer_resolver import run_buyer_resolver
+    from agents.marketing.lead_sources import _finish_run
+    from core.supabase_client import get_supabase_for_job
+    db = get_supabase_for_job()
+    try:
+        out = run_buyer_resolver(db, force=force)
+        _finish_run(db, run_id, written=0, funnel=out["funnel_stats"])
+    except Exception as exc:
+        log.error("[BuyerResearch] resolver run %s failed: %s", run_id, exc)
+        _finish_run(db, run_id, written=0, funnel={"error": str(exc)[:500]}, error=str(exc))
 
 
 @router.post("/{lead_id}/skip")
