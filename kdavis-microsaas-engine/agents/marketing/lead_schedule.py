@@ -5,7 +5,7 @@ In-process schedules for the 2026-10-18 lead sources (Kelvin, 2026-10-19).
 
   slug_discovery weekly, Saturday (before the scouts)  shared; <=36 Brave, new ATS slugs only
   pain_rescan   weekly, after the Sunday ATS scout     consulting + Cloud Decoded
-  hn_scout      monthly, on the 3rd                    consulting (source=hn_thread)
+  hn_scout      monthly, 2nd weekday (day after thread) consulting (source=hn_thread)
   partner_scout monthly, on the 1st, <=20 Brave        partners   (new firms only)
   vc_scout      monthly, on the 1st                    partners   (new contacts only)
   dm_8am_watchdog  daily 08:45 MST: email the owner if the 08:00 enrollment failed
@@ -68,6 +68,33 @@ def _monthly(first_day: int, last_day: int, hour: int) -> Callable[[datetime], O
             return now.strftime("%Y-%m")
         return None
     return period
+
+
+def _weekday_index(d: date, n: int) -> date:
+    """The n-th weekday (Mon-Fri) of d's month, 1-based."""
+    day = d.replace(day=1)
+    seen = 0
+    while True:
+        if day.weekday() < 5:
+            seen += 1
+            if seen == n:
+                return day
+        day += timedelta(days=1)
+
+
+def _hn_after_thread(now: datetime) -> Optional[str]:
+    """Monthly HN read, "on the first weekday after the thread is posted"
+    (lead-sources brief, 2026-11-15). `whoishiring` posts "Who is hiring?" on
+    the month's first weekday (~15:00 UTC), so the read is due from 14:00 UTC
+    on the SECOND weekday -- a full day of replies in -- through the 10th as a
+    catch-up window for a deploy or outage."""
+    today = now.date()
+    second = _weekday_index(today, 2)
+    if today < second or today.day > 10:
+        return None
+    if today == second and now.hour < 14:
+        return None
+    return now.strftime("%Y-%m")
 
 
 def _sunday_after_scout(product_id: str) -> Callable[..., Optional[str]]:
@@ -174,7 +201,7 @@ def jobs() -> list[Job]:
         # run row needs a product. Spends Brave on NEW ATS slugs only.
         Job("slug_discovery", CLOUD_DECODED_PRODUCT_ID, "ats_slug_discovery",
             _saturday_before_scout, _run_slug_discovery),
-        Job("hn_scout", THDAGENTIC_CONSULTING_PRODUCT_ID, "hn_thread", _monthly(3, 7, 14), _run_hn),
+        Job("hn_scout", THDAGENTIC_CONSULTING_PRODUCT_ID, "hn_thread", _hn_after_thread, _run_hn),
         Job("partner_scout", PARTNERS_PRODUCT_ID, "partner_signal", _monthly(1, 5, 14), _run_partners),
         Job("vc_scout", PARTNERS_PRODUCT_ID, "vc_operating_partner", _monthly(1, 5, 15), _run_vc),
         Job("dm_8am_watchdog", THDAGENTIC_CONSULTING_PRODUCT_ID, None, _watchdog_period, _run_watchdog),

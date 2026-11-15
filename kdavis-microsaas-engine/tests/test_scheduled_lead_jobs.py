@@ -187,10 +187,20 @@ def test_partner_scout_is_due_on_the_first(when, expected):
     assert _period("partner_scout").period(when) == expected
 
 
-def test_hn_is_due_on_the_third_not_the_first():
+def test_hn_is_due_the_first_weekday_after_the_thread():
+    """The thread is posted on the month's first weekday; the read is the
+    next weekday from 14:00 UTC, with a catch-up window to the 10th."""
     hn = _period("hn_scout")
+    # Nov 2026: Sun 1st, thread Mon 2nd, read Tue 3rd.
     assert hn.period(datetime(2026, 11, 1, 15, 0, tzinfo=UTC)) is None
+    assert hn.period(datetime(2026, 11, 2, 18, 0, tzinfo=UTC)) is None
+    assert hn.period(datetime(2026, 11, 3, 13, 59, tzinfo=UTC)) is None
     assert hn.period(datetime(2026, 11, 3, 14, 30, tzinfo=UTC)) == "2026-11"
+    # Jan 2027: Fri 1st thread, read Mon 4th (weekend skipped).
+    assert hn.period(datetime(2027, 1, 2, 15, 0, tzinfo=UTC)) is None
+    assert hn.period(datetime(2027, 1, 4, 14, 0, tzinfo=UTC)) == "2027-01"
+    assert hn.period(datetime(2027, 1, 10, 9, 0, tzinfo=UTC)) == "2027-01"
+    assert hn.period(datetime(2027, 1, 11, 15, 0, tzinfo=UTC)) is None
 
 
 def test_pain_rescan_is_sunday_period_through_monday():

@@ -73,6 +73,9 @@ STALE_THREAD_DAYS = 40
 # October posts, almost all as "our platform".
 INFRA_TERMS = re.compile(
     r"\b(?:dev\s?ops|devsecops|SRE|site[\s-]reliability|platform[\s-](?:engineer(?:s|ing)?|team|infrastructure)"
+    # 2026-11-15 (lead-sources brief, "relevant infra roles"): infrastructure
+    # and cloud ROLES, not the bare words -- "cloud" alone is in most posts.
+    r"|infrastructure[\s-]engineer(?:s|ing)?|cloud[\s-](?:engineer(?:s|ing)?|infrastructure|architect)"
     r"|azure|terraform)\b",
     re.IGNORECASE,
 )
@@ -95,6 +98,9 @@ _NOT_COMPANY_HOSTS = (
     "grnh.se", "lnkd.in", "dover.com", "workatastartup.com", "recruitee.com", "bamboohr.com",
     "breezy.hr", "smartrecruiters.com", "teamtailor.com", "jobvite.com", "icims.com",
     "myworkdayjobs.com", "rippling-ats.com", "personio.de", "personio.com", "join.com", "gem.com",
+    # 2026-11-15 live run: an ATS and a job board taken as company domains.
+    "pinpointhq.com", "devitjobs.com", "devitjobs.uk", "welcometothejungle.com", "otta.com",
+    "builtin.com", "hiring.cafe", "indeed.com", "glassdoor.com", "ziprecruiter.com",
 )
 # careers.acme.com / jobs.acme.com -> acme.com
 _CAREERS_SUBDOMAIN = re.compile(r"^(?:careers?|jobs|apply|hiring|work)\.(?=[^.]+\.[^.]+)")
@@ -226,6 +232,107 @@ def domain_from_post(post: HnPost, company: Optional[str]) -> Optional[str]:
     return candidates[0]
 
 
+# ── Post fields and the poster as a candidate buyer (2026-11-15) ──────────
+
+_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+# HN authors obfuscate: "jane [at] acme [dot] com", "jane at acme dot com".
+_OBFUSCATED_EMAIL_RE = re.compile(
+    r"\b([A-Za-z0-9._%+-]+)\s*(?:\[at\]|\(at\)|\{at\}|\sat\s)\s*([A-Za-z0-9-]+)"
+    r"\s*(?:\[dot\]|\(dot\)|\{dot\}|\sdot\s|\.)\s*([A-Za-z]{2,})\b", re.IGNORECASE)
+_REMOTE_RE = re.compile(r"\b(?:remote|wfh|work from home|distributed)\b", re.IGNORECASE)
+_ONSITE_RE = re.compile(r"\b(?:onsite|on-site|in[- ]office|hybrid)\b", re.IGNORECASE)
+# The poster says who they are: "I'm the CTO", "CTO here", "co-founder here".
+_LEADER_ROLE = (r"(?:co-?founder(?:\s*(?:&|and|/)\s*CTO)?|founder|CTO|CEO|chief technology officer"
+                r"|VP(?:\s+of)?\s+Engineering|head\s+of\s+(?:engineering|platform|infrastructure)"
+                r"|director\s+of\s+engineering)")
+_SELF_ROLE_RE = re.compile(
+    rf"\b(?:I['’]?m|I\s+am)\s+(?:the\s+|a\s+|one\s+of\s+the\s+)?({_LEADER_ROLE})\b"
+    rf"|\b({_LEADER_ROLE})\s+here\b", re.IGNORECASE)
+_LOCATION_HINT = re.compile(r"\b(?:remote|onsite|on-site|hybrid|[A-Z][a-z]+,\s*[A-Z]{2}\b|NYC|SF|London|Berlin"
+                            r"|Toronto|Austin|Seattle|Boston|USA|US|EU|UK|Europe)", re.IGNORECASE)
+
+
+ROLE_MAILBOXES = frozenset({
+    "jobs", "job", "careers", "career", "hiring", "hire", "hr", "people", "talent", "recruiting",
+    "recruitment", "recruiter", "apply", "applications", "work", "join", "joinus", "info", "hello", "hi",
+    "team", "contact", "admin", "office", "engineering", "eng", "dev", "tech", "founders", "support",
+})
+
+
+@dataclass
+class PostFields:
+    roles: Optional[str] = None
+    location: Optional[str] = None
+    remote: Optional[bool] = None
+    urls: list[str] = field(default_factory=list)
+    emails: list[str] = field(default_factory=list)
+
+
+def post_fields(post: "HnPost") -> PostFields:
+    """The conventional header ("Company | Role | Location | REMOTE | URL")
+    split into fields, plus every URL and contact email in the post. A field
+    the post does not state stays None -- nothing is inferred."""
+    parts = [p.strip() for p in post.first_line.split("|")]
+    out = PostFields()
+    if len(parts) >= 2:
+        rest = parts[1:]
+        role_parts = [p for p in rest if not _URL_RE.search(p) and not _BARE_DOMAIN_RE.search(p)
+                      and (INFRA_TERMS.search(p) or re.search(
+            r"\b(?:engineer|developer|architect|lead|manager|director|head|scientist)\b", p, re.I))]
+        loc_parts = [p for p in rest if p not in role_parts and not _URL_RE.search(p)
+                     and _LOCATION_HINT.search(p)]
+        out.roles = "; ".join(role_parts)[:200] or None
+        out.location = ", ".join(loc_parts)[:120] or None
+    if _REMOTE_RE.search(post.first_line):
+        out.remote = True
+    elif _ONSITE_RE.search(post.first_line):
+        out.remote = False
+    out.urls = list(dict.fromkeys(_URL_RE.findall(post.text)))[:10]
+    emails = [e.lower() for e in _EMAIL_RE.findall(post.text)]
+    emails += [f"{a}@{b}.{c}".lower() for a, b, c in _OBFUSCATED_EMAIL_RE.findall(post.text)]
+    out.emails = [e for e in dict.fromkeys(emails) if not e.endswith(("@example.com", "@ycombinator.com"))]
+    return out
+
+
+def candidate_buyer(post: "HnPost", domain: Optional[str], fields: PostFields) -> Optional[dict]:
+    """The POSTER as a candidate buyer, only when the post itself says they
+    are a founder / CTO / engineering leader. Never a verified contact: the
+    email (if any) still goes through MX + SMTP verification in the buyer
+    resolver, and a name is recorded only when the post states one.
+
+    Returns a buyer_candidates entry or None."""
+    from agents.marketing.buyer_gate import ALLOW, classify_buyer_title, registrable_domain
+    from agents.marketing.contact_discovery import _contact_from_text
+
+    named = _contact_from_text(post.text, "hn_post")
+    self_role = _SELF_ROLE_RE.search(post.text)
+    title = (named.title if named and named.title else None) or (
+        (self_role.group(1) or self_role.group(2)) if self_role else None)
+    if not title:
+        return None
+    verdict = classify_buyer_title(title)
+    if verdict.verdict != ALLOW:
+        return None
+    # A role mailbox (jobs@, careers@) is not the person; only a personal
+    # address on the company's own domain is worth an SMTP probe.
+    company_emails = [e for e in fields.emails
+                      if domain and registrable_domain(e) == registrable_domain(domain)
+                      and e.split("@", 1)[0] not in ROLE_MAILBOXES]
+    return {
+        "name": named.name if named and named.is_usable else None,
+        "title": title.strip(),
+        "email": company_emails[0] if company_emails else None,
+        "email_grade": None,  # unverified until the resolver probes it
+        "source": "hn_poster",
+        "confidence": "medium" if (named and named.is_usable) else "low",
+        "evidence": (named.evidence if named and named.evidence else
+                     post.text[max(0, self_role.start() - 60): self_role.end() + 60].strip()
+                     if self_role else None),
+        "evidence_url": post.url,
+        "hn_handle": post.by,
+    }
+
+
 HEADER_INTENT = 0.45   # the infra role is in the post's own header line
 BODY_INTENT = 0.20     # an infra term appears only in the body
 ENGAGEMENT_INTENT = 0.10
@@ -271,6 +378,8 @@ class HnStats:
     excluded: dict[str, int] = field(default_factory=dict)
     duplicates: int = 0
     leads_qualified: int = 0
+    candidate_buyers: int = 0
+    posts_with_email: int = 0
 
     def drop(self, reason: str) -> None:
         self.dropped[reason] = self.dropped.get(reason, 0) + 1
@@ -349,6 +458,12 @@ def find_hn_leads(
             if domain:
                 existing_domains.add(domain)
 
+            fields = post_fields(post)
+            candidate = candidate_buyer(post, domain, fields)
+            if candidate:
+                stats.candidate_buyers += 1
+            if fields.emails:
+                stats.posts_with_email += 1
             engagement = sorted({m.group(0).lower() for m in ENGAGEMENT_TERMS.finditer(post.text)})
             stack = extract_stack(post.text)
             fit, intent, score_reasons = score_post(post, domain)
@@ -366,7 +481,11 @@ def find_hn_leads(
                 "contact_status": "pending",
                 "lead_route": "manual_linkedin",
                 "job_posting_url": post.url,
-                "job_posting_title": post.first_line[:200],
+                "job_posting_title": (fields.roles or post.first_line)[:200],
+                "location": (fields.location or ("Remote" if fields.remote else None)),
+                "buyer_candidates": [candidate] if candidate else None,
+                "hn_post_fields": {"remote": fields.remote, "urls": fields.urls,
+                                   "emails": fields.emails, "header": post.first_line[:300]},
                 "job_posting_date": post.posted_at.date().isoformat() if post.posted_at else None,
                 "stack_tags": stack or None,
                 "fit_score": fit,

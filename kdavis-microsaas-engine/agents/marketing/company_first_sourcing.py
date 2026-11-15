@@ -1370,6 +1370,8 @@ MSE_LEADS_WRITABLE_COLUMNS = frozenset({
     "domain_source", "size_proxy_open_roles",
     # migration 066
     "pain_phrases", "pain_evidence", "funded_by", "partner_type", "signal_text",
+    # migration 073 (lead-source expansion)
+    "buyer_candidates", "hn_post_fields",
 })
 
 
