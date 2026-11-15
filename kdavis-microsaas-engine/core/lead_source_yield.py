@@ -55,27 +55,35 @@ def _page(db, table: str, select: str, **gte) -> list[dict]:
         start += 1000
 
 
-def lead_origin(lead: dict, token_origin: dict[str, str]) -> str:
+def _name_key(name: Optional[str]) -> str:
+    from agents.marketing.company_classification import distinctive_company_name
+    return distinctive_company_name(name or "")
+
+
+def lead_origin(lead: dict, token_origin: dict[str, str], name_origin: Optional[dict[str, str]] = None) -> str:
+    """Board from the posting URL; when the URL is the company's own careers
+    page (Greenhouse absolute_url often is), the board whose display name is
+    the lead's company."""
     from scrapers.ats_boards import board_ref_from_url
 
     if lead.get("source") == "hn_thread":
         return "hn"
     ref = board_ref_from_url(lead.get("job_posting_url") or "")
-    if ref is None:
-        return "ats_cache"
-    return ORIGIN_BY_DISCOVERED_FROM.get(token_origin.get(ref.cache_key) or "", "ats_cache")
+    origin = token_origin.get(ref.cache_key) if ref else (name_origin or {}).get(_name_key(lead.get("company")))
+    return ORIGIN_BY_DISCOVERED_FROM.get(origin or "", "ats_cache")
 
 
 def compute_yield(leads: list[dict], tokens: list[dict]) -> dict:
     token_origin = {f"{t['provider']}:{t['board_token']}": t.get("discovered_from") for t in tokens
                     if t.get("provider") and t.get("board_token")}
+    name_origin = {_name_key(t.get("company")): t.get("discovered_from") for t in tokens if t.get("company")}
     by: dict[str, dict] = {}
     resolver: dict[str, int] = {}
     total = {"qualified": 0, "named_buyer": 0, "verified_email": 0}
     for lead in leads:
         if lead.get("status") in PURGED:
             continue
-        src = lead_origin(lead, token_origin)
+        src = lead_origin(lead, token_origin, name_origin)
         row = by.setdefault(src, {"qualified": 0, "named_buyer": 0, "verified_email": 0})
         named = bool(lead.get("first_name") and lead.get("title"))
         verified = named and lead.get("email_grade") == "valid"
@@ -104,10 +112,10 @@ def source_yield(db, *, days: int = 7, now: Optional[datetime] = None) -> dict:
     """Leads CREATED in the window (company found this week), CD + consulting."""
     now = now or datetime.now(timezone.utc)
     since = (now - timedelta(days=days)).isoformat()
-    leads = [r for r in _page(db, "mse_leads", "product_id,source,status,job_posting_url,first_name,title,"
+    leads = [r for r in _page(db, "mse_leads", "product_id,source,status,job_posting_url,company,first_name,title,"
                                                "email_grade,buyer_suggestion", created_at=since)
              if r.get("product_id") in SOURCE_PRODUCT_IDS]
-    tokens = _page(db, "mse_ats_board_tokens", "provider,board_token,discovered_from")
+    tokens = _page(db, "mse_ats_board_tokens", "provider,board_token,company,discovered_from")
     out = compute_yield(leads, tokens)
     out["window_days"] = days
     out["since"] = since

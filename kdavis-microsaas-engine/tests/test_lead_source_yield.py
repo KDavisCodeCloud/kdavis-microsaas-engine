@@ -9,7 +9,15 @@ TOKENS = [
     {"provider": "greenhouse", "board_token": "new", "discovered_from": "brave_slug_discovery"},
     {"provider": "lever", "board_token": "fd", "discovered_from": "form_d"},
     {"provider": "ashby", "board_token": "wf", "discovered_from": "wellfound_signal"},
+    {"provider": "greenhouse", "board_token": "nw", "company": "Northwind Labs", "discovered_from": "brave_slug_discovery"},
 ]
+
+
+def test_careers_page_url_falls_back_to_the_boards_company_name():
+    lead = {"source": "cloud_decoded_job_signal", "status": "company_qualified", "company": "Northwind Labs",
+            "job_posting_url": "https://northwindlabs.io/careers/1"}
+    assert compute_yield([lead], TOKENS)["by_source"] == {"slug_discovery": {"qualified": 1, "named_buyer": 0,
+                                                                             "verified_email": 0}}
 
 
 def L(url=None, source="cloud_decoded_job_signal", status="company_qualified", named=False, grade=None, via=None):
